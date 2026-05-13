@@ -61,6 +61,7 @@ export default function App() {
   const [customKeyword, setCustomKeyword] = useState("");
   const [news, setNews] = useState<NewsItem[]>([]);
   const [loading, setLoading] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState("");
   const [speed, setSpeed] = useState(1.2);
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [voiceName, setVoiceName] = useState("");
@@ -86,6 +87,7 @@ export default function App() {
     const loadVoices = () => {
       const allVoices = window.speechSynthesis.getVoices();
       setVoices(allVoices);
+
       if (!voiceName && allVoices.length > 0) {
         const zhVoice =
           allVoices.find((v) => v.lang.includes("zh")) || allVoices[0];
@@ -136,6 +138,13 @@ export default function App() {
         .slice(0, 25);
 
       setNews(parsedNews);
+
+      setLastUpdated(
+        new Date().toLocaleTimeString("zh-TW", {
+          hour: "2-digit",
+          minute: "2-digit",
+        })
+      );
     } catch (error) {
       alert("新聞讀取失敗，請稍後再試");
       console.error(error);
@@ -257,6 +266,7 @@ ${selectedNews
               已追蹤 {selectedTopics.length} 個主題，已選 {selectedNews.length} 則新聞。
             </p>
           </div>
+
           <button onClick={speakNews} style={styles.playButton}>
             ▶ 播放
           </button>
@@ -277,15 +287,30 @@ ${selectedNews
             </div>
 
             <div style={styles.topicHeader}>
-              <span>我的主題</span>
-              <button onClick={updateMyNews} style={styles.updateButton}>
-                更新我的新聞
+              <div>
+                <div>我的主題</div>
+                <div style={styles.lastUpdated}>
+                  {lastUpdated ? `最後更新：${lastUpdated}` : "尚未更新"}
+                </div>
+              </div>
+
+              <button
+                onClick={updateMyNews}
+                disabled={loading}
+                style={{
+                  ...styles.updateButton,
+                  opacity: loading ? 0.7 : 1,
+                  cursor: loading ? "not-allowed" : "pointer",
+                }}
+              >
+                {loading ? "更新中..." : "🔄 重新整理"}
               </button>
             </div>
 
             <div style={styles.topicGrid}>
               {topics.map((topic) => {
                 const active = selectedTopics.includes(topic.label);
+
                 return (
                   <button
                     key={topic.label}
@@ -627,13 +652,18 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: "center",
     fontWeight: 900,
   },
+  lastUpdated: {
+    marginTop: "4px",
+    color: "#94A3B8",
+    fontSize: "12px",
+    fontWeight: 500,
+  },
   updateButton: {
     background: "rgba(255,255,255,.12)",
     color: "white",
     border: "1px solid rgba(255,255,255,.12)",
     borderRadius: "999px",
     padding: "8px 12px",
-    cursor: "pointer",
     fontWeight: 800,
   },
   topicGrid: {
