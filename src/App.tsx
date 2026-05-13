@@ -79,15 +79,16 @@ export default function App() {
   );
 
   const buildQuery = () => {
-    const topicQuery =
-      selectedTopicObjects.length > 0
-        ? selectedTopicObjects.map((t) => `(${t.query})`).join(" OR ")
-        : "NBA OR MLB OR BTC OR 台股 OR 科技";
+  if (customKeyword.trim()) {
+    return customKeyword.trim();
+  }
 
-    return customKeyword.trim()
-      ? `${topicQuery} OR ${customKeyword.trim()}`
-      : topicQuery;
-  };
+  if (selectedTopicObjects.length > 0) {
+    return selectedTopicObjects.map((t) => `(${t.query})`).join(" OR ");
+  }
+
+  return "今日熱門新聞";
+};
 
   useEffect(() => {
     const saved = localStorage.getItem("favoriteLinks");
