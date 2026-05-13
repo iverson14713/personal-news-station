@@ -12,6 +12,14 @@ type NewsItem = {
   favorite: boolean;
 };
 
+type VideoItem = {
+  id: string;
+  title: string;
+  link: string;
+  channel: string;
+  thumbnail: string;
+};
+
 type Topic = {
   label: string;
   query: string;
@@ -21,26 +29,13 @@ type Topic = {
 const topics: Topic[] = [
   { label: "NBA", query: "NBA", icon: "🏀" },
   { label: "MLB", query: "MLB", icon: "⚾" },
-  { label: "Curry", query: "Stephen Curry OR Curry 勇士", icon: "🔥" },
-  { label: "大谷翔平", query: "大谷翔平 OR Shohei Ohtani", icon: "⚾" },
-  { label: "季後賽", query: "NBA 季後賽 OR MLB 季後賽", icon: "🏆" },
-  { label: "幣圈", query: "加密貨幣 OR 幣圈", icon: "₿" },
-  { label: "BTC", query: "BTC OR 比特幣", icon: "₿" },
-  { label: "ETH", query: "ETH OR 以太坊", icon: "💎" },
-  { label: "台股", query: "台股 OR 台積電", icon: "📈" },
-  { label: "ETF", query: "ETF OR 0050 OR 高股息", icon: "💰" },
-  { label: "美股", query: "美股 OR Nvidia OR Tesla OR Apple", icon: "🇺🇸" },
-  { label: "財經", query: "Fed OR 利率 OR CPI OR 降息", icon: "🏦" },
-  { label: "國際", query: "國際局勢 OR 全球新聞", icon: "🌍" },
-  { label: "戰爭", query: "俄烏戰爭 OR 烏克蘭戰爭 OR 以色列 OR 中東戰爭", icon: "⚠️" },
-  { label: "台灣熱門", query: "台灣 熱門新聞 OR 台灣 即時", icon: "🇹🇼" },
-  { label: "影視", query: "影視 OR 娛樂新聞", icon: "📺" },
-  { label: "電影", query: "電影 OR 票房 OR Netflix", icon: "🎬" },
-  { label: "動漫", query: "動漫 OR 動畫 OR 漫畫", icon: "🌀" },
-  { label: "音樂", query: "音樂 OR 演唱會 OR 新歌", icon: "🎵" },
-  { label: "潮流", query: "潮流 OR 球鞋 OR 穿搭", icon: "👟" },
-  { label: "科技", query: "科技 OR AI OR iPhone OR 半導體", icon: "🤖" },
-  { label: "遊戲", query: "遊戲 OR Steam OR Switch OR PS5 OR 電競", icon: "🎮" },
+  { label: "Curry", query: "Stephen Curry", icon: "🔥" },
+  { label: "大谷翔平", query: "Shohei Ohtani", icon: "⚾" },
+  { label: "季後賽", query: "NBA playoffs", icon: "🏆" },
+  { label: "BTC", query: "Bitcoin", icon: "₿" },
+  { label: "ETH", query: "Ethereum", icon: "💎" },
+  { label: "戰爭", query: "Ukraine war", icon: "⚠️" },
+  { label: "科技", query: "AI technology", icon: "🤖" },
 ];
 
 function cleanTitle(title: string) {
@@ -51,26 +46,28 @@ function normalizeKey(title: string) {
   return title.replace(/[，。！？、\s\-｜|:：]/g, "").slice(0, 28);
 }
 
-function youtubeUrl(keyword: string) {
-  return `https://www.youtube.com/results?search_query=${encodeURIComponent(keyword)}`;
-}
-
 export default function App() {
   const [tab, setTab] = useState<Tab>("home");
+
   const [selectedTopics, setSelectedTopics] = useState<string[]>([
     "NBA",
-    "MLB",
     "大谷翔平",
-    "Curry",
     "BTC",
   ]);
+
   const [customKeyword, setCustomKeyword] = useState("");
+
   const [news, setNews] = useState<NewsItem[]>([]);
+  const [videos, setVideos] = useState<VideoItem[]>([]);
+
   const [favoriteLinks, setFavoriteLinks] = useState<string[]>([]);
+
   const [loading, setLoading] = useState(false);
-  const [lastUpdated, setLastUpdated] = useState("");
+  const [videoLoading, setVideoLoading] = useState(false);
+
   const [speed, setSpeed] = useState(1.2);
   const [isSpeaking, setIsSpeaking] = useState(false);
+
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [voiceName, setVoiceName] = useState("");
 
@@ -82,28 +79,13 @@ export default function App() {
     [selectedTopics]
   );
 
-  const videoItems = useMemo(() => {
-    const base =
-      selectedTopicObjects.length > 0
-        ? selectedTopicObjects.map((t) => t.label)
-        : ["今日熱門新聞"];
-
-    const keywords = customKeyword.trim()
-      ? [customKeyword.trim(), ...base]
-      : base;
-
-    return keywords.slice(0, 10).map((keyword) => ({
-      keyword,
-      title: `${keyword} 最新影音 / 精華`,
-      url: youtubeUrl(`${keyword} 最新 新聞 精華`),
-    }));
-  }, [selectedTopicObjects, customKeyword]);
-
   const buildQuery = () => {
-    if (customKeyword.trim()) return customKeyword.trim();
+    if (customKeyword.trim()) {
+      return customKeyword.trim();
+    }
 
     if (selectedTopicObjects.length > 0) {
-      return selectedTopicObjects.map((t) => `(${t.query})`).join(" OR ");
+      return selectedTopicObjects.map((t) => t.query).join(" OR ");
     }
 
     return "今日熱門新聞";
@@ -111,16 +93,24 @@ export default function App() {
 
   useEffect(() => {
     const saved = localStorage.getItem("favoriteLinks");
-    if (saved) setFavoriteLinks(JSON.parse(saved));
+
+    if (saved) {
+      setFavoriteLinks(JSON.parse(saved));
+    }
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("favoriteLinks", JSON.stringify(favoriteLinks));
+    localStorage.setItem(
+      "favoriteLinks",
+      JSON.stringify(favoriteLinks)
+    );
   }, [favoriteLinks]);
 
   useEffect(() => {
     const loadVoices = () => {
-      const allVoices = window.speechSynthesis.getVoices();
+      const allVoices =
+        window.speechSynthesis.getVoices();
+
       setVoices(allVoices);
 
       if (!voiceName && allVoices.length > 0) {
@@ -128,9 +118,12 @@ export default function App() {
           allVoices.find(
             (v) =>
               v.lang.includes("zh") &&
-              (v.name.includes("語舒") || v.name.includes("黎澈"))
+              (v.name.includes("語舒") ||
+                v.name.includes("黎澈"))
           ) ||
-          allVoices.find((v) => v.lang.includes("zh")) ||
+          allVoices.find((v) =>
+            v.lang.includes("zh")
+          ) ||
           allVoices[0];
 
         setVoiceName(preferredVoice.name);
@@ -138,7 +131,10 @@ export default function App() {
     };
 
     loadVoices();
-    window.speechSynthesis.onvoiceschanged = loadVoices;
+
+    window.speechSynthesis.onvoiceschanged =
+      loadVoices;
+
     setTimeout(loadVoices, 1000);
   }, []);
 
@@ -146,21 +142,40 @@ export default function App() {
     setLoading(true);
 
     try {
-      const res = await fetch(`/api/news?q=${encodeURIComponent(query)}`);
+      const res = await fetch(
+        `/api/news?q=${encodeURIComponent(query)}`
+      );
+
       const xmlText = await res.text();
 
       const parser = new DOMParser();
-      const xml = parser.parseFromString(xmlText, "text/xml");
-      const items = Array.from(xml.querySelectorAll("item")).slice(0, 70);
+
+      const xml = parser.parseFromString(
+        xmlText,
+        "text/xml"
+      );
+
+      const items = Array.from(
+        xml.querySelectorAll("item")
+      ).slice(0, 40);
+
       const seen = new Set<string>();
 
       const parsedNews: NewsItem[] = items
         .map((item, index) => {
-          const rawTitle = item.querySelector("title")?.textContent || "無標題";
+          const rawTitle =
+            item.querySelector("title")
+              ?.textContent || "無標題";
+
           const title = cleanTitle(rawTitle);
-          const link = item.querySelector("link")?.textContent || "";
+
+          const link =
+            item.querySelector("link")
+              ?.textContent || "";
+
           const source =
-            item.querySelector("source")?.textContent ||
+            item.querySelector("source")
+              ?.textContent ||
             rawTitle.split(" - ").pop() ||
             "Google News";
 
@@ -169,92 +184,171 @@ export default function App() {
             title,
             link,
             source,
-            pubDate: item.querySelector("pubDate")?.textContent || "",
+            pubDate:
+              item.querySelector("pubDate")
+                ?.textContent || "",
             selected: index < 5,
-            favorite: favoriteLinks.includes(link),
+            favorite:
+              favoriteLinks.includes(link),
           };
         })
         .filter((item) => {
           const key = normalizeKey(item.title);
-          if (!key || seen.has(key)) return false;
+
+          if (!key || seen.has(key))
+            return false;
+
           seen.add(key);
+
           return true;
-        })
-        .slice(0, 25);
+        });
 
       setNews(parsedNews);
-      setLastUpdated(
-        new Date().toLocaleTimeString("zh-TW", {
-          hour: "2-digit",
-          minute: "2-digit",
-        })
-      );
     } catch (error) {
-      alert("新聞讀取失敗，請稍後再試");
       console.error(error);
     }
 
     setLoading(false);
   };
 
+  const fetchVideos = async (query: string) => {
+    setVideoLoading(true);
+
+    try {
+      const res = await fetch(
+        `/api/videos?q=${encodeURIComponent(query)}`
+      );
+
+      const xmlText = await res.text();
+
+      const parser = new DOMParser();
+
+      const xml = parser.parseFromString(
+        xmlText,
+        "text/xml"
+      );
+
+      const entries = Array.from(
+        xml.querySelectorAll("entry")
+      ).slice(0, 12);
+
+      const parsedVideos: VideoItem[] =
+        entries.map((entry, index) => {
+          const title =
+            entry.querySelector("title")
+              ?.textContent || "無標題";
+
+          const videoId =
+            entry
+              .querySelector("video\\:videoId")
+              ?.textContent || "";
+
+          const channel =
+            entry.querySelector("author name")
+              ?.textContent || "YouTube";
+
+          return {
+            id: `${videoId}-${index}`,
+            title,
+            link: `https://www.youtube.com/watch?v=${videoId}`,
+            channel,
+            thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+          };
+        });
+
+      setVideos(parsedVideos);
+    } catch (error) {
+      console.error(error);
+    }
+
+    setVideoLoading(false);
+  };
+
   useEffect(() => {
-    fetchNews(buildQuery());
+    const q = buildQuery();
+
+    fetchNews(q);
+    fetchVideos(q);
   }, []);
 
-  const updateMyNews = () => {
-    setTab("home");
-    fetchNews(buildQuery());
+  const updateAll = () => {
+    const q = buildQuery();
+
+    fetchNews(q);
+    fetchVideos(q);
   };
 
   const toggleTopic = (label: string) => {
     setSelectedTopics((prev) =>
-      prev.includes(label) ? prev.filter((t) => t !== label) : [...prev, label]
+      prev.includes(label)
+        ? prev.filter((t) => t !== label)
+        : [...prev, label]
     );
   };
 
   const toggleNews = (id: string) => {
     setNews((prev) =>
       prev.map((item) =>
-        item.id === id ? { ...item, selected: !item.selected } : item
+        item.id === id
+          ? {
+              ...item,
+              selected: !item.selected,
+            }
+          : item
       )
     );
   };
 
-  const toggleFavorite = (item: NewsItem) => {
+  const toggleFavorite = (
+    item: NewsItem
+  ) => {
     setNews((prev) =>
-      prev.map((n) => (n.id === item.id ? { ...n, favorite: !n.favorite } : n))
+      prev.map((n) =>
+        n.id === item.id
+          ? {
+              ...n,
+              favorite: !n.favorite,
+            }
+          : n
+      )
     );
 
     setFavoriteLinks((prev) =>
       prev.includes(item.link)
-        ? prev.filter((link) => link !== item.link)
+        ? prev.filter(
+            (link) => link !== item.link
+          )
         : [...prev, item.link]
     );
   };
 
-  const selectAll = () => {
-    setNews((prev) => prev.map((item) => ({ ...item, selected: true })));
-  };
-
-  const clearAll = () => {
-    setNews((prev) => prev.map((item) => ({ ...item, selected: false })));
-  };
-
   const createSpeech = (rate: number) => {
     const text = selectedNews
-      .map((n, i) => `第 ${i + 1} 則新聞，${n.title}`)
+      .map(
+        (n, i) =>
+          `第 ${i + 1} 則新聞，${n.title}`
+      )
       .join("。");
 
-    const speech = new SpeechSynthesisUtterance(text);
+    const speech =
+      new SpeechSynthesisUtterance(text);
+
     speech.lang = "zh-TW";
     speech.rate = rate;
 
-    const selectedVoice = voices.find((v) => v.name === voiceName);
-    if (selectedVoice) speech.voice = selectedVoice;
+    const selectedVoice = voices.find(
+      (v) => v.name === voiceName
+    );
 
-    speech.onstart = () => setIsSpeaking(true);
-    speech.onend = () => setIsSpeaking(false);
-    speech.onerror = () => setIsSpeaking(false);
+    if (selectedVoice) {
+      speech.voice = selectedVoice;
+    }
+
+    speech.onstart = () =>
+      setIsSpeaking(true);
+
+    speech.onend = () =>
+      setIsSpeaking(false);
 
     return speech;
   };
@@ -263,11 +357,13 @@ export default function App() {
     window.speechSynthesis.cancel();
 
     if (selectedNews.length === 0) {
-      alert("請先選擇要播放的新聞");
+      alert("請先選擇新聞");
       return;
     }
 
-    window.speechSynthesis.speak(createSpeech(speed));
+    window.speechSynthesis.speak(
+      createSpeech(speed)
+    );
   };
 
   const stopSpeak = () => {
@@ -275,235 +371,360 @@ export default function App() {
     setIsSpeaking(false);
   };
 
-  const changeSpeed = (newSpeed: number) => {
-    setSpeed(newSpeed);
-
-    if (isSpeaking && selectedNews.length > 0) {
-      window.speechSynthesis.cancel();
-      setTimeout(() => {
-        window.speechSynthesis.speak(createSpeech(newSpeed));
-      }, 120);
-    }
-  };
-
   const copyGptPrompt = async () => {
-    if (selectedNews.length === 0) {
-      alert("請先選擇新聞");
-      return;
-    }
-
     const prompt = `
-請幫我把以下新聞整理成「AI個人新聞台」精華版：
+請幫我整理以下新聞：
 
-要求：
-1. 用繁體中文
-2. 先列出今日最重要的 5 個重點
-3. 每則用 2～3 句話解釋
-4. 幫我判斷重要程度：🔥重大 / ⚠️注意 / ℹ️一般
-5. 最後給我一段適合語音朗讀的 1 分鐘新聞稿
-6. 避免誇大投資建議，只做資訊整理與風險提醒
-
-新聞列表：
 ${selectedNews
-  .map(
-    (item, index) =>
-      `${index + 1}. ${item.title}\n來源：${item.source}\n連結：${item.link}`
-  )
-  .join("\n\n")}
+  .map((n) => `- ${n.title}`)
+  .join("\n")}
+
+請：
+1. 用繁體中文
+2. 幫我整理重點
+3. 幫我分析重要性
+4. 最後給我 1 分鐘新聞稿
 `;
 
-    await navigator.clipboard.writeText(prompt);
-    alert("已複製 GPT 精華整理 Prompt");
-  };
+    await navigator.clipboard.writeText(
+      prompt
+    );
 
-  const pageTitle =
-    tab === "home"
-      ? "我的新聞首頁"
-      : tab === "player"
-      ? "播放控制台"
-      : tab === "video"
-      ? "影音新聞"
-      : "收藏新聞";
+    alert("已複製 GPT Prompt");
+  };
 
   return (
     <div style={styles.page}>
-      <div style={styles.phone}>
-        <header style={styles.header}>
+      <div style={styles.container}>
+        <div style={styles.header}>
           <div>
-            <div style={styles.kicker}>PERSONAL NEWS RADIO</div>
-            <h1 style={styles.title}>AI個人新聞台</h1>
-            <p style={styles.subtitle}>只聽你真正關心的重點</p>
-          </div>
-          <div style={styles.logo}>🎙️</div>
-        </header>
-
-        <section style={styles.heroCard}>
-          <div>
-            <div style={styles.heroBadge}>
-              {isSpeaking ? "播放中" : "今日新聞雷達"}
+            <div style={styles.smallTitle}>
+              PERSONAL NEWS RADIO
             </div>
-            <h2 style={styles.heroTitle}>{pageTitle}</h2>
-            <p style={styles.heroText}>
-              追蹤 {selectedTopics.length} 主題，已選 {selectedNews.length} 則，收藏{" "}
-              {favoriteNews.length} 則。
-            </p>
+
+            <div style={styles.mainTitle}>
+              AI個人新聞台
+            </div>
+
+            <div style={styles.subTitle}>
+              只聽你真正關心的重點
+            </div>
           </div>
 
-          <button onClick={speakNews} style={styles.playButton}>
-            ▶ 播放
+          <div style={styles.logo}>🎙️</div>
+        </div>
+
+        <div style={styles.hero}>
+          <div>
+            <div style={styles.badge}>
+              今日新聞雷達
+            </div>
+
+            <div style={styles.heroTitle}>
+              {tab === "home" &&
+                "我的新聞首頁"}
+
+              {tab === "player" &&
+                "播放控制台"}
+
+              {tab === "video" &&
+                "影音快報"}
+
+              {tab === "favorites" &&
+                "收藏新聞"}
+            </div>
+
+            <div style={styles.heroText}>
+              已追蹤{" "}
+              {selectedTopics.length} 個主題
+            </div>
+          </div>
+
+          <button
+            style={styles.playButton}
+            onClick={speakNews}
+          >
+            ▶
           </button>
-        </section>
+        </div>
 
         {tab === "home" && (
           <>
             <div style={styles.searchBox}>
               <input
-                value={customKeyword}
-                onChange={(e) => setCustomKeyword(e.target.value)}
-                placeholder="自訂：降息、台積電、Solana、川普..."
                 style={styles.searchInput}
+                placeholder="輸入關鍵字..."
+                value={customKeyword}
+                onChange={(e) =>
+                  setCustomKeyword(
+                    e.target.value
+                  )
+                }
               />
-              <button onClick={updateMyNews} style={styles.searchButton}>
-                更新
-              </button>
-            </div>
-
-            <div style={styles.topicHeader}>
-              <div>
-                <div>我的主題</div>
-                <div style={styles.lastUpdated}>
-                  {lastUpdated ? `最後更新：${lastUpdated}` : "尚未更新"}
-                </div>
-              </div>
 
               <button
-                onClick={updateMyNews}
-                disabled={loading}
-                style={{
-                  ...styles.updateButton,
-                  opacity: loading ? 0.7 : 1,
-                  cursor: loading ? "not-allowed" : "pointer",
-                }}
+                style={styles.updateBtn}
+                onClick={updateAll}
               >
-                {loading ? "更新中..." : "🔄 重新整理"}
+                更新
               </button>
             </div>
 
             <div style={styles.topicGrid}>
               {topics.map((topic) => {
-                const active = selectedTopics.includes(topic.label);
+                const active =
+                  selectedTopics.includes(
+                    topic.label
+                  );
+
                 return (
                   <button
                     key={topic.label}
-                    onClick={() => toggleTopic(topic.label)}
+                    onClick={() =>
+                      toggleTopic(
+                        topic.label
+                      )
+                    }
                     style={{
-                      ...styles.topicChip,
-                      ...(active ? styles.topicChipActive : {}),
+                      ...styles.topic,
+                      ...(active
+                        ? styles.topicActive
+                        : {}),
                     }}
                   >
-                    <span>{topic.icon}</span> {topic.label}
+                    {topic.icon}{" "}
+                    {topic.label}
                   </button>
                 );
               })}
             </div>
 
-            <ActionButtons
-              selectAll={selectAll}
-              clearAll={clearAll}
-              copyGptPrompt={copyGptPrompt}
-            />
+            <div style={styles.actionRow}>
+              <button
+                style={styles.actionBtn}
+                onClick={
+                  copyGptPrompt
+                }
+              >
+                GPT 精華
+              </button>
+            </div>
 
-            <NewsList
-              title="我的今日新聞"
-              news={news}
-              loading={loading}
-              toggleNews={toggleNews}
-              toggleFavorite={toggleFavorite}
-            />
+            <div style={styles.sectionTitle}>
+              今日新聞
+            </div>
+
+            {loading && (
+              <div style={styles.loading}>
+                讀取中...
+              </div>
+            )}
+
+            <div style={styles.newsList}>
+              {news.map((item) => (
+                <div
+                  key={item.id}
+                  style={{
+                    ...styles.newsCard,
+                    ...(item.selected
+                      ? styles.newsCardActive
+                      : {}),
+                  }}
+                  onClick={() =>
+                    toggleNews(item.id)
+                  }
+                >
+                  <div
+                    style={
+                      styles.newsTitle
+                    }
+                  >
+                    {item.selected
+                      ? "✅ "
+                      : ""}
+                    {item.title}
+                  </div>
+
+                  <div
+                    style={
+                      styles.newsMeta
+                    }
+                  >
+                    <span>
+                      {item.source}
+                    </span>
+
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: 12,
+                      }}
+                    >
+                      <button
+                        style={
+                          styles.favoriteBtn
+                        }
+                        onClick={(
+                          e
+                        ) => {
+                          e.stopPropagation();
+
+                          toggleFavorite(
+                            item
+                          );
+                        }}
+                      >
+                        {item.favorite
+                          ? "⭐"
+                          : "☆"}
+                      </button>
+
+                      <a
+                        href={item.link}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={
+                          styles.link
+                        }
+                        onClick={(
+                          e
+                        ) =>
+                          e.stopPropagation()
+                        }
+                      >
+                        原文
+                      </a>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
           </>
         )}
 
         {tab === "player" && (
           <>
-            <section style={styles.controlPanel}>
-              <div style={styles.controlTitle}>
-                播放設定 {isSpeaking ? "｜播放中" : ""}
+            <div style={styles.playerCard}>
+              <div style={styles.sectionTitle}>
+                播放設定
               </div>
 
               <select
-                value={voiceName}
-                onChange={(e) => setVoiceName(e.target.value)}
                 style={styles.select}
+                value={voiceName}
+                onChange={(e) =>
+                  setVoiceName(
+                    e.target.value
+                  )
+                }
               >
                 {voices.map((voice) => (
-                  <option key={voice.name} value={voice.name}>
-                    {voice.name}（{voice.lang}）
+                  <option
+                    key={voice.name}
+                    value={voice.name}
+                  >
+                    {voice.name}
                   </option>
                 ))}
               </select>
 
               <div style={styles.speedRow}>
-                <span>速度 {speed.toFixed(1)}x</span>
+                <span>
+                  速度{" "}
+                  {speed.toFixed(1)}x
+                </span>
+
                 <input
                   type="range"
                   min="0.8"
                   max="2"
                   step="0.1"
                   value={speed}
-                  onChange={(e) => changeSpeed(Number(e.target.value))}
-                  style={{ width: "55%" }}
+                  onChange={(e) =>
+                    setSpeed(
+                      Number(
+                        e.target.value
+                      )
+                    )
+                  }
                 />
               </div>
 
               <div style={styles.actionRow}>
-                <button onClick={speakNews} style={styles.playSmallButton}>
-                  播放選取
+                <button
+                  style={
+                    styles.playSmallBtn
+                  }
+                  onClick={speakNews}
+                >
+                  播放
                 </button>
-                <button onClick={stopSpeak} style={styles.stopButton}>
+
+                <button
+                  style={
+                    styles.stopBtn
+                  }
+                  onClick={stopSpeak}
+                >
                   停止
                 </button>
-                <button onClick={copyGptPrompt} style={styles.gptButton}>
-                  GPT 精華
-                </button>
               </div>
-            </section>
-
-            <NewsList
-              title="即將播放"
-              news={selectedNews}
-              loading={false}
-              toggleNews={toggleNews}
-              toggleFavorite={toggleFavorite}
-              emptyText="目前沒有選取新聞，請回首頁勾選。"
-            />
+            </div>
           </>
         )}
 
         {tab === "video" && (
           <>
-            <div style={styles.sectionHeader}>
-              <h2 style={styles.sectionTitle}>影音新聞入口</h2>
-              <span style={styles.countText}>{videoItems.length} 個</span>
+            <div style={styles.sectionTitle}>
+              最新影音快報
             </div>
 
-            <div style={styles.videoHint}>
-              先用 YouTube 搜尋入口，不接 API、不花錢。正式版之後可改成內嵌影片與 AI 影片重點整理。
-            </div>
+            {videoLoading && (
+              <div style={styles.loading}>
+                載入影音中...
+              </div>
+            )}
 
-            <div style={styles.newsList}>
-              {videoItems.map((item, index) => (
+            <div style={styles.videoList}>
+              {videos.map((video) => (
                 <a
-                  key={item.keyword}
-                  href={item.url}
+                  key={video.id}
+                  href={video.link}
                   target="_blank"
                   rel="noreferrer"
-                  style={styles.videoCard}
+                  style={
+                    styles.videoCard
+                  }
                 >
-                  <div style={styles.videoIcon}>▶</div>
-                  <div style={{ flex: 1 }}>
-                    <div style={styles.newsTitle}>{item.title}</div>
-                    <div style={styles.newsMeta}>
-                      YouTube 搜尋｜{String(index + 1).padStart(2, "0")}
+                  <img
+                    src={
+                      video.thumbnail
+                    }
+                    alt={video.title}
+                    style={
+                      styles.thumbnail
+                    }
+                  />
+
+                  <div
+                    style={{
+                      flex: 1,
+                    }}
+                  >
+                    <div
+                      style={
+                        styles.videoTitle
+                      }
+                    >
+                      {video.title}
+                    </div>
+
+                    <div
+                      style={
+                        styles.videoMeta
+                      }
+                    >
+                      {video.channel}
                     </div>
                   </div>
                 </a>
@@ -514,479 +735,438 @@ ${selectedNews
 
         {tab === "favorites" && (
           <>
-            <ActionButtons
-              selectAll={selectAll}
-              clearAll={clearAll}
-              copyGptPrompt={copyGptPrompt}
-            />
+            <div style={styles.sectionTitle}>
+              收藏新聞
+            </div>
 
-            <NewsList
-              title="收藏新聞"
-              news={favoriteNews}
-              loading={false}
-              toggleNews={toggleNews}
-              toggleFavorite={toggleFavorite}
-              emptyText="目前沒有收藏新聞。"
-            />
+            <div style={styles.newsList}>
+              {favoriteNews.map(
+                (item) => (
+                  <div
+                    key={item.id}
+                    style={
+                      styles.newsCard
+                    }
+                  >
+                    <div
+                      style={
+                        styles.newsTitle
+                      }
+                    >
+                      ⭐{" "}
+                      {item.title}
+                    </div>
+
+                    <div
+                      style={
+                        styles.newsMeta
+                      }
+                    >
+                      {item.source}
+                    </div>
+                  </div>
+                )
+              )}
+            </div>
           </>
         )}
 
-        <nav style={styles.bottomNav}>
+        <div style={styles.bottomNav}>
           <button
-            onClick={() => setTab("home")}
-            style={tab === "home" ? styles.navItemActive : styles.navItem}
+            style={
+              tab === "home"
+                ? styles.navActive
+                : styles.nav
+            }
+            onClick={() =>
+              setTab("home")
+            }
           >
-            🏠<span>首頁</span>
+            🏠
+            <span>首頁</span>
           </button>
 
           <button
-            onClick={() => setTab("player")}
-            style={tab === "player" ? styles.navItemActive : styles.navItem}
+            style={
+              tab === "player"
+                ? styles.navActive
+                : styles.nav
+            }
+            onClick={() =>
+              setTab("player")
+            }
           >
-            🎧<span>播放</span>
+            🎧
+            <span>播放</span>
           </button>
 
           <button
-            onClick={() => setTab("video")}
-            style={tab === "video" ? styles.navItemActive : styles.navItem}
+            style={
+              tab === "video"
+                ? styles.navActive
+                : styles.nav
+            }
+            onClick={() =>
+              setTab("video")
+            }
           >
-            📺<span>影音</span>
+            📺
+            <span>影音</span>
           </button>
 
           <button
-            onClick={() => setTab("favorites")}
-            style={tab === "favorites" ? styles.navItemActive : styles.navItem}
+            style={
+              tab === "favorites"
+                ? styles.navActive
+                : styles.nav
+            }
+            onClick={() =>
+              setTab("favorites")
+            }
           >
-            ⭐<span>收藏</span>
+            ⭐
+            <span>收藏</span>
           </button>
-        </nav>
+        </div>
       </div>
     </div>
   );
 }
 
-function ActionButtons({
-  selectAll,
-  clearAll,
-  copyGptPrompt,
-}: {
-  selectAll: () => void;
-  clearAll: () => void;
-  copyGptPrompt: () => void;
-}) {
-  return (
-    <div style={styles.actionRow}>
-      <button onClick={selectAll} style={styles.miniButton}>
-        全選
-      </button>
-      <button onClick={clearAll} style={styles.miniButton}>
-        取消
-      </button>
-      <button onClick={copyGptPrompt} style={styles.gptButton}>
-        GPT 精華
-      </button>
-    </div>
-  );
-}
-
-function NewsList({
-  title,
-  news,
-  loading,
-  toggleNews,
-  toggleFavorite,
-  emptyText = "沒有新聞",
-}: {
-  title: string;
-  news: NewsItem[];
-  loading: boolean;
-  toggleNews: (id: string) => void;
-  toggleFavorite: (item: NewsItem) => void;
-  emptyText?: string;
-}) {
-  return (
-    <>
-      <div style={styles.sectionHeader}>
-        <h2 style={styles.sectionTitle}>{title}</h2>
-        <span style={styles.countText}>{news.length} 則</span>
-      </div>
-
-      {loading && <div style={styles.loading}>新聞讀取中...</div>}
-
-      {!loading && news.length === 0 && (
-        <div style={styles.loading}>{emptyText}</div>
-      )}
-
-      <div style={styles.newsList}>
-        {news.map((item, index) => (
-          <article
-            key={item.id}
-            onClick={() => toggleNews(item.id)}
-            style={{
-              ...styles.newsCard,
-              ...(item.selected ? styles.newsCardActive : {}),
-            }}
-          >
-            <div style={styles.newsIndex}>
-              {String(index + 1).padStart(2, "0")}
-            </div>
-
-            <div style={{ flex: 1 }}>
-              <div style={styles.newsTitle}>
-                {item.selected ? "✅ " : ""}
-                {item.title}
-              </div>
-
-              <div style={styles.newsMeta}>
-                <span>{item.source}</span>
-
-                <div style={{ display: "flex", gap: 10 }}>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      toggleFavorite(item);
-                    }}
-                    style={styles.favoriteButton}
-                  >
-                    {item.favorite ? "⭐" : "☆"}
-                  </button>
-
-                  <a
-                    href={item.link}
-                    target="_blank"
-                    rel="noreferrer"
-                    onClick={(e) => e.stopPropagation()}
-                    style={styles.link}
-                  >
-                    原文
-                  </a>
-                </div>
-              </div>
-            </div>
-          </article>
-        ))}
-      </div>
-    </>
-  );
-}
-
-const styles: Record<string, React.CSSProperties> = {
+const styles: any = {
   page: {
     minHeight: "100vh",
     background:
-      "radial-gradient(circle at top left, #1D4ED8 0, transparent 28%), linear-gradient(180deg, #020617 0%, #0F172A 100%)",
+      "linear-gradient(to bottom,#021B4A,#000814)",
     color: "white",
+    padding: 20,
     fontFamily:
-      '-apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans TC", sans-serif',
-    padding: "18px",
+      "-apple-system,BlinkMacSystemFont,sans-serif",
   },
-  phone: { maxWidth: "460px", margin: "0 auto", paddingBottom: "92px" },
+
+  container: {
+    maxWidth: 480,
+    margin: "0 auto",
+    paddingBottom: 100,
+  },
+
   header: {
     display: "flex",
-    justifyContent: "space-between",
+    justifyContent:
+      "space-between",
     alignItems: "center",
-    padding: "12px 2px 18px",
   },
-  kicker: { color: "#93C5FD", fontSize: "12px", letterSpacing: "1px" },
-  title: { margin: 0, fontSize: "34px", fontWeight: 900, letterSpacing: "-1px" },
-  subtitle: { margin: "6px 0 0", color: "#CBD5E1", fontSize: "15px" },
+
+  smallTitle: {
+    fontSize: 12,
+    letterSpacing: 2,
+    color: "#9DB7FF",
+  },
+
+  mainTitle: {
+    fontSize: 40,
+    fontWeight: 900,
+    marginTop: 6,
+  },
+
+  subTitle: {
+    fontSize: 18,
+    marginTop: 8,
+    color: "#D7E3FF",
+  },
+
   logo: {
-    width: "54px",
-    height: "54px",
-    borderRadius: "18px",
-    background: "linear-gradient(135deg, #2563EB, #7C3AED)",
-    display: "grid",
-    placeItems: "center",
-    fontSize: "26px",
-    boxShadow: "0 12px 30px rgba(37,99,235,.35)",
-  },
-  heroCard: {
+    width: 72,
+    height: 72,
+    borderRadius: 24,
     background:
-      "linear-gradient(135deg, rgba(37,99,235,.95), rgba(124,58,237,.9))",
-    borderRadius: "28px",
-    padding: "22px",
+      "linear-gradient(135deg,#2563EB,#9333EA)",
     display: "flex",
-    justifyContent: "space-between",
-    gap: "16px",
+    justifyContent: "center",
     alignItems: "center",
-    boxShadow: "0 20px 60px rgba(37,99,235,.35)",
+    fontSize: 34,
   },
-  heroBadge: {
+
+  hero: {
+    marginTop: 24,
+    background:
+      "linear-gradient(135deg,#2563EB,#7C3AED)",
+    borderRadius: 30,
+    padding: 24,
+    display: "flex",
+    justifyContent:
+      "space-between",
+    alignItems: "center",
+  },
+
+  badge: {
+    background:
+      "rgba(255,255,255,0.2)",
+    padding: "6px 12px",
+    borderRadius: 999,
+    fontSize: 12,
     display: "inline-block",
-    background: "rgba(255,255,255,.18)",
-    padding: "6px 10px",
-    borderRadius: "999px",
-    fontSize: "12px",
-    marginBottom: "12px",
   },
-  heroTitle: { margin: 0, fontSize: "24px", fontWeight: 900 },
-  heroText: { margin: "8px 0 0", color: "#DBEAFE", fontSize: "14px" },
+
+  heroTitle: {
+    marginTop: 18,
+    fontSize: 24,
+    fontWeight: 900,
+  },
+
+  heroText: {
+    marginTop: 10,
+    color: "#E5EDFF",
+  },
+
   playButton: {
-    minWidth: "86px",
-    height: "86px",
-    borderRadius: "28px",
+    width: 92,
+    height: 92,
+    borderRadius: 28,
     border: "none",
     background: "white",
-    color: "#1D4ED8",
+    color: "#2563EB",
+    fontSize: 28,
     fontWeight: 900,
-    fontSize: "16px",
-    cursor: "pointer",
   },
+
   searchBox: {
+    marginTop: 20,
     display: "flex",
-    gap: "8px",
-    marginTop: "18px",
-    background: "rgba(255,255,255,.08)",
-    padding: "8px",
-    borderRadius: "18px",
-    border: "1px solid rgba(255,255,255,.08)",
+    gap: 10,
   },
+
   searchInput: {
     flex: 1,
-    background: "transparent",
-    color: "white",
+    padding: 16,
+    borderRadius: 20,
     border: "none",
-    outline: "none",
-    fontSize: "15px",
-    padding: "10px",
+    background:
+      "rgba(255,255,255,0.08)",
+    color: "white",
   },
-  searchButton: {
+
+  updateBtn: {
+    padding: "0 20px",
+    borderRadius: 18,
+    border: "none",
     background: "#22C55E",
     color: "white",
-    border: "none",
-    borderRadius: "13px",
-    padding: "0 14px",
-    fontWeight: 800,
-    cursor: "pointer",
-  },
-  topicHeader: {
-    marginTop: "18px",
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    fontWeight: 900,
-  },
-  lastUpdated: {
-    marginTop: "4px",
-    color: "#94A3B8",
-    fontSize: "12px",
-    fontWeight: 500,
-  },
-  updateButton: {
-    background: "rgba(255,255,255,.12)",
-    color: "white",
-    border: "1px solid rgba(255,255,255,.12)",
-    borderRadius: "999px",
-    padding: "8px 12px",
     fontWeight: 800,
   },
+
   topicGrid: {
+    marginTop: 20,
     display: "flex",
-    gap: "8px",
     flexWrap: "wrap",
-    maxHeight: "96px",
-    overflowY: "auto",
-    padding: "12px 0 4px",
+    gap: 10,
   },
-  topicChip: {
-    whiteSpace: "nowrap",
-    background: "rgba(255,255,255,.08)",
-    color: "#CBD5E1",
-    border: "1px solid rgba(255,255,255,.08)",
-    padding: "9px 12px",
-    borderRadius: "999px",
-    cursor: "pointer",
-    fontWeight: 700,
-    fontSize: "14px",
-  },
-  topicChipActive: { background: "white", color: "#0F172A" },
-  controlPanel: {
-    marginTop: "18px",
-    background: "rgba(15,23,42,.82)",
-    border: "1px solid rgba(255,255,255,.08)",
-    borderRadius: "24px",
-    padding: "16px",
-  },
-  controlTitle: { fontWeight: 900, marginBottom: "10px" },
-  select: {
-    width: "100%",
-    padding: "11px",
-    borderRadius: "14px",
+
+  topic: {
+    padding: "10px 14px",
+    borderRadius: 999,
     border: "none",
-    marginBottom: "12px",
+    background:
+      "rgba(255,255,255,0.08)",
+    color: "white",
+    fontWeight: 700,
   },
-  speedRow: {
+
+  topicActive: {
+    background: "white",
+    color: "#111827",
+  },
+
+  actionRow: {
     display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    color: "#CBD5E1",
-    fontSize: "14px",
+    gap: 10,
+    marginTop: 20,
   },
-  actionRow: { display: "flex", gap: "8px", flexWrap: "wrap", marginTop: "14px" },
-  miniButton: {
-    background: "#334155",
-    color: "white",
+
+  actionBtn: {
+    padding: "12px 18px",
+    borderRadius: 16,
     border: "none",
-    borderRadius: "12px",
-    padding: "9px 12px",
-    cursor: "pointer",
-    fontWeight: 700,
-  },
-  playSmallButton: {
-    background: "#2563EB",
-    color: "white",
-    border: "none",
-    borderRadius: "12px",
-    padding: "9px 12px",
-    cursor: "pointer",
-    fontWeight: 800,
-  },
-  stopButton: {
-    background: "#DC2626",
-    color: "white",
-    border: "none",
-    borderRadius: "12px",
-    padding: "9px 12px",
-    cursor: "pointer",
-    fontWeight: 700,
-  },
-  gptButton: {
     background: "#7C3AED",
     color: "white",
-    border: "none",
-    borderRadius: "12px",
-    padding: "9px 12px",
-    cursor: "pointer",
-    fontWeight: 800,
+    fontWeight: 900,
   },
-  sectionHeader: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginTop: "24px",
-    marginBottom: "12px",
+
+  sectionTitle: {
+    marginTop: 28,
+    marginBottom: 16,
+    fontSize: 28,
+    fontWeight: 900,
   },
-  sectionTitle: { margin: 0, fontSize: "20px", fontWeight: 900 },
-  countText: { color: "#94A3B8", fontSize: "13px" },
+
   loading: {
     color: "#CBD5E1",
-    background: "rgba(255,255,255,.08)",
-    padding: "12px",
-    borderRadius: "16px",
   },
-  videoHint: {
-    color: "#CBD5E1",
-    background: "rgba(255,255,255,.08)",
-    padding: "12px",
-    borderRadius: "16px",
-    fontSize: "13px",
-    lineHeight: 1.5,
-    marginBottom: "12px",
-  },
-  videoCard: {
+
+  newsList: {
     display: "flex",
-    gap: "12px",
-    alignItems: "center",
-    background: "rgba(255,255,255,.07)",
-    border: "1px solid rgba(255,255,255,.08)",
-    borderRadius: "18px",
-    padding: "14px",
-    textDecoration: "none",
-    color: "white",
+    flexDirection: "column",
+    gap: 12,
   },
-  videoIcon: {
-    width: "42px",
-    height: "42px",
-    borderRadius: "14px",
-    background: "linear-gradient(135deg, #EF4444, #7C3AED)",
-    display: "grid",
-    placeItems: "center",
-    fontWeight: 900,
-    flexShrink: 0,
-  },
-  newsList: { display: "flex", flexDirection: "column", gap: "10px" },
+
   newsCard: {
-    display: "flex",
-    gap: "12px",
-    alignItems: "flex-start",
-    background: "rgba(255,255,255,.07)",
-    border: "1px solid rgba(255,255,255,.08)",
-    borderRadius: "18px",
-    padding: "13px",
-    cursor: "pointer",
+    background:
+      "rgba(255,255,255,0.06)",
+    borderRadius: 24,
+    padding: 18,
   },
+
   newsCardActive: {
-    background: "rgba(37,99,235,.26)",
-    border: "1px solid rgba(147,197,253,.45)",
+    background:
+      "rgba(37,99,235,0.3)",
+    border:
+      "1px solid #60A5FA",
   },
-  newsIndex: {
-    width: "34px",
-    height: "34px",
-    borderRadius: "12px",
-    background: "rgba(255,255,255,.1)",
-    display: "grid",
-    placeItems: "center",
-    color: "#93C5FD",
-    fontWeight: 900,
-    fontSize: "12px",
-    flexShrink: 0,
+
+  newsTitle: {
+    fontSize: 16,
+    fontWeight: 800,
+    lineHeight: 1.5,
   },
-  newsTitle: { fontSize: "15px", fontWeight: 800, lineHeight: 1.45 },
+
   newsMeta: {
+    marginTop: 10,
     display: "flex",
-    justifyContent: "space-between",
-    gap: "10px",
-    color: "#94A3B8",
-    marginTop: "8px",
-    fontSize: "12px",
+    justifyContent:
+      "space-between",
+    alignItems: "center",
+    color: "#AFC4FF",
+    fontSize: 13,
   },
-  favoriteButton: {
+
+  favoriteBtn: {
     background: "transparent",
     border: "none",
     color: "#FACC15",
-    cursor: "pointer",
-    fontSize: "14px",
+    fontSize: 18,
   },
-  link: { color: "#93C5FD", textDecoration: "none", flexShrink: 0 },
+
+  link: {
+    color: "#93C5FD",
+    textDecoration: "none",
+  },
+
+  playerCard: {
+    marginTop: 24,
+    background:
+      "rgba(255,255,255,0.06)",
+    borderRadius: 24,
+    padding: 20,
+  },
+
+  select: {
+    width: "100%",
+    padding: 14,
+    borderRadius: 16,
+    border: "none",
+  },
+
+  speedRow: {
+    marginTop: 18,
+    display: "flex",
+    justifyContent:
+      "space-between",
+    alignItems: "center",
+  },
+
+  playSmallBtn: {
+    background: "#2563EB",
+    color: "white",
+    border: "none",
+    borderRadius: 16,
+    padding: "12px 20px",
+    fontWeight: 900,
+  },
+
+  stopBtn: {
+    background: "#DC2626",
+    color: "white",
+    border: "none",
+    borderRadius: 16,
+    padding: "12px 20px",
+    fontWeight: 900,
+  },
+
+  videoList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 16,
+  },
+
+  videoCard: {
+    display: "flex",
+    gap: 14,
+    background:
+      "rgba(255,255,255,0.06)",
+    borderRadius: 22,
+    overflow: "hidden",
+    textDecoration: "none",
+    color: "white",
+  },
+
+  thumbnail: {
+    width: 150,
+    objectFit: "cover",
+  },
+
+  videoTitle: {
+    paddingTop: 12,
+    paddingRight: 12,
+    fontSize: 15,
+    fontWeight: 800,
+    lineHeight: 1.4,
+  },
+
+  videoMeta: {
+    marginTop: 12,
+    color: "#AFC4FF",
+    fontSize: 13,
+  },
+
   bottomNav: {
     position: "fixed",
+    bottom: 16,
     left: "50%",
-    bottom: "16px",
-    transform: "translateX(-50%)",
-    width: "calc(100% - 36px)",
-    maxWidth: "430px",
-    background: "rgba(15,23,42,.92)",
-    border: "1px solid rgba(255,255,255,.1)",
-    borderRadius: "24px",
-    padding: "10px 12px",
+    transform:
+      "translateX(-50%)",
+    width: "90%",
+    maxWidth: 460,
+    background:
+      "rgba(15,23,42,0.9)",
+    borderRadius: 28,
+    padding: 14,
     display: "flex",
-    justifyContent: "space-around",
-    backdropFilter: "blur(18px)",
-    boxShadow: "0 20px 50px rgba(0,0,0,.4)",
+    justifyContent:
+      "space-around",
+    backdropFilter:
+      "blur(20px)",
   },
-  navItem: {
+
+  nav: {
     background: "transparent",
     border: "none",
     color: "#94A3B8",
     display: "flex",
     flexDirection: "column",
     alignItems: "center",
-    gap: "3px",
-    fontSize: "12px",
-    cursor: "pointer",
+    gap: 4,
   },
-  navItemActive: {
-    background: "rgba(255,255,255,.12)",
+
+  navActive: {
+    background:
+      "rgba(255,255,255,0.1)",
     border: "none",
     color: "white",
     display: "flex",
     flexDirection: "column",
     alignItems: "center",
-    gap: "3px",
-    fontSize: "12px",
-    fontWeight: 800,
-    borderRadius: "16px",
-    padding: "8px 14px",
-    cursor: "pointer",
+    gap: 4,
+    borderRadius: 18,
+    padding: "10px 18px",
   },
 };
