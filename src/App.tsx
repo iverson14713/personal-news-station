@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 
-type Tab = "home" | "player" | "favorites";
+type Tab = "home" | "player" | "video" | "favorites";
 
 type NewsItem = {
   id: string;
@@ -32,7 +32,7 @@ const topics: Topic[] = [
   { label: "美股", query: "美股 OR Nvidia OR Tesla OR Apple", icon: "🇺🇸" },
   { label: "財經", query: "Fed OR 利率 OR CPI OR 降息", icon: "🏦" },
   { label: "國際", query: "國際局勢 OR 全球新聞", icon: "🌍" },
-  { label: "戰爭", query: "戰爭 OR 俄烏 OR 以色列 OR 中東", icon: "⚠️" },
+  { label: "戰爭", query: "俄烏戰爭 OR 烏克蘭戰爭 OR 以色列 OR 中東戰爭", icon: "⚠️" },
   { label: "台灣熱門", query: "台灣 熱門新聞 OR 台灣 即時", icon: "🇹🇼" },
   { label: "影視", query: "影視 OR 娛樂新聞", icon: "📺" },
   { label: "電影", query: "電影 OR 票房 OR Netflix", icon: "🎬" },
@@ -49,6 +49,10 @@ function cleanTitle(title: string) {
 
 function normalizeKey(title: string) {
   return title.replace(/[，。！？、\s\-｜|:：]/g, "").slice(0, 28);
+}
+
+function youtubeUrl(keyword: string) {
+  return `https://www.youtube.com/results?search_query=${encodeURIComponent(keyword)}`;
 }
 
 export default function App() {
@@ -78,17 +82,32 @@ export default function App() {
     [selectedTopics]
   );
 
+  const videoItems = useMemo(() => {
+    const base =
+      selectedTopicObjects.length > 0
+        ? selectedTopicObjects.map((t) => t.label)
+        : ["今日熱門新聞"];
+
+    const keywords = customKeyword.trim()
+      ? [customKeyword.trim(), ...base]
+      : base;
+
+    return keywords.slice(0, 10).map((keyword) => ({
+      keyword,
+      title: `${keyword} 最新影音 / 精華`,
+      url: youtubeUrl(`${keyword} 最新 新聞 精華`),
+    }));
+  }, [selectedTopicObjects, customKeyword]);
+
   const buildQuery = () => {
-  if (customKeyword.trim()) {
-    return customKeyword.trim();
-  }
+    if (customKeyword.trim()) return customKeyword.trim();
 
-  if (selectedTopicObjects.length > 0) {
-    return selectedTopicObjects.map((t) => `(${t.query})`).join(" OR ");
-  }
+    if (selectedTopicObjects.length > 0) {
+      return selectedTopicObjects.map((t) => `(${t.query})`).join(" OR ");
+    }
 
-  return "今日熱門新聞";
-};
+    return "今日熱門新聞";
+  };
 
   useEffect(() => {
     const saved = localStorage.getItem("favoriteLinks");
@@ -298,7 +317,13 @@ ${selectedNews
   };
 
   const pageTitle =
-    tab === "home" ? "我的新聞首頁" : tab === "player" ? "播放控制台" : "收藏新聞";
+    tab === "home"
+      ? "我的新聞首頁"
+      : tab === "player"
+      ? "播放控制台"
+      : tab === "video"
+      ? "影音新聞"
+      : "收藏新聞";
 
   return (
     <div style={styles.page}>
@@ -454,6 +479,39 @@ ${selectedNews
           </>
         )}
 
+        {tab === "video" && (
+          <>
+            <div style={styles.sectionHeader}>
+              <h2 style={styles.sectionTitle}>影音新聞入口</h2>
+              <span style={styles.countText}>{videoItems.length} 個</span>
+            </div>
+
+            <div style={styles.videoHint}>
+              先用 YouTube 搜尋入口，不接 API、不花錢。正式版之後可改成內嵌影片與 AI 影片重點整理。
+            </div>
+
+            <div style={styles.newsList}>
+              {videoItems.map((item, index) => (
+                <a
+                  key={item.keyword}
+                  href={item.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={styles.videoCard}
+                >
+                  <div style={styles.videoIcon}>▶</div>
+                  <div style={{ flex: 1 }}>
+                    <div style={styles.newsTitle}>{item.title}</div>
+                    <div style={styles.newsMeta}>
+                      YouTube 搜尋｜{String(index + 1).padStart(2, "0")}
+                    </div>
+                  </div>
+                </a>
+              ))}
+            </div>
+          </>
+        )}
+
         {tab === "favorites" && (
           <>
             <ActionButtons
@@ -486,6 +544,13 @@ ${selectedNews
             style={tab === "player" ? styles.navItemActive : styles.navItem}
           >
             🎧<span>播放</span>
+          </button>
+
+          <button
+            onClick={() => setTab("video")}
+            style={tab === "video" ? styles.navItemActive : styles.navItem}
+          >
+            📺<span>影音</span>
           </button>
 
           <button
@@ -622,17 +687,8 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: "center",
     padding: "12px 2px 18px",
   },
-  kicker: {
-    color: "#93C5FD",
-    fontSize: "12px",
-    letterSpacing: "1px",
-  },
-  title: {
-    margin: 0,
-    fontSize: "34px",
-    fontWeight: 900,
-    letterSpacing: "-1px",
-  },
+  kicker: { color: "#93C5FD", fontSize: "12px", letterSpacing: "1px" },
+  title: { margin: 0, fontSize: "34px", fontWeight: 900, letterSpacing: "-1px" },
   subtitle: { margin: "6px 0 0", color: "#CBD5E1", fontSize: "15px" },
   logo: {
     width: "54px",
@@ -818,6 +874,36 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "12px",
     borderRadius: "16px",
   },
+  videoHint: {
+    color: "#CBD5E1",
+    background: "rgba(255,255,255,.08)",
+    padding: "12px",
+    borderRadius: "16px",
+    fontSize: "13px",
+    lineHeight: 1.5,
+    marginBottom: "12px",
+  },
+  videoCard: {
+    display: "flex",
+    gap: "12px",
+    alignItems: "center",
+    background: "rgba(255,255,255,.07)",
+    border: "1px solid rgba(255,255,255,.08)",
+    borderRadius: "18px",
+    padding: "14px",
+    textDecoration: "none",
+    color: "white",
+  },
+  videoIcon: {
+    width: "42px",
+    height: "42px",
+    borderRadius: "14px",
+    background: "linear-gradient(135deg, #EF4444, #7C3AED)",
+    display: "grid",
+    placeItems: "center",
+    fontWeight: 900,
+    flexShrink: 0,
+  },
   newsList: { display: "flex", flexDirection: "column", gap: "10px" },
   newsCard: {
     display: "flex",
@@ -900,7 +986,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "12px",
     fontWeight: 800,
     borderRadius: "16px",
-    padding: "8px 18px",
+    padding: "8px 14px",
     cursor: "pointer",
   },
 };
