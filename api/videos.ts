@@ -1,18 +1,31 @@
-export default async function handler(req: any, res: any) {
-  const query = req.query.q || "NBA 最新";
+export default async function handler(req, res) {
+  const query = req.query.q || "BTC";
 
-  const url = `https://www.youtube.com/feeds/videos.xml?search_query=${encodeURIComponent(
-    query
-  )}`;
+  const apiKey = process.env.YOUTUBE_API_KEY;
 
   try {
-    const response = await fetch(url);
-    const xml = await response.text();
+    const yt = await fetch(
+      `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(
+        query
+      )}&maxResults=5&order=date&type=video&key=${apiKey}`
+    );
 
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Content-Type", "application/xml");
-    res.status(200).send(xml);
-  } catch (error) {
-    res.status(500).json({ error: "Failed to fetch videos" });
+    const data = await yt.json();
+
+    const videos =
+      data.items?.map((item) => ({
+        id: item.id.videoId,
+        title: item.snippet.title,
+        thumbnail: item.snippet.thumbnails.high.url,
+        channel: item.snippet.channelTitle,
+        publishedAt: item.snippet.publishedAt,
+        url: `https://www.youtube.com/watch?v=${item.id.videoId}`,
+      })) || [];
+
+    res.status(200).json(videos);
+  } catch (e) {
+    res.status(500).json({
+      error: "youtube api failed",
+    });
   }
 }
