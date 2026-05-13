@@ -214,13 +214,11 @@ export default function App() {
         keywords.map(async (keyword) => {
           try {
             const res = await fetch(`/api/videos?q=${encodeURIComponent(keyword)}`);
-            const xmlText = await res.text();
+            const data = await res.json();
 
-            const parser = new DOMParser();
-            const xml = parser.parseFromString(xmlText, "text/xml");
-            const entry = xml.querySelector("entry");
+            const firstVideo = Array.isArray(data) ? data[0] : null;
 
-            if (!entry) {
+            if (!firstVideo) {
               return {
                 id: keyword,
                 title: `${keyword} 最新影音`,
@@ -232,32 +230,14 @@ export default function App() {
               };
             }
 
-            const title = entry.querySelector("title")?.textContent || `${keyword} 最新影片`;
-            const videoId =
-              entry.querySelector("yt\\:videoId")?.textContent ||
-              entry.querySelector("video\\:videoId")?.textContent ||
-              "";
-
-            const link =
-              entry.querySelector("link")?.getAttribute("href") ||
-              (videoId ? `https://www.youtube.com/watch?v=${videoId}` : youtubeSearchUrl(keyword));
-
-            const channel =
-              entry.querySelector("author name")?.textContent ||
-              entry.querySelector("name")?.textContent ||
-              "YouTube";
-
-            const thumbnail =
-              entry.querySelector("media\\:thumbnail")?.getAttribute("url") ||
-              (videoId ? `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg` : "");
-
             return {
-              id: videoId || link || keyword,
-              title,
-              link,
-              channel,
-              thumbnail,
+              id: firstVideo.id || keyword,
+              title: firstVideo.title || `${keyword} 最新影片`,
+              link: firstVideo.url || youtubeSearchUrl(keyword),
+              channel: firstVideo.channel || "YouTube",
+              thumbnail: firstVideo.thumbnail || "",
               keyword,
+              isFallback: false,
             };
           } catch {
             return {
@@ -274,6 +254,7 @@ export default function App() {
       );
 
       const seen = new Set<string>();
+
       const uniqueVideos = results.filter((video) => {
         const key = video.link || video.title;
         if (seen.has(key)) return false;
@@ -598,7 +579,7 @@ ${newsText}
             </div>
 
             <div style={styles.videoHint}>
-              每個已選主題抓一支最新影片。若 YouTube RSS 沒回資料，會改成 YouTube 搜尋入口。
+              每個已選主題抓一支 YouTube 最新影片。若 API 沒回資料，會改成 YouTube 搜尋入口。
             </div>
 
             {videoLoading && <div style={styles.loading}>影音讀取中...</div>}
