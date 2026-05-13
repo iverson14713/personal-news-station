@@ -12,6 +12,16 @@ type NewsItem = {
   favorite: boolean;
 };
 
+type VideoItem = {
+  id: string;
+  title: string;
+  link: string;
+  channel: string;
+  thumbnail: string;
+  keyword: string;
+  isFallback?: boolean;
+};
+
 type Topic = {
   label: string;
   query: string;
@@ -51,8 +61,10 @@ function normalizeKey(title: string) {
   return title.replace(/[，。！？、\s\-｜|:：]/g, "").slice(0, 28);
 }
 
-function youtubeUrl(keyword: string) {
-  return `https://www.youtube.com/results?search_query=${encodeURIComponent(keyword)}`;
+function youtubeSearchUrl(keyword: string) {
+  return `https://www.youtube.com/results?search_query=${encodeURIComponent(
+    `${keyword} 最新 新聞 精華`
+  )}`;
 }
 
 export default function App() {
@@ -66,8 +78,10 @@ export default function App() {
   ]);
   const [customKeyword, setCustomKeyword] = useState("");
   const [news, setNews] = useState<NewsItem[]>([]);
+  const [videos, setVideos] = useState<VideoItem[]>([]);
   const [favoriteLinks, setFavoriteLinks] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
+  const [videoLoading, setVideoLoading] = useState(false);
   const [lastUpdated, setLastUpdated] = useState("");
   const [speed, setSpeed] = useState(1.2);
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -82,23 +96,6 @@ export default function App() {
     [selectedTopics]
   );
 
-  const videoItems = useMemo(() => {
-    const base =
-      selectedTopicObjects.length > 0
-        ? selectedTopicObjects.map((t) => t.label)
-        : ["今日熱門新聞"];
-
-    const keywords = customKeyword.trim()
-      ? [customKeyword.trim(), ...base]
-      : base;
-
-    return keywords.slice(0, 10).map((keyword) => ({
-      keyword,
-      title: `${keyword} 最新影音 / 精華`,
-      url: youtubeUrl(`${keyword} 最新 新聞 精華`),
-    }));
-  }, [selectedTopicObjects, customKeyword]);
-
   const buildQuery = () => {
     if (customKeyword.trim()) return customKeyword.trim();
 
@@ -107,6 +104,16 @@ export default function App() {
     }
 
     return "今日熱門新聞";
+  };
+
+  const buildVideoKeywords = () => {
+    if (customKeyword.trim()) return [customKeyword.trim()];
+
+    if (selectedTopicObjects.length > 0) {
+      return selectedTopicObjects.slice(0, 8).map((t) => t.query);
+    }
+
+    return ["NBA 最新", "大谷翔平 最新", "BTC 最新"];
   };
 
   useEffect(() => {
@@ -197,13 +204,105 @@ export default function App() {
     setLoading(false);
   };
 
+  const fetchVideos = async () => {
+    setVideoLoading(true);
+
+    try {
+      const keywords = buildVideoKeywords();
+
+      const results = await Promise.all(
+        keywords.map(async (keyword) => {
+          try {
+            const res = await fetch(`/api/videos?q=${encodeURIComponent(keyword)}`);
+            const xmlText = await res.text();
+
+            const parser = new DOMParser();
+            const xml = parser.parseFromString(xmlText, "text/xml");
+            const entry = xml.querySelector("entry");
+
+            if (!entry) {
+              return {
+                id: keyword,
+                title: `${keyword} 最新影音`,
+                link: youtubeSearchUrl(keyword),
+                channel: "YouTube 搜尋",
+                thumbnail: "",
+                keyword,
+                isFallback: true,
+              };
+            }
+
+            const title = entry.querySelector("title")?.textContent || `${keyword} 最新影片`;
+            const videoId =
+              entry.querySelector("yt\\:videoId")?.textContent ||
+              entry.querySelector("video\\:videoId")?.textContent ||
+              "";
+
+            const link =
+              entry.querySelector("link")?.getAttribute("href") ||
+              (videoId ? `https://www.youtube.com/watch?v=${videoId}` : youtubeSearchUrl(keyword));
+
+            const channel =
+              entry.querySelector("author name")?.textContent ||
+              entry.querySelector("name")?.textContent ||
+              "YouTube";
+
+            const thumbnail =
+              entry.querySelector("media\\:thumbnail")?.getAttribute("url") ||
+              (videoId ? `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg` : "");
+
+            return {
+              id: videoId || link || keyword,
+              title,
+              link,
+              channel,
+              thumbnail,
+              keyword,
+            };
+          } catch {
+            return {
+              id: keyword,
+              title: `${keyword} 最新影音`,
+              link: youtubeSearchUrl(keyword),
+              channel: "YouTube 搜尋",
+              thumbnail: "",
+              keyword,
+              isFallback: true,
+            };
+          }
+        })
+      );
+
+      const seen = new Set<string>();
+      const uniqueVideos = results.filter((video) => {
+        const key = video.link || video.title;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+
+      setVideos(uniqueVideos);
+    } catch (error) {
+      console.error(error);
+    }
+
+    setVideoLoading(false);
+  };
+
   useEffect(() => {
     fetchNews(buildQuery());
+    fetchVideos();
   }, []);
 
   const updateMyNews = () => {
     setTab("home");
     fetchNews(buildQuery());
+    fetchVideos();
+  };
+
+  const updateVideos = () => {
+    setTab("video");
+    fetchVideos();
   };
 
   const toggleTopic = (label: string) => {
@@ -292,6 +391,13 @@ export default function App() {
       return;
     }
 
+    const newsText = selectedNews
+      .map(
+        (item, index) =>
+          `${index + 1}. ${item.title}\n來源：${item.source}\n連結：${item.link}`
+      )
+      .join("\n\n");
+
     const prompt = `
 請幫我把以下新聞整理成「AI個人新聞台」精華版：
 
@@ -304,12 +410,7 @@ export default function App() {
 6. 避免誇大投資建議，只做資訊整理與風險提醒
 
 新聞列表：
-${selectedNews
-  .map(
-    (item, index) =>
-      `${index + 1}. ${item.title}\n來源：${item.source}\n連結：${item.link}`
-  )
-  .join("\n\n")}
+${newsText}
 `;
 
     await navigator.clipboard.writeText(prompt);
@@ -482,28 +583,46 @@ ${selectedNews
         {tab === "video" && (
           <>
             <div style={styles.sectionHeader}>
-              <h2 style={styles.sectionTitle}>影音新聞入口</h2>
-              <span style={styles.countText}>{videoItems.length} 個</span>
+              <h2 style={styles.sectionTitle}>最新影音快報</h2>
+              <button
+                onClick={updateVideos}
+                disabled={videoLoading}
+                style={{
+                  ...styles.updateButton,
+                  opacity: videoLoading ? 0.7 : 1,
+                  cursor: videoLoading ? "not-allowed" : "pointer",
+                }}
+              >
+                {videoLoading ? "更新中..." : "🔄 更新影音"}
+              </button>
             </div>
 
             <div style={styles.videoHint}>
-              先用 YouTube 搜尋入口，不接 API、不花錢。正式版之後可改成內嵌影片與 AI 影片重點整理。
+              每個已選主題抓一支最新影片。若 YouTube RSS 沒回資料，會改成 YouTube 搜尋入口。
             </div>
 
+            {videoLoading && <div style={styles.loading}>影音讀取中...</div>}
+
             <div style={styles.newsList}>
-              {videoItems.map((item, index) => (
+              {videos.map((video) => (
                 <a
-                  key={item.keyword}
-                  href={item.url}
+                  key={video.id}
+                  href={video.link}
                   target="_blank"
                   rel="noreferrer"
                   style={styles.videoCard}
                 >
-                  <div style={styles.videoIcon}>▶</div>
+                  {video.thumbnail ? (
+                    <img src={video.thumbnail} alt={video.title} style={styles.thumbnail} />
+                  ) : (
+                    <div style={styles.videoIcon}>▶</div>
+                  )}
+
                   <div style={{ flex: 1 }}>
-                    <div style={styles.newsTitle}>{item.title}</div>
+                    <div style={styles.newsTitle}>{video.title}</div>
                     <div style={styles.newsMeta}>
-                      YouTube 搜尋｜{String(index + 1).padStart(2, "0")}
+                      <span>{video.channel}</span>
+                      <span>{video.isFallback ? "搜尋入口" : "最新影片"}</span>
                     </div>
                   </div>
                 </a>
@@ -865,6 +984,7 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: "center",
     marginTop: "24px",
     marginBottom: "12px",
+    gap: "10px",
   },
   sectionTitle: { margin: 0, fontSize: "20px", fontWeight: 900 },
   countText: { color: "#94A3B8", fontSize: "13px" },
@@ -890,14 +1010,21 @@ const styles: Record<string, React.CSSProperties> = {
     background: "rgba(255,255,255,.07)",
     border: "1px solid rgba(255,255,255,.08)",
     borderRadius: "18px",
-    padding: "14px",
+    padding: "12px",
     textDecoration: "none",
     color: "white",
   },
+  thumbnail: {
+    width: "116px",
+    height: "66px",
+    borderRadius: "12px",
+    objectFit: "cover",
+    flexShrink: 0,
+  },
   videoIcon: {
-    width: "42px",
-    height: "42px",
-    borderRadius: "14px",
+    width: "64px",
+    height: "64px",
+    borderRadius: "18px",
     background: "linear-gradient(135deg, #EF4444, #7C3AED)",
     display: "grid",
     placeItems: "center",
