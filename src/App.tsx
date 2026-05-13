@@ -278,8 +278,7 @@ export default function App() {
 
 ${selectedNews
   .map((n) => `- ${n.title}`)
-  .join("
-")}
+  .join("\\n")}
 
 請：
 1. 用繁體中文
