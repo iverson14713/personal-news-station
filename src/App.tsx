@@ -11,13 +11,38 @@ type NewsItem = {
   selected: boolean;
 };
 
-const topics = [
-  { label: "全部", query: "NBA OR MLB OR BTC OR ETH OR 台股 OR ETF", icon: "✨" },
-  { label: "NBA", query: "NBA 勇士 Curry", icon: "🏀" },
-  { label: "MLB", query: "MLB 道奇 大谷翔平", icon: "⚾" },
-  { label: "幣圈", query: "BTC OR ETH OR 加密貨幣 OR 比特幣", icon: "₿" },
-  { label: "台股", query: "台股 ETF 台積電", icon: "📈" },
-  { label: "國際", query: "戰爭 國際局勢 Fed 利率", icon: "🌍" },
+type Topic = {
+  label: string;
+  query: string;
+  icon: string;
+};
+
+const topics: Topic[] = [
+  { label: "NBA", query: "NBA", icon: "🏀" },
+  { label: "MLB", query: "MLB", icon: "⚾" },
+  { label: "Curry", query: "Stephen Curry OR Curry 勇士", icon: "🔥" },
+  { label: "大谷翔平", query: "大谷翔平 OR Shohei Ohtani", icon: "⚾" },
+  { label: "季後賽", query: "NBA 季後賽 OR MLB 季後賽", icon: "🏆" },
+
+  { label: "幣圈", query: "加密貨幣 OR 幣圈", icon: "₿" },
+  { label: "BTC", query: "BTC OR 比特幣", icon: "₿" },
+  { label: "ETH", query: "ETH OR 以太坊", icon: "💎" },
+  { label: "台股", query: "台股 OR 台積電", icon: "📈" },
+  { label: "ETF", query: "ETF OR 0050 OR 高股息", icon: "💰" },
+  { label: "美股", query: "美股 OR Nvidia OR Tesla OR Apple", icon: "🇺🇸" },
+  { label: "財經", query: "Fed OR 利率 OR CPI OR 降息", icon: "🏦" },
+
+  { label: "國際", query: "國際局勢 OR 全球新聞", icon: "🌍" },
+  { label: "戰爭", query: "戰爭 OR 俄烏 OR 以色列 OR 中東", icon: "⚠️" },
+  { label: "台灣熱門", query: "台灣 熱門新聞 OR 台灣 即時", icon: "🇹🇼" },
+
+  { label: "影視", query: "影視 OR 娛樂新聞", icon: "📺" },
+  { label: "電影", query: "電影 OR 票房 OR Netflix", icon: "🎬" },
+  { label: "動漫", query: "動漫 OR 動畫 OR 漫畫", icon: "🌀" },
+  { label: "音樂", query: "音樂 OR 演唱會 OR 新歌", icon: "🎵" },
+  { label: "潮流", query: "潮流 OR 球鞋 OR 穿搭", icon: "👟" },
+  { label: "科技", query: "科技 OR AI OR iPhone OR 半導體", icon: "🤖" },
+  { label: "遊戲", query: "遊戲 OR Steam OR Switch OR PS5 OR 電競", icon: "🎮" },
 ];
 
 function cleanTitle(title: string) {
@@ -26,7 +51,13 @@ function cleanTitle(title: string) {
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("home");
-  const [activeTopic, setActiveTopic] = useState(topics[0]);
+  const [selectedTopics, setSelectedTopics] = useState<string[]>([
+    "NBA",
+    "MLB",
+    "大谷翔平",
+    "Curry",
+    "BTC",
+  ]);
   const [customKeyword, setCustomKeyword] = useState("");
   const [news, setNews] = useState<NewsItem[]>([]);
   const [loading, setLoading] = useState(false);
@@ -36,33 +67,54 @@ export default function App() {
 
   const selectedNews = news.filter((n) => n.selected);
 
+  const selectedTopicObjects = topics.filter((t) =>
+    selectedTopics.includes(t.label)
+  );
+
+  const buildQuery = () => {
+    const topicQuery =
+      selectedTopicObjects.length > 0
+        ? selectedTopicObjects.map((t) => `(${t.query})`).join(" OR ")
+        : "NBA OR MLB OR BTC OR 台股 OR 科技";
+
+    return customKeyword.trim()
+      ? `${topicQuery} OR ${customKeyword.trim()}`
+      : topicQuery;
+  };
+
   useEffect(() => {
     const loadVoices = () => {
       const allVoices = window.speechSynthesis.getVoices();
       setVoices(allVoices);
       if (!voiceName && allVoices.length > 0) {
-        const zhVoice = allVoices.find((v) => v.lang.includes("zh")) || allVoices[0];
+        const zhVoice =
+          allVoices.find((v) => v.lang.includes("zh")) || allVoices[0];
         setVoiceName(zhVoice.name);
       }
     };
+
     loadVoices();
     window.speechSynthesis.onvoiceschanged = loadVoices;
   }, []);
 
   const fetchNews = async (query: string) => {
     setLoading(true);
+
     try {
       const res = await fetch(`/api/news?q=${encodeURIComponent(query)}`);
       const xmlText = await res.text();
+
       const parser = new DOMParser();
       const xml = parser.parseFromString(xmlText, "text/xml");
-      const items = Array.from(xml.querySelectorAll("item")).slice(0, 40);
+      const items = Array.from(xml.querySelectorAll("item")).slice(0, 60);
+
       const seen = new Set<string>();
 
       const parsedNews: NewsItem[] = items
         .map((item, index) => {
           const rawTitle = item.querySelector("title")?.textContent || "無標題";
           const title = cleanTitle(rawTitle);
+
           return {
             id: index + 1,
             title,
@@ -81,39 +133,39 @@ export default function App() {
           seen.add(key);
           return true;
         })
-        .slice(0, 20);
+        .slice(0, 25);
 
       setNews(parsedNews);
     } catch (error) {
       alert("新聞讀取失敗，請稍後再試");
       console.error(error);
     }
+
     setLoading(false);
   };
 
   useEffect(() => {
-    fetchNews(activeTopic.query);
+    fetchNews(buildQuery());
   }, []);
 
-  const changeTopic = (topic: (typeof topics)[0]) => {
-    setActiveTopic(topic);
-    setTab("home");
-    fetchNews(topic.query);
+  const toggleTopic = (label: string) => {
+    setSelectedTopics((prev) =>
+      prev.includes(label)
+        ? prev.filter((item) => item !== label)
+        : [...prev, label]
+    );
   };
 
-  const searchCustomKeyword = () => {
-    if (!customKeyword.trim()) {
-      alert("請輸入想追蹤的關鍵字");
-      return;
-    }
-    setActiveTopic({ label: customKeyword, query: customKeyword, icon: "🔎" });
+  const updateMyNews = () => {
     setTab("home");
-    fetchNews(customKeyword);
+    fetchNews(buildQuery());
   };
 
   const toggleNews = (id: number) => {
     setNews((prev) =>
-      prev.map((item) => (item.id === id ? { ...item, selected: !item.selected } : item))
+      prev.map((item) =>
+        item.id === id ? { ...item, selected: !item.selected } : item
+      )
     );
   };
 
@@ -133,9 +185,11 @@ export default function App() {
       return;
     }
 
-    const text = selectedNews.map((n, i) => `第 ${i + 1} 則新聞，${n.title}`).join("。");
-    const speech = new SpeechSynthesisUtterance(text);
+    const text = selectedNews
+      .map((n, i) => `第 ${i + 1} 則新聞，${n.title}`)
+      .join("。");
 
+    const speech = new SpeechSynthesisUtterance(text);
     speech.lang = "zh-TW";
     speech.rate = speed;
 
@@ -164,10 +218,14 @@ export default function App() {
 3. 每則用 2～3 句話解釋
 4. 幫我判斷重要程度：🔥重大 / ⚠️注意 / ℹ️一般
 5. 最後給我一段適合語音朗讀的 1 分鐘新聞稿
+6. 避免誇大投資建議，只做資訊整理與風險提醒
 
 新聞列表：
 ${selectedNews
-  .map((item, index) => `${index + 1}. ${item.title}\n來源：${item.source}\n連結：${item.link}`)
+  .map(
+    (item, index) =>
+      `${index + 1}. ${item.title}\n來源：${item.source}\n連結：${item.link}`
+  )
   .join("\n\n")}
 `;
 
@@ -191,13 +249,17 @@ ${selectedNews
           <div>
             <div style={styles.heroBadge}>今日新聞雷達</div>
             <h2 style={styles.heroTitle}>
-              {tab === "home" && "新聞首頁"}
+              {tab === "home" && "我的新聞首頁"}
               {tab === "player" && "播放控制台"}
               {tab === "selected" && "已選新聞"}
             </h2>
-            <p style={styles.heroText}>已選 {selectedNews.length} 則新聞，可朗讀或丟給 GPT 變精華。</p>
+            <p style={styles.heroText}>
+              已追蹤 {selectedTopics.length} 個主題，已選 {selectedNews.length} 則新聞。
+            </p>
           </div>
-          <button onClick={speakNews} style={styles.playButton}>▶ 播放</button>
+          <button onClick={speakNews} style={styles.playButton}>
+            ▶ 播放
+          </button>
         </section>
 
         {tab === "home" && (
@@ -206,25 +268,37 @@ ${selectedNews
               <input
                 value={customKeyword}
                 onChange={(e) => setCustomKeyword(e.target.value)}
-                placeholder="搜尋：大谷、Curry、BTC、台積電..."
+                placeholder="自訂：降息、台積電、Solana、川普..."
                 style={styles.searchInput}
               />
-              <button onClick={searchCustomKeyword} style={styles.searchButton}>搜尋</button>
+              <button onClick={updateMyNews} style={styles.searchButton}>
+                更新
+              </button>
             </div>
 
-            <div style={styles.topicRow}>
-              {topics.map((topic) => (
-                <button
-                  key={topic.label}
-                  onClick={() => changeTopic(topic)}
-                  style={{
-                    ...styles.topicChip,
-                    ...(activeTopic.label === topic.label ? styles.topicChipActive : {}),
-                  }}
-                >
-                  <span>{topic.icon}</span> {topic.label}
-                </button>
-              ))}
+            <div style={styles.topicHeader}>
+              <span>我的主題</span>
+              <button onClick={updateMyNews} style={styles.updateButton}>
+                更新我的新聞
+              </button>
+            </div>
+
+            <div style={styles.topicGrid}>
+              {topics.map((topic) => {
+                const active = selectedTopics.includes(topic.label);
+                return (
+                  <button
+                    key={topic.label}
+                    onClick={() => toggleTopic(topic.label)}
+                    style={{
+                      ...styles.topicChip,
+                      ...(active ? styles.topicChipActive : {}),
+                    }}
+                  >
+                    <span>{topic.icon}</span> {topic.label}
+                  </button>
+                );
+              })}
             </div>
 
             <ActionButtons
@@ -234,7 +308,7 @@ ${selectedNews
             />
 
             <NewsList
-              title={`${activeTopic.label}｜今日新聞`}
+              title="我的今日新聞"
               news={news}
               loading={loading}
               toggleNews={toggleNews}
@@ -273,9 +347,15 @@ ${selectedNews
               </div>
 
               <div style={styles.actionRow}>
-                <button onClick={speakNews} style={styles.playSmallButton}>播放選取</button>
-                <button onClick={stopSpeak} style={styles.stopButton}>停止</button>
-                <button onClick={copyGptPrompt} style={styles.gptButton}>GPT 精華</button>
+                <button onClick={speakNews} style={styles.playSmallButton}>
+                  播放選取
+                </button>
+                <button onClick={stopSpeak} style={styles.stopButton}>
+                  停止
+                </button>
+                <button onClick={copyGptPrompt} style={styles.gptButton}>
+                  GPT 精華
+                </button>
               </div>
             </section>
 
@@ -308,13 +388,24 @@ ${selectedNews
         )}
 
         <nav style={styles.bottomNav}>
-          <button onClick={() => setTab("home")} style={tab === "home" ? styles.navItemActive : styles.navItem}>
+          <button
+            onClick={() => setTab("home")}
+            style={tab === "home" ? styles.navItemActive : styles.navItem}
+          >
             🏠<span>首頁</span>
           </button>
-          <button onClick={() => setTab("player")} style={tab === "player" ? styles.navItemActive : styles.navItem}>
+
+          <button
+            onClick={() => setTab("player")}
+            style={tab === "player" ? styles.navItemActive : styles.navItem}
+          >
             🎧<span>播放</span>
           </button>
-          <button onClick={() => setTab("selected")} style={tab === "selected" ? styles.navItemActive : styles.navItem}>
+
+          <button
+            onClick={() => setTab("selected")}
+            style={tab === "selected" ? styles.navItemActive : styles.navItem}
+          >
             ✅<span>已選</span>
           </button>
         </nav>
@@ -334,9 +425,15 @@ function ActionButtons({
 }) {
   return (
     <div style={styles.actionRow}>
-      <button onClick={selectAll} style={styles.miniButton}>全選</button>
-      <button onClick={clearAll} style={styles.miniButton}>取消</button>
-      <button onClick={copyGptPrompt} style={styles.gptButton}>GPT 精華</button>
+      <button onClick={selectAll} style={styles.miniButton}>
+        全選
+      </button>
+      <button onClick={clearAll} style={styles.miniButton}>
+        取消
+      </button>
+      <button onClick={copyGptPrompt} style={styles.gptButton}>
+        GPT 精華
+      </button>
     </div>
   );
 }
@@ -363,7 +460,9 @@ function NewsList({
 
       {loading && <div style={styles.loading}>新聞讀取中...</div>}
 
-      {!loading && news.length === 0 && <div style={styles.loading}>{emptyText}</div>}
+      {!loading && news.length === 0 && (
+        <div style={styles.loading}>{emptyText}</div>
+      )}
 
       <div style={styles.newsList}>
         {news.map((item, index) => (
@@ -375,7 +474,9 @@ function NewsList({
               ...(item.selected ? styles.newsCardActive : {}),
             }}
           >
-            <div style={styles.newsIndex}>{String(index + 1).padStart(2, "0")}</div>
+            <div style={styles.newsIndex}>
+              {String(index + 1).padStart(2, "0")}
+            </div>
 
             <div style={{ flex: 1 }}>
               <div style={styles.newsTitle}>
@@ -409,96 +510,332 @@ const styles: Record<string, React.CSSProperties> = {
     background:
       "radial-gradient(circle at top left, #1D4ED8 0, transparent 28%), linear-gradient(180deg, #020617 0%, #0F172A 100%)",
     color: "white",
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans TC", sans-serif',
+    fontFamily:
+      '-apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans TC", sans-serif',
     padding: "18px",
   },
-  phone: { maxWidth: "460px", margin: "0 auto", paddingBottom: "92px" },
-  header: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 2px 18px" },
-  kicker: { color: "#93C5FD", fontSize: "12px", letterSpacing: "1px", textTransform: "uppercase" },
-  title: { margin: 0, fontSize: "34px", fontWeight: 900, letterSpacing: "-1px" },
-  subtitle: { margin: "6px 0 0", color: "#CBD5E1", fontSize: "15px" },
+  phone: {
+    maxWidth: "460px",
+    margin: "0 auto",
+    paddingBottom: "92px",
+  },
+  header: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    padding: "12px 2px 18px",
+  },
+  kicker: {
+    color: "#93C5FD",
+    fontSize: "12px",
+    letterSpacing: "1px",
+    textTransform: "uppercase",
+  },
+  title: {
+    margin: 0,
+    fontSize: "34px",
+    fontWeight: 900,
+    letterSpacing: "-1px",
+  },
+  subtitle: {
+    margin: "6px 0 0",
+    color: "#CBD5E1",
+    fontSize: "15px",
+  },
   logo: {
-    width: "54px", height: "54px", borderRadius: "18px",
+    width: "54px",
+    height: "54px",
+    borderRadius: "18px",
     background: "linear-gradient(135deg, #2563EB, #7C3AED)",
-    display: "grid", placeItems: "center", fontSize: "26px",
+    display: "grid",
+    placeItems: "center",
+    fontSize: "26px",
     boxShadow: "0 12px 30px rgba(37,99,235,.35)",
   },
   heroCard: {
-    background: "linear-gradient(135deg, rgba(37,99,235,.95), rgba(124,58,237,.9))",
-    borderRadius: "28px", padding: "22px", display: "flex",
-    justifyContent: "space-between", gap: "16px", alignItems: "center",
+    background:
+      "linear-gradient(135deg, rgba(37,99,235,.95), rgba(124,58,237,.9))",
+    borderRadius: "28px",
+    padding: "22px",
+    display: "flex",
+    justifyContent: "space-between",
+    gap: "16px",
+    alignItems: "center",
     boxShadow: "0 20px 60px rgba(37,99,235,.35)",
   },
-  heroBadge: { display: "inline-block", background: "rgba(255,255,255,.18)", padding: "6px 10px", borderRadius: "999px", fontSize: "12px", marginBottom: "12px" },
-  heroTitle: { margin: 0, fontSize: "24px", fontWeight: 900 },
-  heroText: { margin: "8px 0 0", color: "#DBEAFE", fontSize: "14px", lineHeight: 1.5 },
+  heroBadge: {
+    display: "inline-block",
+    background: "rgba(255,255,255,.18)",
+    padding: "6px 10px",
+    borderRadius: "999px",
+    fontSize: "12px",
+    marginBottom: "12px",
+  },
+  heroTitle: {
+    margin: 0,
+    fontSize: "24px",
+    fontWeight: 900,
+  },
+  heroText: {
+    margin: "8px 0 0",
+    color: "#DBEAFE",
+    fontSize: "14px",
+    lineHeight: 1.5,
+  },
   playButton: {
-    minWidth: "86px", height: "86px", borderRadius: "28px", border: "none",
-    background: "white", color: "#1D4ED8", fontWeight: 900,
-    fontSize: "16px", cursor: "pointer",
+    minWidth: "86px",
+    height: "86px",
+    borderRadius: "28px",
+    border: "none",
+    background: "white",
+    color: "#1D4ED8",
+    fontWeight: 900,
+    fontSize: "16px",
+    cursor: "pointer",
   },
   searchBox: {
-    display: "flex", gap: "8px", marginTop: "18px",
-    background: "rgba(255,255,255,.08)", padding: "8px",
-    borderRadius: "18px", border: "1px solid rgba(255,255,255,.08)",
+    display: "flex",
+    gap: "8px",
+    marginTop: "18px",
+    background: "rgba(255,255,255,.08)",
+    padding: "8px",
+    borderRadius: "18px",
+    border: "1px solid rgba(255,255,255,.08)",
   },
-  searchInput: { flex: 1, background: "transparent", color: "white", border: "none", outline: "none", fontSize: "15px", padding: "10px" },
-  searchButton: { background: "#22C55E", color: "white", border: "none", borderRadius: "13px", padding: "0 14px", fontWeight: 800, cursor: "pointer" },
-  topicRow: { display: "flex", gap: "9px", overflowX: "auto", padding: "18px 0 6px" },
+  searchInput: {
+    flex: 1,
+    background: "transparent",
+    color: "white",
+    border: "none",
+    outline: "none",
+    fontSize: "15px",
+    padding: "10px",
+  },
+  searchButton: {
+    background: "#22C55E",
+    color: "white",
+    border: "none",
+    borderRadius: "13px",
+    padding: "0 14px",
+    fontWeight: 800,
+    cursor: "pointer",
+  },
+  topicHeader: {
+    marginTop: "18px",
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    fontWeight: 900,
+  },
+  updateButton: {
+    background: "rgba(255,255,255,.12)",
+    color: "white",
+    border: "1px solid rgba(255,255,255,.12)",
+    borderRadius: "999px",
+    padding: "8px 12px",
+    cursor: "pointer",
+    fontWeight: 800,
+  },
+  topicGrid: {
+    display: "flex",
+    gap: "8px",
+    flexWrap: "wrap",
+    maxHeight: "96px",
+    overflowY: "auto",
+    padding: "12px 0 4px",
+  },
   topicChip: {
-    whiteSpace: "nowrap", background: "rgba(255,255,255,.08)", color: "#CBD5E1",
-    border: "1px solid rgba(255,255,255,.08)", padding: "10px 14px",
-    borderRadius: "999px", cursor: "pointer", fontWeight: 700,
+    whiteSpace: "nowrap",
+    background: "rgba(255,255,255,.08)",
+    color: "#CBD5E1",
+    border: "1px solid rgba(255,255,255,.08)",
+    padding: "9px 12px",
+    borderRadius: "999px",
+    cursor: "pointer",
+    fontWeight: 700,
+    fontSize: "14px",
   },
-  topicChipActive: { background: "white", color: "#0F172A" },
+  topicChipActive: {
+    background: "white",
+    color: "#0F172A",
+  },
   controlPanel: {
-    marginTop: "18px", background: "rgba(15,23,42,.82)",
-    border: "1px solid rgba(255,255,255,.08)", borderRadius: "24px", padding: "16px",
+    marginTop: "18px",
+    background: "rgba(15,23,42,.82)",
+    border: "1px solid rgba(255,255,255,.08)",
+    borderRadius: "24px",
+    padding: "16px",
   },
-  controlTitle: { fontWeight: 900, marginBottom: "10px" },
-  select: { width: "100%", padding: "11px", borderRadius: "14px", border: "none", marginBottom: "12px" },
-  speedRow: { display: "flex", alignItems: "center", justifyContent: "space-between", color: "#CBD5E1", fontSize: "14px" },
-  actionRow: { display: "flex", gap: "8px", flexWrap: "wrap", marginTop: "14px" },
-  miniButton: { background: "#334155", color: "white", border: "none", borderRadius: "12px", padding: "9px 12px", cursor: "pointer", fontWeight: 700 },
-  playSmallButton: { background: "#2563EB", color: "white", border: "none", borderRadius: "12px", padding: "9px 12px", cursor: "pointer", fontWeight: 800 },
-  stopButton: { background: "#DC2626", color: "white", border: "none", borderRadius: "12px", padding: "9px 12px", cursor: "pointer", fontWeight: 700 },
-  gptButton: { background: "#7C3AED", color: "white", border: "none", borderRadius: "12px", padding: "9px 12px", cursor: "pointer", fontWeight: 800 },
-  sectionHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "24px", marginBottom: "12px" },
-  sectionTitle: { margin: 0, fontSize: "20px", fontWeight: 900 },
-  countText: { color: "#94A3B8", fontSize: "13px" },
-  loading: { color: "#CBD5E1", background: "rgba(255,255,255,.08)", padding: "12px", borderRadius: "16px" },
-  newsList: { display: "flex", flexDirection: "column", gap: "10px" },
+  controlTitle: {
+    fontWeight: 900,
+    marginBottom: "10px",
+  },
+  select: {
+    width: "100%",
+    padding: "11px",
+    borderRadius: "14px",
+    border: "none",
+    marginBottom: "12px",
+  },
+  speedRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    color: "#CBD5E1",
+    fontSize: "14px",
+  },
+  actionRow: {
+    display: "flex",
+    gap: "8px",
+    flexWrap: "wrap",
+    marginTop: "14px",
+  },
+  miniButton: {
+    background: "#334155",
+    color: "white",
+    border: "none",
+    borderRadius: "12px",
+    padding: "9px 12px",
+    cursor: "pointer",
+    fontWeight: 700,
+  },
+  playSmallButton: {
+    background: "#2563EB",
+    color: "white",
+    border: "none",
+    borderRadius: "12px",
+    padding: "9px 12px",
+    cursor: "pointer",
+    fontWeight: 800,
+  },
+  stopButton: {
+    background: "#DC2626",
+    color: "white",
+    border: "none",
+    borderRadius: "12px",
+    padding: "9px 12px",
+    cursor: "pointer",
+    fontWeight: 700,
+  },
+  gptButton: {
+    background: "#7C3AED",
+    color: "white",
+    border: "none",
+    borderRadius: "12px",
+    padding: "9px 12px",
+    cursor: "pointer",
+    fontWeight: 800,
+  },
+  sectionHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginTop: "24px",
+    marginBottom: "12px",
+  },
+  sectionTitle: {
+    margin: 0,
+    fontSize: "20px",
+    fontWeight: 900,
+  },
+  countText: {
+    color: "#94A3B8",
+    fontSize: "13px",
+  },
+  loading: {
+    color: "#CBD5E1",
+    background: "rgba(255,255,255,.08)",
+    padding: "12px",
+    borderRadius: "16px",
+  },
+  newsList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "10px",
+  },
   newsCard: {
-    display: "flex", gap: "12px", alignItems: "flex-start",
-    background: "rgba(255,255,255,.07)", border: "1px solid rgba(255,255,255,.08)",
-    borderRadius: "18px", padding: "13px", cursor: "pointer",
+    display: "flex",
+    gap: "12px",
+    alignItems: "flex-start",
+    background: "rgba(255,255,255,.07)",
+    border: "1px solid rgba(255,255,255,.08)",
+    borderRadius: "18px",
+    padding: "13px",
+    cursor: "pointer",
   },
-  newsCardActive: { background: "rgba(37,99,235,.26)", border: "1px solid rgba(147,197,253,.45)" },
+  newsCardActive: {
+    background: "rgba(37,99,235,.26)",
+    border: "1px solid rgba(147,197,253,.45)",
+  },
   newsIndex: {
-    width: "34px", height: "34px", borderRadius: "12px",
-    background: "rgba(255,255,255,.1)", display: "grid", placeItems: "center",
-    color: "#93C5FD", fontWeight: 900, fontSize: "12px", flexShrink: 0,
+    width: "34px",
+    height: "34px",
+    borderRadius: "12px",
+    background: "rgba(255,255,255,.1)",
+    display: "grid",
+    placeItems: "center",
+    color: "#93C5FD",
+    fontWeight: 900,
+    fontSize: "12px",
+    flexShrink: 0,
   },
-  newsTitle: { fontSize: "15px", fontWeight: 800, lineHeight: 1.45 },
-  newsMeta: { display: "flex", justifyContent: "space-between", gap: "10px", color: "#94A3B8", marginTop: "8px", fontSize: "12px" },
-  link: { color: "#93C5FD", textDecoration: "none", flexShrink: 0 },
+  newsTitle: {
+    fontSize: "15px",
+    fontWeight: 800,
+    lineHeight: 1.45,
+  },
+  newsMeta: {
+    display: "flex",
+    justifyContent: "space-between",
+    gap: "10px",
+    color: "#94A3B8",
+    marginTop: "8px",
+    fontSize: "12px",
+  },
+  link: {
+    color: "#93C5FD",
+    textDecoration: "none",
+    flexShrink: 0,
+  },
   bottomNav: {
-    position: "fixed", left: "50%", bottom: "16px", transform: "translateX(-50%)",
-    width: "calc(100% - 36px)", maxWidth: "430px",
-    background: "rgba(15,23,42,.92)", border: "1px solid rgba(255,255,255,.1)",
-    borderRadius: "24px", padding: "10px 12px", display: "flex",
-    justifyContent: "space-around", backdropFilter: "blur(18px)",
+    position: "fixed",
+    left: "50%",
+    bottom: "16px",
+    transform: "translateX(-50%)",
+    width: "calc(100% - 36px)",
+    maxWidth: "430px",
+    background: "rgba(15,23,42,.92)",
+    border: "1px solid rgba(255,255,255,.1)",
+    borderRadius: "24px",
+    padding: "10px 12px",
+    display: "flex",
+    justifyContent: "space-around",
+    backdropFilter: "blur(18px)",
     boxShadow: "0 20px 50px rgba(0,0,0,.4)",
   },
   navItem: {
-    background: "transparent", border: "none", color: "#94A3B8",
-    display: "flex", flexDirection: "column", alignItems: "center",
-    gap: "3px", fontSize: "12px", cursor: "pointer",
+    background: "transparent",
+    border: "none",
+    color: "#94A3B8",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: "3px",
+    fontSize: "12px",
+    cursor: "pointer",
   },
   navItemActive: {
-    background: "rgba(255,255,255,.12)", border: "none", color: "white",
-    display: "flex", flexDirection: "column", alignItems: "center",
-    gap: "3px", fontSize: "12px", fontWeight: 800,
-    borderRadius: "16px", padding: "8px 18px", cursor: "pointer",
+    background: "rgba(255,255,255,.12)",
+    border: "none",
+    color: "white",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: "3px",
+    fontSize: "12px",
+    fontWeight: 800,
+    borderRadius: "16px",
+    padding: "8px 18px",
+    cursor: "pointer",
   },
 };
