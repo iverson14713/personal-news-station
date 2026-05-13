@@ -355,6 +355,5 @@ const styles: any = {
     gap: 12,
   },
 };
-```
 
 
