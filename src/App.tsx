@@ -249,8 +249,7 @@ export default function App() {
 
     const text = selectedNews
       .map((n) => n.title)
-      .join("。
-");
+      .join("。");
 
     const speech =
       new SpeechSynthesisUtterance(text);
