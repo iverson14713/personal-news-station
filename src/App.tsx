@@ -63,6 +63,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [lastUpdated, setLastUpdated] = useState("");
   const [speed, setSpeed] = useState(1.2);
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [voiceName, setVoiceName] = useState("");
 
@@ -186,6 +187,25 @@ export default function App() {
     setNews((prev) => prev.map((item) => ({ ...item, selected: false })));
   };
 
+  const createSpeech = (rate: number) => {
+    const text = selectedNews
+      .map((n, i) => `第 ${i + 1} 則新聞，${n.title}`)
+      .join("。");
+
+    const speech = new SpeechSynthesisUtterance(text);
+    speech.lang = "zh-TW";
+    speech.rate = rate;
+
+    const selectedVoice = voices.find((v) => v.name === voiceName);
+    if (selectedVoice) speech.voice = selectedVoice;
+
+    speech.onstart = () => setIsSpeaking(true);
+    speech.onend = () => setIsSpeaking(false);
+    speech.onerror = () => setIsSpeaking(false);
+
+    return speech;
+  };
+
   const speakNews = () => {
     window.speechSynthesis.cancel();
 
@@ -194,22 +214,24 @@ export default function App() {
       return;
     }
 
-    const text = selectedNews
-      .map((n, i) => `第 ${i + 1} 則新聞，${n.title}`)
-      .join("。");
-
-    const speech = new SpeechSynthesisUtterance(text);
-    speech.lang = "zh-TW";
-    speech.rate = speed;
-
-    const selectedVoice = voices.find((v) => v.name === voiceName);
-    if (selectedVoice) speech.voice = selectedVoice;
-
-    window.speechSynthesis.speak(speech);
+    window.speechSynthesis.speak(createSpeech(speed));
   };
 
   const stopSpeak = () => {
     window.speechSynthesis.cancel();
+    setIsSpeaking(false);
+  };
+
+  const changeSpeed = (newSpeed: number) => {
+    setSpeed(newSpeed);
+
+    if (isSpeaking && selectedNews.length > 0) {
+      window.speechSynthesis.cancel();
+
+      setTimeout(() => {
+        window.speechSynthesis.speak(createSpeech(newSpeed));
+      }, 120);
+    }
   };
 
   const copyGptPrompt = async () => {
@@ -256,7 +278,9 @@ ${selectedNews
 
         <section style={styles.heroCard}>
           <div>
-            <div style={styles.heroBadge}>今日新聞雷達</div>
+            <div style={styles.heroBadge}>
+              {isSpeaking ? "播放中" : "今日新聞雷達"}
+            </div>
             <h2 style={styles.heroTitle}>
               {tab === "home" && "我的新聞首頁"}
               {tab === "player" && "播放控制台"}
@@ -344,7 +368,9 @@ ${selectedNews
         {tab === "player" && (
           <>
             <section style={styles.controlPanel}>
-              <div style={styles.controlTitle}>播放設定</div>
+              <div style={styles.controlTitle}>
+                播放設定 {isSpeaking ? "｜播放中" : ""}
+              </div>
 
               <select
                 value={voiceName}
@@ -366,7 +392,7 @@ ${selectedNews
                   max="2"
                   step="0.1"
                   value={speed}
-                  onChange={(e) => setSpeed(Number(e.target.value))}
+                  onChange={(e) => changeSpeed(Number(e.target.value))}
                   style={{ width: "55%" }}
                 />
               </div>
