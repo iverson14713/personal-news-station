@@ -10,12 +10,12 @@ type NewsItem = {
 };
 
 const topics = [
-  { label: "全部", query: "NBA OR MLB OR BTC OR ETH OR 台股 OR ETF" },
-  { label: "NBA", query: "NBA 勇士 Curry" },
-  { label: "MLB", query: "MLB 道奇 大谷翔平" },
-  { label: "幣圈", query: "BTC OR ETH OR 加密貨幣 OR 比特幣" },
-  { label: "台股", query: "台股 ETF 台積電" },
-  { label: "國際", query: "戰爭 國際局勢 Fed 利率" },
+  { label: "全部", query: "NBA OR MLB OR BTC OR ETH OR 台股 OR ETF", icon: "✨" },
+  { label: "NBA", query: "NBA 勇士 Curry", icon: "🏀" },
+  { label: "MLB", query: "MLB 道奇 大谷翔平", icon: "⚾" },
+  { label: "幣圈", query: "BTC OR ETH OR 加密貨幣 OR 比特幣", icon: "₿" },
+  { label: "台股", query: "台股 ETF 台積電", icon: "📈" },
+  { label: "國際", query: "戰爭 國際局勢 Fed 利率", icon: "🌍" },
 ];
 
 function cleanTitle(title: string) {
@@ -36,8 +36,7 @@ export default function App() {
       const allVoices = window.speechSynthesis.getVoices();
       setVoices(allVoices);
       if (!voiceName && allVoices.length > 0) {
-        const zhVoice =
-          allVoices.find((v) => v.lang.includes("zh")) || allVoices[0];
+        const zhVoice = allVoices.find((v) => v.lang.includes("zh")) || allVoices[0];
         setVoiceName(zhVoice.name);
       }
     };
@@ -77,10 +76,7 @@ export default function App() {
           };
         })
         .filter((item) => {
-          const key = item.title
-            .replace(/[，。！？、\s]/g, "")
-            .slice(0, 24);
-
+          const key = item.title.replace(/[，。！？、\s]/g, "").slice(0, 24);
           if (seen.has(key)) return false;
           seen.add(key);
           return true;
@@ -114,6 +110,7 @@ export default function App() {
     const customTopic = {
       label: customKeyword,
       query: customKeyword,
+      icon: "🔎",
     };
 
     setActiveTopic(customTopic);
@@ -184,199 +181,457 @@ export default function App() {
 
 新聞列表：
 ${selectedNews
-  .map((item, index) => `${index + 1}. ${item.title}\n來源：${item.source}\n連結：${item.link}`)
+  .map(
+    (item, index) =>
+      `${index + 1}. ${item.title}\n來源：${item.source}\n連結：${item.link}`
+  )
   .join("\n\n")}
 `;
 
     await navigator.clipboard.writeText(prompt);
-    alert("已複製 GPT 精華整理 Prompt，可以貼到 ChatGPT 使用");
+    alert("已複製 GPT 精華整理 Prompt");
   };
 
-  const openChatGPT = () => {
-    window.open("https://chatgpt.com/", "_blank");
-  };
+  const selectedCount = news.filter((n) => n.selected).length;
 
   return (
-    <div
-      style={{
-        background: "#111827",
-        minHeight: "100vh",
-        color: "white",
-        padding: "18px",
-        fontFamily: "sans-serif",
-      }}
-    >
-      <h1 style={{ fontSize: "30px", fontWeight: "bold" }}>個人新聞台</h1>
+    <div style={styles.page}>
+      <div style={styles.phone}>
+        <header style={styles.header}>
+          <div>
+            <div style={styles.kicker}>Personal News Radio</div>
+            <h1 style={styles.title}>個人新聞台</h1>
+            <p style={styles.subtitle}>只聽你真正關心的重點</p>
+          </div>
+          <div style={styles.logo}>🎙️</div>
+        </header>
 
-      <p style={{ color: "#9CA3AF", marginTop: "6px" }}>
-        選新聞、播放標題，或一鍵丟給 GPT 變精華
-      </p>
+        <section style={styles.heroCard}>
+          <div>
+            <div style={styles.heroBadge}>今日新聞雷達</div>
+            <h2 style={styles.heroTitle}>AI 新聞電台雛形</h2>
+            <p style={styles.heroText}>
+              已選 {selectedCount} 則新聞，可朗讀或丟給 GPT 變精華。
+            </p>
+          </div>
 
-      <div style={{ marginTop: "16px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
-        {topics.map((topic) => (
-          <button
-            key={topic.label}
-            onClick={() => changeTopic(topic)}
-            style={{
-              background: activeTopic.label === topic.label ? "#2563EB" : "#374151",
-              color: "white",
-              border: "none",
-              padding: "8px 12px",
-              borderRadius: "999px",
-              cursor: "pointer",
-            }}
-          >
-            {topic.label}
+          <button onClick={speakNews} style={styles.playButton}>
+            ▶ 播放
           </button>
-        ))}
-      </div>
+        </section>
 
-      <div style={{ marginTop: "14px", display: "flex", gap: "8px" }}>
-        <input
-          value={customKeyword}
-          onChange={(e) => setCustomKeyword(e.target.value)}
-          placeholder="自訂關鍵字：大谷、台積電、Solana..."
-          style={{
-            flex: 1,
-            padding: "10px",
-            borderRadius: "10px",
-            border: "none",
-            fontSize: "15px",
-          }}
-        />
+        <div style={styles.searchBox}>
+          <input
+            value={customKeyword}
+            onChange={(e) => setCustomKeyword(e.target.value)}
+            placeholder="搜尋：大谷、Curry、BTC、台積電..."
+            style={styles.searchInput}
+          />
+          <button onClick={searchCustomKeyword} style={styles.searchButton}>
+            搜尋
+          </button>
+        </div>
 
-        <button
-          onClick={searchCustomKeyword}
-          style={{
-            background: "#16A34A",
-            color: "white",
-            border: "none",
-            padding: "10px 14px",
-            borderRadius: "10px",
-            cursor: "pointer",
-          }}
-        >
-          搜尋
-        </button>
-      </div>
-
-      <div style={{ marginTop: "18px" }}>
-        <label>聲音</label>
-        <select
-          value={voiceName}
-          onChange={(e) => setVoiceName(e.target.value)}
-          style={{
-            width: "100%",
-            marginTop: "8px",
-            padding: "10px",
-            borderRadius: "10px",
-          }}
-        >
-          {voices.map((voice) => (
-            <option key={voice.name} value={voice.name}>
-              {voice.name}（{voice.lang}）
-            </option>
-          ))}
-        </select>
-      </div>
-
-      <div style={{ marginTop: "16px" }}>
-        <label>播放速度：{speed.toFixed(1)}x</label>
-
-        <input
-          type="range"
-          min="0.8"
-          max="2"
-          step="0.1"
-          value={speed}
-          onChange={(e) => setSpeed(Number(e.target.value))}
-          style={{ width: "100%", marginTop: "8px" }}
-        />
-      </div>
-
-      <div style={{ marginTop: "16px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
-        <button onClick={selectAll} style={smallButton("#4B5563")}>
-          全選
-        </button>
-
-        <button onClick={clearAll} style={smallButton("#4B5563")}>
-          取消全選
-        </button>
-
-        <button onClick={speakNews} style={smallButton("#2563EB")}>
-          ▶️ 播放
-        </button>
-
-        <button onClick={stopSpeak} style={smallButton("#DC2626")}>
-          ⏹ 停止
-        </button>
-
-        <button onClick={copyGptPrompt} style={smallButton("#7C3AED")}>
-          複製 GPT 精華
-        </button>
-
-        <button onClick={openChatGPT} style={smallButton("#059669")}>
-          開啟 ChatGPT
-        </button>
-      </div>
-
-      <h2 style={{ marginTop: "22px", fontSize: "20px" }}>
-        {activeTopic.label}｜今日新聞
-      </h2>
-
-      {loading && <p style={{ color: "#9CA3AF" }}>新聞讀取中...</p>}
-
-      <div style={{ marginTop: "12px" }}>
-        {news.map((item) => (
-          <div
-            key={item.id}
-            onClick={() => toggleNews(item.id)}
-            style={{
-              background: item.selected ? "#1D4ED8" : "#1F2937",
-              padding: "11px 12px",
-              borderRadius: "12px",
-              marginBottom: "10px",
-              cursor: "pointer",
-            }}
-          >
-            <div style={{ fontSize: "15px", fontWeight: "bold", lineHeight: 1.4 }}>
-              {item.selected ? "✅ " : "⬜ "}
-              {item.title}
-            </div>
-
-            <div style={{ color: "#D1D5DB", marginTop: "6px", fontSize: "12px" }}>
-              {item.source}
-            </div>
-
-            <a
-              href={item.link}
-              target="_blank"
-              rel="noreferrer"
-              onClick={(e) => e.stopPropagation()}
+        <div style={styles.topicRow}>
+          {topics.map((topic) => (
+            <button
+              key={topic.label}
+              onClick={() => changeTopic(topic)}
               style={{
-                display: "inline-block",
-                color: "#93C5FD",
-                marginTop: "6px",
-                fontSize: "12px",
+                ...styles.topicChip,
+                ...(activeTopic.label === topic.label ? styles.topicChipActive : {}),
               }}
             >
-              原文
-            </a>
+              <span>{topic.icon}</span> {topic.label}
+            </button>
+          ))}
+        </div>
+
+        <section style={styles.controlPanel}>
+          <div style={styles.controlTitle}>播放設定</div>
+
+          <select
+            value={voiceName}
+            onChange={(e) => setVoiceName(e.target.value)}
+            style={styles.select}
+          >
+            {voices.map((voice) => (
+              <option key={voice.name} value={voice.name}>
+                {voice.name}（{voice.lang}）
+              </option>
+            ))}
+          </select>
+
+          <div style={styles.speedRow}>
+            <span>速度 {speed.toFixed(1)}x</span>
+            <input
+              type="range"
+              min="0.8"
+              max="2"
+              step="0.1"
+              value={speed}
+              onChange={(e) => setSpeed(Number(e.target.value))}
+              style={{ width: "55%" }}
+            />
           </div>
-        ))}
+
+          <div style={styles.actionRow}>
+            <button onClick={selectAll} style={styles.miniButton}>全選</button>
+            <button onClick={clearAll} style={styles.miniButton}>取消</button>
+            <button onClick={stopSpeak} style={styles.stopButton}>停止</button>
+            <button onClick={copyGptPrompt} style={styles.gptButton}>GPT 精華</button>
+          </div>
+        </section>
+
+        <div style={styles.sectionHeader}>
+          <h2 style={styles.sectionTitle}>{activeTopic.label}｜今日新聞</h2>
+          <span style={styles.countText}>{news.length} 則</span>
+        </div>
+
+        {loading && <div style={styles.loading}>新聞讀取中...</div>}
+
+        <div style={styles.newsList}>
+          {news.map((item, index) => (
+            <article
+              key={item.id}
+              onClick={() => toggleNews(item.id)}
+              style={{
+                ...styles.newsCard,
+                ...(item.selected ? styles.newsCardActive : {}),
+              }}
+            >
+              <div style={styles.newsIndex}>{String(index + 1).padStart(2, "0")}</div>
+
+              <div style={{ flex: 1 }}>
+                <div style={styles.newsTitle}>
+                  {item.selected ? "✅ " : ""}
+                  {item.title}
+                </div>
+
+                <div style={styles.newsMeta}>
+                  <span>{item.source}</span>
+                  <a
+                    href={item.link}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    style={styles.link}
+                  >
+                    原文
+                  </a>
+                </div>
+              </div>
+            </article>
+          ))}
+        </div>
+
+        <nav style={styles.bottomNav}>
+          <div style={styles.navItemActive}>🏠<span>首頁</span></div>
+          <div style={styles.navItem}>🎧<span>播放</span></div>
+          <div style={styles.navItem}>⭐<span>收藏</span></div>
+          <div style={styles.navItem}>⚙️<span>設定</span></div>
+        </nav>
       </div>
     </div>
   );
 }
 
-function smallButton(background: string) {
-  return {
-    background,
-    border: "none",
+const styles: Record<string, React.CSSProperties> = {
+  page: {
+    minHeight: "100vh",
+    background:
+      "radial-gradient(circle at top left, #1D4ED8 0, transparent 28%), linear-gradient(180deg, #020617 0%, #0F172A 100%)",
     color: "white",
-    padding: "9px 12px",
-    borderRadius: "10px",
-    cursor: "pointer",
+    fontFamily:
+      '-apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans TC", sans-serif',
+    padding: "18px",
+  },
+  phone: {
+    maxWidth: "460px",
+    margin: "0 auto",
+    paddingBottom: "92px",
+  },
+  header: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    padding: "12px 2px 18px",
+  },
+  kicker: {
+    color: "#93C5FD",
+    fontSize: "12px",
+    letterSpacing: "1px",
+    textTransform: "uppercase",
+  },
+  title: {
+    margin: 0,
+    fontSize: "34px",
+    fontWeight: 900,
+    letterSpacing: "-1px",
+  },
+  subtitle: {
+    margin: "6px 0 0",
+    color: "#CBD5E1",
+    fontSize: "15px",
+  },
+  logo: {
+    width: "54px",
+    height: "54px",
+    borderRadius: "18px",
+    background: "linear-gradient(135deg, #2563EB, #7C3AED)",
+    display: "grid",
+    placeItems: "center",
+    fontSize: "26px",
+    boxShadow: "0 12px 30px rgba(37,99,235,.35)",
+  },
+  heroCard: {
+    background:
+      "linear-gradient(135deg, rgba(37,99,235,.95), rgba(124,58,237,.9))",
+    borderRadius: "28px",
+    padding: "22px",
+    display: "flex",
+    justifyContent: "space-between",
+    gap: "16px",
+    alignItems: "center",
+    boxShadow: "0 20px 60px rgba(37,99,235,.35)",
+  },
+  heroBadge: {
+    display: "inline-block",
+    background: "rgba(255,255,255,.18)",
+    padding: "6px 10px",
+    borderRadius: "999px",
+    fontSize: "12px",
+    marginBottom: "12px",
+  },
+  heroTitle: {
+    margin: 0,
+    fontSize: "24px",
+    fontWeight: 900,
+  },
+  heroText: {
+    margin: "8px 0 0",
+    color: "#DBEAFE",
     fontSize: "14px",
-  };
-}
+    lineHeight: 1.5,
+  },
+  playButton: {
+    minWidth: "86px",
+    height: "86px",
+    borderRadius: "28px",
+    border: "none",
+    background: "white",
+    color: "#1D4ED8",
+    fontWeight: 900,
+    fontSize: "16px",
+    cursor: "pointer",
+  },
+  searchBox: {
+    display: "flex",
+    gap: "8px",
+    marginTop: "18px",
+    background: "rgba(255,255,255,.08)",
+    padding: "8px",
+    borderRadius: "18px",
+    border: "1px solid rgba(255,255,255,.08)",
+  },
+  searchInput: {
+    flex: 1,
+    background: "transparent",
+    color: "white",
+    border: "none",
+    outline: "none",
+    fontSize: "15px",
+    padding: "10px",
+  },
+  searchButton: {
+    background: "#22C55E",
+    color: "white",
+    border: "none",
+    borderRadius: "13px",
+    padding: "0 14px",
+    fontWeight: 800,
+    cursor: "pointer",
+  },
+  topicRow: {
+    display: "flex",
+    gap: "9px",
+    overflowX: "auto",
+    padding: "18px 0 6px",
+  },
+  topicChip: {
+    whiteSpace: "nowrap",
+    background: "rgba(255,255,255,.08)",
+    color: "#CBD5E1",
+    border: "1px solid rgba(255,255,255,.08)",
+    padding: "10px 14px",
+    borderRadius: "999px",
+    cursor: "pointer",
+    fontWeight: 700,
+  },
+  topicChipActive: {
+    background: "white",
+    color: "#0F172A",
+  },
+  controlPanel: {
+    marginTop: "14px",
+    background: "rgba(15,23,42,.82)",
+    border: "1px solid rgba(255,255,255,.08)",
+    borderRadius: "24px",
+    padding: "16px",
+  },
+  controlTitle: {
+    fontWeight: 900,
+    marginBottom: "10px",
+  },
+  select: {
+    width: "100%",
+    padding: "11px",
+    borderRadius: "14px",
+    border: "none",
+    marginBottom: "12px",
+  },
+  speedRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    color: "#CBD5E1",
+    fontSize: "14px",
+  },
+  actionRow: {
+    display: "flex",
+    gap: "8px",
+    flexWrap: "wrap",
+    marginTop: "14px",
+  },
+  miniButton: {
+    background: "#334155",
+    color: "white",
+    border: "none",
+    borderRadius: "12px",
+    padding: "9px 12px",
+    cursor: "pointer",
+    fontWeight: 700,
+  },
+  stopButton: {
+    background: "#DC2626",
+    color: "white",
+    border: "none",
+    borderRadius: "12px",
+    padding: "9px 12px",
+    cursor: "pointer",
+    fontWeight: 700,
+  },
+  gptButton: {
+    background: "#7C3AED",
+    color: "white",
+    border: "none",
+    borderRadius: "12px",
+    padding: "9px 12px",
+    cursor: "pointer",
+    fontWeight: 800,
+  },
+  sectionHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginTop: "24px",
+    marginBottom: "12px",
+  },
+  sectionTitle: {
+    margin: 0,
+    fontSize: "20px",
+    fontWeight: 900,
+  },
+  countText: {
+    color: "#94A3B8",
+    fontSize: "13px",
+  },
+  loading: {
+    color: "#CBD5E1",
+    background: "rgba(255,255,255,.08)",
+    padding: "12px",
+    borderRadius: "16px",
+  },
+  newsList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "10px",
+  },
+  newsCard: {
+    display: "flex",
+    gap: "12px",
+    alignItems: "flex-start",
+    background: "rgba(255,255,255,.07)",
+    border: "1px solid rgba(255,255,255,.08)",
+    borderRadius: "18px",
+    padding: "13px",
+    cursor: "pointer",
+  },
+  newsCardActive: {
+    background: "rgba(37,99,235,.26)",
+    border: "1px solid rgba(147,197,253,.45)",
+  },
+  newsIndex: {
+    width: "34px",
+    height: "34px",
+    borderRadius: "12px",
+    background: "rgba(255,255,255,.1)",
+    display: "grid",
+    placeItems: "center",
+    color: "#93C5FD",
+    fontWeight: 900,
+    fontSize: "12px",
+    flexShrink: 0,
+  },
+  newsTitle: {
+    fontSize: "15px",
+    fontWeight: 800,
+    lineHeight: 1.45,
+  },
+  newsMeta: {
+    display: "flex",
+    justifyContent: "space-between",
+    gap: "10px",
+    color: "#94A3B8",
+    marginTop: "8px",
+    fontSize: "12px",
+  },
+  link: {
+    color: "#93C5FD",
+    textDecoration: "none",
+    flexShrink: 0,
+  },
+  bottomNav: {
+    position: "fixed",
+    left: "50%",
+    bottom: "16px",
+    transform: "translateX(-50%)",
+    width: "calc(100% - 36px)",
+    maxWidth: "430px",
+    background: "rgba(15,23,42,.92)",
+    border: "1px solid rgba(255,255,255,.1)",
+    borderRadius: "24px",
+    padding: "10px 12px",
+    display: "flex",
+    justifyContent: "space-around",
+    backdropFilter: "blur(18px)",
+    boxShadow: "0 20px 50px rgba(0,0,0,.4)",
+  },
+  navItem: {
+    color: "#94A3B8",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: "3px",
+    fontSize: "12px",
+  },
+  navItemActive: {
+    color: "white",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: "3px",
+    fontSize: "12px",
+    fontWeight: 800,
+  },
+};
