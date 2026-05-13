@@ -1,17 +1,3 @@
-# 完整 App.tsx（修復版）
-
-直接整份覆蓋 `src/App.tsx`
-
-```tsx
-// 這版保留：
-// 真實新聞
-// 收藏
-// GPT 精華
-// 全選 / 取消
-// 真人語音
-// 影音頁
-// 重新整理
-
 import { useEffect, useMemo, useState } from "react";
 
 type Tab = "home" | "player" | "video" | "favorites";
