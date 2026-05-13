@@ -85,16 +85,29 @@ export default function App() {
   };
 
   useEffect(() => {
-    const loadVoices = () => {
-      const allVoices = window.speechSynthesis.getVoices();
-      setVoices(allVoices);
+  const loadVoices = () => {
+    const allVoices = window.speechSynthesis.getVoices();
 
-      if (!voiceName && allVoices.length > 0) {
-        const zhVoice =
-          allVoices.find((v) => v.lang.includes("zh")) || allVoices[0];
-        setVoiceName(zhVoice.name);
-      }
-    };
+    setVoices(allVoices);
+
+    if (!voiceName && allVoices.length > 0) {
+      const preferredVoice =
+        allVoices.find(
+          (v) =>
+            v.lang.includes("zh") &&
+            (v.name.includes("語舒") || v.name.includes("黎澈"))
+        ) ||
+        allVoices.find((v) => v.lang.includes("zh")) ||
+        allVoices[0];
+
+      setVoiceName(preferredVoice.name);
+    }
+  };
+
+  loadVoices();
+  window.speechSynthesis.onvoiceschanged = loadVoices;
+  setTimeout(loadVoices, 1000);
+}, []);
 
     loadVoices();
     window.speechSynthesis.onvoiceschanged = loadVoices;
