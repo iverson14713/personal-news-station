@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
+import type { CSSProperties } from "react";
 
-type Tab = "home" | "player" | "video" | "favorites";
+type Tab = "home" | "player" | "video" | "favorites" | "settings";
 
 type NewsItem = {
   id: string;
@@ -292,6 +293,18 @@ export default function App() {
     );
   };
 
+  const selectAllTopics = () => {
+    setSelectedTopics(topics.map((t) => t.label));
+  };
+
+  const clearTopics = () => {
+    setSelectedTopics([]);
+  };
+
+  const resetDefaultTopics = () => {
+    setSelectedTopics(["NBA", "MLB", "大谷翔平", "Curry", "BTC"]);
+  };
+
   const toggleNews = (id: string) => {
     setNews((prev) =>
       prev.map((item) =>
@@ -318,6 +331,11 @@ export default function App() {
 
   const clearAll = () => {
     setNews((prev) => prev.map((item) => ({ ...item, selected: false })));
+  };
+
+  const clearFavorites = () => {
+    setFavoriteLinks([]);
+    setNews((prev) => prev.map((item) => ({ ...item, favorite: false })));
   };
 
   const createSpeech = (rate: number) => {
@@ -405,7 +423,9 @@ ${newsText}
       ? "播放控制台"
       : tab === "video"
       ? "影音新聞"
-      : "收藏新聞";
+      : tab === "favorites"
+      ? "收藏新聞"
+      : "個人設定";
 
   return (
     <div style={styles.page}>
@@ -442,7 +462,7 @@ ${newsText}
               <input
                 value={customKeyword}
                 onChange={(e) => setCustomKeyword(e.target.value)}
-                placeholder="自訂：降息、台積電、Solana、川普..."
+                placeholder="搜尋：俄烏戰爭、BTC、台積電..."
                 style={styles.searchInput}
               />
               <button onClick={updateMyNews} style={styles.searchButton}>
@@ -450,9 +470,25 @@ ${newsText}
               </button>
             </div>
 
+            <section style={styles.summaryCard}>
+              <div>
+                <div style={styles.summaryTitle}>目前追蹤</div>
+                <div style={styles.summaryText}>
+                  {selectedTopics.length > 0
+                    ? selectedTopics.slice(0, 6).join("、")
+                    : "尚未選擇主題"}
+                  {selectedTopics.length > 6 ? ` 等 ${selectedTopics.length} 個` : ""}
+                </div>
+              </div>
+
+              <button onClick={() => setTab("settings")} style={styles.smallSettingButton}>
+                設定主題
+              </button>
+            </section>
+
             <div style={styles.topicHeader}>
               <div>
-                <div>我的主題</div>
+                <div>我的今日新聞</div>
                 <div style={styles.lastUpdated}>
                   {lastUpdated ? `最後更新：${lastUpdated}` : "尚未更新"}
                 </div>
@@ -471,24 +507,6 @@ ${newsText}
               </button>
             </div>
 
-            <div style={styles.topicGrid}>
-              {topics.map((topic) => {
-                const active = selectedTopics.includes(topic.label);
-                return (
-                  <button
-                    key={topic.label}
-                    onClick={() => toggleTopic(topic.label)}
-                    style={{
-                      ...styles.topicChip,
-                      ...(active ? styles.topicChipActive : {}),
-                    }}
-                  >
-                    <span>{topic.icon}</span> {topic.label}
-                  </button>
-                );
-              })}
-            </div>
-
             <ActionButtons
               selectAll={selectAll}
               clearAll={clearAll}
@@ -496,7 +514,7 @@ ${newsText}
             />
 
             <NewsList
-              title="我的今日新聞"
+              title="新聞列表"
               news={news}
               loading={loading}
               toggleNews={toggleNews}
@@ -631,6 +649,98 @@ ${newsText}
           </>
         )}
 
+        {tab === "settings" && (
+          <>
+            <section style={styles.controlPanel}>
+              <div style={styles.controlTitle}>我的追蹤主題</div>
+
+              <div style={styles.settingHint}>
+                首頁會依照這些主題整理新聞與影音。想搜尋單一事件，可直接在首頁搜尋框輸入關鍵字。
+              </div>
+
+              <div style={styles.actionRow}>
+                <button onClick={selectAllTopics} style={styles.miniButton}>
+                  主題全選
+                </button>
+                <button onClick={clearTopics} style={styles.miniButton}>
+                  清空主題
+                </button>
+                <button onClick={resetDefaultTopics} style={styles.gptButton}>
+                  預設主題
+                </button>
+              </div>
+
+              <div style={styles.topicGridSettings}>
+                {topics.map((topic) => {
+                  const active = selectedTopics.includes(topic.label);
+                  return (
+                    <button
+                      key={topic.label}
+                      onClick={() => toggleTopic(topic.label)}
+                      style={{
+                        ...styles.topicChip,
+                        ...(active ? styles.topicChipActive : {}),
+                      }}
+                    >
+                      <span>{topic.icon}</span> {topic.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+
+            <section style={styles.controlPanel}>
+              <div style={styles.controlTitle}>自訂關鍵字</div>
+              <input
+                value={customKeyword}
+                onChange={(e) => setCustomKeyword(e.target.value)}
+                placeholder="例如：俄烏戰爭、Solana、台積電..."
+                style={styles.settingInput}
+              />
+              <button onClick={updateMyNews} style={styles.fullButton}>
+                套用並更新新聞
+              </button>
+            </section>
+
+            <section style={styles.controlPanel}>
+              <div style={styles.controlTitle}>語音設定</div>
+
+              <select
+                value={voiceName}
+                onChange={(e) => setVoiceName(e.target.value)}
+                style={styles.select}
+              >
+                {voices.map((voice) => (
+                  <option key={voice.name} value={voice.name}>
+                    {voice.name}（{voice.lang}）
+                  </option>
+                ))}
+              </select>
+
+              <div style={styles.speedRow}>
+                <span>播放速度 {speed.toFixed(1)}x</span>
+                <input
+                  type="range"
+                  min="0.8"
+                  max="2"
+                  step="0.1"
+                  value={speed}
+                  onChange={(e) => changeSpeed(Number(e.target.value))}
+                  style={{ width: "55%" }}
+                />
+              </div>
+            </section>
+
+            <section style={styles.controlPanel}>
+              <div style={styles.controlTitle}>收藏管理</div>
+              <div style={styles.settingHint}>目前收藏 {favoriteNews.length} 則新聞。</div>
+              <button onClick={clearFavorites} style={styles.dangerFullButton}>
+                清除全部收藏
+              </button>
+            </section>
+          </>
+        )}
+
         <nav style={styles.bottomNav}>
           <button
             onClick={() => setTab("home")}
@@ -658,6 +768,13 @@ ${newsText}
             style={tab === "favorites" ? styles.navItemActive : styles.navItem}
           >
             ⭐<span>收藏</span>
+          </button>
+
+          <button
+            onClick={() => setTab("settings")}
+            style={tab === "settings" ? styles.navItemActive : styles.navItem}
+          >
+            ⚙️<span>設定</span>
           </button>
         </nav>
       </div>
@@ -770,7 +887,7 @@ function NewsList({
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
+const styles: Record<string, CSSProperties> = {
   page: {
     minHeight: "100vh",
     background:
@@ -780,7 +897,7 @@ const styles: Record<string, React.CSSProperties> = {
       '-apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans TC", sans-serif',
     padding: "18px",
   },
-  phone: { maxWidth: "460px", margin: "0 auto", paddingBottom: "92px" },
+  phone: { maxWidth: "460px", margin: "0 auto", paddingBottom: "98px" },
   header: {
     display: "flex",
     justifyContent: "space-between",
@@ -859,6 +976,38 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 800,
     cursor: "pointer",
   },
+  summaryCard: {
+    marginTop: "14px",
+    background: "rgba(255,255,255,.07)",
+    border: "1px solid rgba(255,255,255,.08)",
+    borderRadius: "18px",
+    padding: "14px",
+    display: "flex",
+    justifyContent: "space-between",
+    gap: "12px",
+    alignItems: "center",
+  },
+  summaryTitle: {
+    fontSize: "13px",
+    color: "#93C5FD",
+    fontWeight: 900,
+    marginBottom: "4px",
+  },
+  summaryText: {
+    color: "#CBD5E1",
+    fontSize: "13px",
+    lineHeight: 1.4,
+  },
+  smallSettingButton: {
+    background: "rgba(255,255,255,.14)",
+    color: "white",
+    border: "1px solid rgba(255,255,255,.12)",
+    borderRadius: "999px",
+    padding: "9px 12px",
+    fontWeight: 800,
+    whiteSpace: "nowrap",
+    cursor: "pointer",
+  },
   topicHeader: {
     marginTop: "18px",
     display: "flex",
@@ -880,13 +1029,11 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "8px 12px",
     fontWeight: 800,
   },
-  topicGrid: {
+  topicGridSettings: {
     display: "flex",
     gap: "8px",
     flexWrap: "wrap",
-    maxHeight: "96px",
-    overflowY: "auto",
-    padding: "12px 0 4px",
+    padding: "14px 0 4px",
   },
   topicChip: {
     whiteSpace: "nowrap",
@@ -908,6 +1055,45 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "16px",
   },
   controlTitle: { fontWeight: 900, marginBottom: "10px" },
+  settingHint: {
+    color: "#CBD5E1",
+    fontSize: "13px",
+    lineHeight: 1.5,
+  },
+  settingInput: {
+    width: "100%",
+    boxSizing: "border-box",
+    background: "rgba(255,255,255,.08)",
+    color: "white",
+    border: "1px solid rgba(255,255,255,.12)",
+    outline: "none",
+    fontSize: "15px",
+    padding: "12px",
+    borderRadius: "14px",
+    marginTop: "8px",
+  },
+  fullButton: {
+    width: "100%",
+    marginTop: "12px",
+    background: "#22C55E",
+    color: "white",
+    border: "none",
+    borderRadius: "14px",
+    padding: "12px",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+  dangerFullButton: {
+    width: "100%",
+    marginTop: "12px",
+    background: "#DC2626",
+    color: "white",
+    border: "none",
+    borderRadius: "14px",
+    padding: "12px",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
   select: {
     width: "100%",
     padding: "11px",
@@ -1061,12 +1247,12 @@ const styles: Record<string, React.CSSProperties> = {
     left: "50%",
     bottom: "16px",
     transform: "translateX(-50%)",
-    width: "calc(100% - 36px)",
+    width: "calc(100% - 28px)",
     maxWidth: "430px",
     background: "rgba(15,23,42,.92)",
     border: "1px solid rgba(255,255,255,.1)",
     borderRadius: "24px",
-    padding: "10px 12px",
+    padding: "9px 8px",
     display: "flex",
     justifyContent: "space-around",
     backdropFilter: "blur(18px)",
@@ -1080,7 +1266,7 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: "column",
     alignItems: "center",
     gap: "3px",
-    fontSize: "12px",
+    fontSize: "11px",
     cursor: "pointer",
   },
   navItemActive: {
@@ -1091,10 +1277,10 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: "column",
     alignItems: "center",
     gap: "3px",
-    fontSize: "12px",
+    fontSize: "11px",
     fontWeight: 800,
     borderRadius: "16px",
-    padding: "8px 14px",
+    padding: "8px 10px",
     cursor: "pointer",
   },
 };
