@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 
 type Tab = "home" | "player" | "video" | "favorites" | "settings";
@@ -88,6 +88,8 @@ export default function App() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [voiceName, setVoiceName] = useState("");
+
+  const topicSelectionKeyRef = useRef<string | null>(null);
 
   const selectedNews = news.filter((n) => n.selected);
   const favoriteNews = news.filter((n) => n.favorite);
@@ -275,6 +277,28 @@ export default function App() {
     fetchNews(buildQuery());
     fetchVideos();
   }, []);
+
+  useEffect(() => {
+    const key = [...selectedTopics].sort().join("\0");
+
+    if (topicSelectionKeyRef.current === null) {
+      topicSelectionKeyRef.current = key;
+      return;
+    }
+
+    if (topicSelectionKeyRef.current === key) {
+      return;
+    }
+
+    topicSelectionKeyRef.current = key;
+
+    const timer = window.setTimeout(() => {
+      fetchNews(buildQuery());
+      fetchVideos();
+    }, 450);
+
+    return () => window.clearTimeout(timer);
+  }, [selectedTopics]);
 
   const updateMyNews = () => {
     setTab("home");
