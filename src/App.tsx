@@ -58,6 +58,10 @@ function cleanTitle(title: string) {
   return title.replace(/\s-\s.*$/, "").trim();
 }
 
+/** AI 精華：相同選取結果快取時間 */
+const AI_SUMMARY_CACHE_KEY = "pns_ai_summary_v1";
+const AI_SUMMARY_CACHE_MS = 30 * 60 * 1000;
+
 function normalizeKey(title: string) {
   return title.replace(/[，。！？、\s\-｜|:：]/g, "").slice(0, 28);
 }
@@ -87,6 +91,15 @@ function isNewsFreshEnough(pubDateRaw: string, nowMs: number): boolean {
   if (!d) return false;
   const age = nowMs - d.getTime();
   return age >= 0 && age <= NEWS_MAX_AGE_MS;
+}
+
+/** 已選新聞（最多 5 則）快取用 fingerprint */
+function aiSummaryCacheFingerprint(items: NewsItem[]): string {
+  return [...items]
+    .slice(0, 5)
+    .map((n) => `${normalizeKey(n.title)}|${n.source.trim()}`)
+    .sort()
+    .join("\0");
 }
 
 function formatVideoPublished(iso: string) {
@@ -251,6 +264,9 @@ export default function App() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [voiceName, setVoiceName] = useState("");
+  const [aiSummary, setAiSummary] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
 
   const topicSelectionKeyRef = useRef<string | null>(null);
 
@@ -391,6 +407,8 @@ export default function App() {
       }
 
       setNews(parsedNews);
+      setAiSummary("");
+      setAiError(null);
       setLastUpdated(
         new Date().toLocaleTimeString("zh-TW", {
           hour: "2-digit",
@@ -625,20 +643,15 @@ export default function App() {
     }
   };
 
-  const copyGptPrompt = async () => {
-    if (selectedNews.length === 0) {
-      alert("請先選擇新聞");
-      return;
-    }
-
-    const newsText = selectedNews
+  function buildGptPromptFromItems(items: NewsItem[]): string {
+    const newsText = items
       .map(
         (item, index) =>
           `${index + 1}. ${item.title}\n來源：${item.source}\n連結：${item.link}`
       )
       .join("\n\n");
 
-    const prompt = `
+    return `
 請幫我把以下新聞整理成「AI個人新聞台」精華版：
 
 要求：
@@ -652,9 +665,122 @@ export default function App() {
 新聞列表：
 ${newsText}
 `;
+  }
 
+  async function copyGptPromptToClipboard(items: NewsItem[]): Promise<boolean> {
+    const prompt = buildGptPromptFromItems(items);
     await navigator.clipboard.writeText(prompt);
-    alert("已複製 GPT 精華整理 Prompt");
+    return true;
+  }
+
+  const copyGptPrompt = async () => {
+    if (selectedNews.length === 0) {
+      alert("請先選擇新聞");
+      return;
+    }
+    try {
+      await copyGptPromptToClipboard(selectedNews);
+      alert("已複製 GPT 精華整理 Prompt");
+    } catch {
+      alert("無法寫入剪貼簿，請檢查瀏覽器權限");
+    }
+  };
+
+  const runGptFallbackClipboard = async () => {
+    if (selectedNews.length === 0) return;
+    try {
+      await copyGptPromptToClipboard(selectedNews);
+      alert("AI 暫時無法使用，已將 GPT 精華 Prompt 複製到剪貼簿，可貼到 ChatGPT 使用");
+    } catch {
+      alert("AI 暫時無法使用，且無法寫入剪貼簿，請改用「GPT 精華」按鈕手動複製");
+    }
+  };
+
+  const fetchAiSummary = async () => {
+    const picked = selectedNews.slice(0, 5);
+    if (picked.length === 0) {
+      alert("請先選擇新聞");
+      return;
+    }
+
+    setAiError(null);
+    const fp = aiSummaryCacheFingerprint(picked);
+
+    try {
+      const raw = localStorage.getItem(AI_SUMMARY_CACHE_KEY);
+      if (raw) {
+        const o = JSON.parse(raw) as {
+          fp?: string;
+          savedAt?: number;
+          text?: string;
+        };
+        if (
+          o.fp === fp &&
+          typeof o.savedAt === "number" &&
+          Date.now() - o.savedAt < AI_SUMMARY_CACHE_MS &&
+          typeof o.text === "string" &&
+          o.text.length > 0
+        ) {
+          setAiError(null);
+          setAiSummary(o.text);
+          return;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+
+    setAiLoading(true);
+    setAiSummary("");
+    try {
+      const res = await fetch("/api/summary", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: picked.map((n) => ({ title: n.title, source: n.source })),
+        }),
+      });
+      const data = (await res.json()) as {
+        ok?: boolean;
+        summary?: string;
+        error?: string;
+        code?: string;
+      };
+
+      if (!data.ok) {
+        const msg =
+          data.code === "NO_KEY"
+            ? "尚未設定 AI API Key"
+            : data.error || "AI 精華產生失敗";
+        setAiError(msg);
+        if (data.code !== "NO_KEY") {
+          await runGptFallbackClipboard();
+        }
+        return;
+      }
+
+      const text = String(data.summary || "").trim();
+      if (!text) {
+        setAiError("AI 未回傳有效內容");
+        await runGptFallbackClipboard();
+        return;
+      }
+
+      setAiSummary(text);
+      try {
+        localStorage.setItem(
+          AI_SUMMARY_CACHE_KEY,
+          JSON.stringify({ fp, savedAt: Date.now(), text })
+        );
+      } catch {
+        /* ignore */
+      }
+    } catch (e) {
+      setAiError(e instanceof Error ? e.message : "網路或伺服器錯誤");
+      await runGptFallbackClipboard();
+    } finally {
+      setAiLoading(false);
+    }
   };
 
   const pageTitle =
@@ -719,6 +845,21 @@ ${newsText}
               >
                 {isSpeaking ? "■ 停止" : "▶ 播放"}
               </button>
+              <button
+                type="button"
+                onClick={() => void fetchAiSummary()}
+                disabled={aiLoading || selectedNews.length === 0}
+                style={{
+                  ...styles.toolbarBtnAi,
+                  opacity: aiLoading || selectedNews.length === 0 ? 0.65 : 1,
+                  cursor:
+                    aiLoading || selectedNews.length === 0
+                      ? "not-allowed"
+                      : "pointer",
+                }}
+              >
+                {aiLoading ? "AI 分析中..." : "AI 精華"}
+              </button>
               <button type="button" onClick={copyGptPrompt} style={styles.toolbarBtnGpt}>
                 GPT 精華
               </button>
@@ -742,6 +883,23 @@ ${newsText}
                 設定主題
               </button>
             </div>
+
+            {(aiLoading || aiSummary || aiError) && (
+              <div style={styles.aiSummaryWrap}>
+                <div style={styles.aiSummaryCard}>
+                  <div style={styles.aiSummaryHeaderRow}>
+                    <span style={styles.aiSummaryKicker}>AI 精華</span>
+                  </div>
+                  {aiLoading ? (
+                    <div style={styles.aiSummaryLoading}>AI 分析中...</div>
+                  ) : aiError ? (
+                    <div style={styles.aiSummaryError}>{aiError}</div>
+                  ) : (
+                    <div style={styles.aiSummaryBody}>{aiSummary}</div>
+                  )}
+                </div>
+              </div>
+            )}
 
             <NewsList
               title="新聞"
@@ -799,11 +957,43 @@ ${newsText}
                 <button onClick={stopSpeak} style={styles.stopButton}>
                   停止
                 </button>
+                <button
+                  type="button"
+                  onClick={() => void fetchAiSummary()}
+                  disabled={aiLoading || selectedNews.length === 0}
+                  style={{
+                    ...styles.aiSummaryButtonSmall,
+                    opacity: aiLoading || selectedNews.length === 0 ? 0.65 : 1,
+                    cursor:
+                      aiLoading || selectedNews.length === 0
+                        ? "not-allowed"
+                        : "pointer",
+                  }}
+                >
+                  {aiLoading ? "AI 分析中..." : "AI 精華"}
+                </button>
                 <button onClick={copyGptPrompt} style={styles.gptButton}>
                   GPT 精華
                 </button>
               </div>
             </section>
+
+            {(aiLoading || aiSummary || aiError) && (
+              <div style={styles.aiSummaryWrap}>
+                <div style={styles.aiSummaryCard}>
+                  <div style={styles.aiSummaryHeaderRow}>
+                    <span style={styles.aiSummaryKicker}>AI 精華</span>
+                  </div>
+                  {aiLoading ? (
+                    <div style={styles.aiSummaryLoading}>AI 分析中...</div>
+                  ) : aiError ? (
+                    <div style={styles.aiSummaryError}>{aiError}</div>
+                  ) : (
+                    <div style={styles.aiSummaryBody}>{aiSummary}</div>
+                  )}
+                </div>
+              </div>
+            )}
 
             <NewsList
               title="即將播放"
@@ -957,6 +1147,17 @@ ${newsText}
               <button onClick={updateMyNews} style={styles.fullButton}>
                 套用並更新新聞
               </button>
+            </section>
+
+            <section style={styles.controlPanel}>
+              <div style={styles.controlTitle}>AI 精華（OpenAI）</div>
+              <div style={styles.settingHint}>
+                「AI 精華」由伺服端的{" "}
+                <code style={{ color: "#93C5FD" }}>OPENAI_API_KEY</code>{" "}
+                呼叫 OpenAI；請在部署環境（例如 Vercel
+                Environment Variables）設定金鑰。未設定時會顯示提示，並可改用「GPT
+                精華」複製 Prompt。
+              </div>
             </section>
 
             <section style={styles.controlPanel}>
@@ -1333,6 +1534,18 @@ const styles: Record<string, CSSProperties> = {
     flexShrink: 0,
     whiteSpace: "nowrap",
   },
+  toolbarBtnAi: {
+    background: "linear-gradient(135deg, #0D9488, #059669)",
+    color: "white",
+    border: "none",
+    borderRadius: "999px",
+    padding: "7px 10px",
+    fontSize: "11px",
+    fontWeight: 800,
+    cursor: "pointer",
+    flexShrink: 0,
+    whiteSpace: "nowrap",
+  },
   toolbarBtnNeutral: {
     background: "rgba(255,255,255,.1)",
     color: "#E2E8F0",
@@ -1552,6 +1765,60 @@ const styles: Record<string, CSSProperties> = {
     padding: "9px 12px",
     cursor: "pointer",
     fontWeight: 800,
+  },
+  aiSummaryButtonSmall: {
+    background: "linear-gradient(135deg, #0D9488, #059669)",
+    color: "white",
+    border: "none",
+    borderRadius: "12px",
+    padding: "9px 12px",
+    cursor: "pointer",
+    fontWeight: 800,
+  },
+  aiSummaryWrap: {
+    marginTop: "10px",
+    marginBottom: "6px",
+    minWidth: 0,
+  },
+  aiSummaryCard: {
+    background: "rgba(15,23,42,.88)",
+    border: "1px solid rgba(255,255,255,.1)",
+    borderRadius: "18px",
+    padding: "14px 14px 16px",
+    minWidth: 0,
+    boxSizing: "border-box",
+  },
+  aiSummaryHeaderRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "8px",
+    marginBottom: "10px",
+  },
+  aiSummaryKicker: {
+    fontSize: "10px",
+    color: "#5EEAD4",
+    fontWeight: 800,
+    letterSpacing: "0.12em",
+    textTransform: "uppercase",
+  },
+  aiSummaryBody: {
+    fontSize: "14px",
+    lineHeight: 1.55,
+    color: "#E2E8F0",
+    whiteSpace: "pre-wrap",
+    wordBreak: "break-word",
+  },
+  aiSummaryError: {
+    color: "#FCA5A5",
+    fontSize: "13px",
+    lineHeight: 1.5,
+    wordBreak: "break-word",
+  },
+  aiSummaryLoading: {
+    color: "#94A3B8",
+    fontSize: "14px",
+    fontWeight: 700,
   },
   sectionHeader: {
     display: "flex",
