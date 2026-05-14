@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 
 type Tab = "home" | "player" | "video" | "favorites" | "settings";
@@ -83,10 +83,62 @@ type RawVideoPayload = {
   channel?: string;
   thumbnail?: string;
   publishedAt?: string;
+  keyword?: string;
 };
 
+const VIDEO_CACHE_KEY = "pns_video_pack_v1";
+const VIDEO_HOUR_MS = 60 * 60 * 1000;
+
+function videoCacheFingerprint(labels: string[], custom: string) {
+  return `${custom.trim()}|${[...labels].sort().join("\0")}`;
+}
+
+function readVideoCache():
+  | { fp: string; savedAt: number; videos: VideoItem[]; banner: string | null }
+  | null {
+  try {
+    const raw = localStorage.getItem(VIDEO_CACHE_KEY);
+    if (!raw) return null;
+    const o = JSON.parse(raw) as {
+      fp?: string;
+      savedAt?: number;
+      videos?: VideoItem[];
+      banner?: string | null;
+    };
+    if (!o?.fp || typeof o.savedAt !== "number" || !Array.isArray(o.videos)) return null;
+    return {
+      fp: o.fp,
+      savedAt: o.savedAt,
+      videos: o.videos,
+      banner: o.banner ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeVideoCache(
+  fp: string,
+  videos: VideoItem[],
+  banner: string | null
+) {
+  try {
+    localStorage.setItem(
+      VIDEO_CACHE_KEY,
+      JSON.stringify({ fp, savedAt: Date.now(), videos, banner })
+    );
+  } catch {
+    /* ignore quota */
+  }
+}
+
 async function parseVideosApiResponse(res: Response): Promise<
-  | { ok: true; videos: RawVideoPayload[] }
+  | {
+      ok: true;
+      videos: RawVideoPayload[];
+      banner?: string;
+      source?: string;
+    }
   | { ok: false; error: string; code?: string }
 > {
   const text = await res.text();
@@ -122,7 +174,12 @@ async function parseVideosApiResponse(res: Response): Promise<
   }
 
   if (d.ok === true && Array.isArray(d.videos)) {
-    return { ok: true, videos: d.videos as RawVideoPayload[] };
+    return {
+      ok: true,
+      videos: d.videos as RawVideoPayload[],
+      banner: typeof d.banner === "string" ? d.banner : undefined,
+      source: typeof d.source === "string" ? d.source : undefined,
+    };
   }
 
   if (Array.isArray(data)) {
@@ -147,7 +204,7 @@ export default function App() {
   const [favoriteLinks, setFavoriteLinks] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [videoLoading, setVideoLoading] = useState(false);
-  const [videoError, setVideoError] = useState<string | null>(null);
+  const [videoBanner, setVideoBanner] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState("");
   const [speed, setSpeed] = useState(1.2);
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -172,16 +229,6 @@ export default function App() {
     }
 
     return "今日熱門新聞";
-  };
-
-  const buildVideoKeywords = () => {
-    if (customKeyword.trim()) return [customKeyword.trim()];
-
-    if (selectedTopicObjects.length > 0) {
-      return selectedTopicObjects.slice(0, 8).map((t) => t.query);
-    }
-
-    return ["NBA 最新", "大谷翔平 最新", "BTC 最新"];
   };
 
   useEffect(() => {
@@ -272,87 +319,82 @@ export default function App() {
     setLoading(false);
   };
 
-  const fetchVideos = async () => {
-    setVideoLoading(true);
-    setVideoError(null);
+  const loadVideos = useCallback(
+    async (force: boolean) => {
+      const labels = selectedTopicObjects.map((t) => t.label);
+      const custom = customKeyword.trim();
+      const fp = videoCacheFingerprint(labels, custom);
 
-    try {
-      const keywords = buildVideoKeywords();
-      const perKeyword = 5;
-      const errors: string[] = [];
-
-      const batches = await Promise.all(
-        keywords.map(async (keyword) => {
-          try {
-            const res = await fetch(`/api/videos?q=${encodeURIComponent(keyword)}`);
-            const parsed = await parseVideosApiResponse(res);
-
-            if (!parsed.ok) {
-              const line =
-                parsed.code && parsed.code !== parsed.error
-                  ? `${parsed.error}（${parsed.code}）`
-                  : parsed.error;
-              errors.push(line);
-              return [] as VideoItem[];
-            }
-
-            return parsed.videos.slice(0, perKeyword).map((v) => ({
-              id: v.id || v.url || keyword,
-              title: v.title || `${keyword} 最新影片`,
-              link: v.url || "",
-              channel: v.channel || "YouTube",
-              thumbnail: v.thumbnail || "",
-              keyword,
-              publishedAt: v.publishedAt || "",
-            }));
-          } catch (e) {
-            errors.push(e instanceof Error ? e.message : "網路或程式錯誤");
-            return [] as VideoItem[];
-          }
-        })
-      );
-
-      const seen = new Set<string>();
-      const uniqueVideos: VideoItem[] = [];
-
-      for (const v of batches.flat()) {
-        if (!v.link || !v.id) continue;
-        const key = v.link;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        uniqueVideos.push(v);
-        if (uniqueVideos.length >= 40) break;
+      if (!force) {
+        const hit = readVideoCache();
+        if (
+          hit &&
+          hit.fp === fp &&
+          Date.now() - hit.savedAt < VIDEO_HOUR_MS &&
+          hit.videos.length > 0
+        ) {
+          setVideos(hit.videos);
+          setVideoBanner(hit.banner);
+          return;
+        }
       }
 
-      setVideos(uniqueVideos);
+      setVideoLoading(true);
+      setVideoBanner(null);
 
-      const uniqueMsgs = [...new Set(errors.filter(Boolean))];
-
-      if (uniqueVideos.length === 0) {
-        setVideoError(
-          uniqueMsgs.length > 0
-            ? uniqueMsgs.join("；")
-            : null
+      try {
+        const topicsParam = encodeURIComponent(labels.join(","));
+        const customParam = encodeURIComponent(custom);
+        const res = await fetch(
+          `/api/videos?pack=1&topics=${topicsParam}&custom=${customParam}`
         );
-      } else if (uniqueMsgs.length > 0) {
-        setVideoError(`部分關鍵字未載入：${uniqueMsgs.join("；")}`);
-      } else {
-        setVideoError(null);
-      }
-    } catch (error) {
-      console.error(error);
-      setVideos([]);
-      setVideoError(
-        error instanceof Error ? error.message : "載入影音時發生錯誤"
-      );
-    }
+        const parsed = await parseVideosApiResponse(res);
 
-    setVideoLoading(false);
-  };
+        if (!parsed.ok) {
+          setVideos([]);
+          setVideoBanner(parsed.error || "暫時無法載入影音，請稍後再試。");
+          return;
+        }
+
+        const mapped: VideoItem[] = parsed.videos
+          .filter((v) => v.url && v.id)
+          .map((v) => ({
+            id: String(v.id || v.url),
+            title: v.title || "YouTube 影片",
+            link: String(v.url),
+            channel: v.channel || "YouTube",
+            thumbnail: v.thumbnail || "",
+            keyword: v.keyword || "影音",
+            publishedAt: v.publishedAt || "",
+          }));
+
+        setVideos(mapped);
+
+        const notice =
+          parsed.banner ||
+          (mapped.length === 0
+            ? "目前沒有取得影片，請稍後再按「更新影音」或調整主題。"
+            : null);
+        setVideoBanner(notice);
+
+        if (mapped.length > 0) {
+          writeVideoCache(fp, mapped, parsed.banner ?? null);
+        }
+      } catch (e) {
+        console.error(e);
+        setVideos([]);
+        setVideoBanner(
+          e instanceof Error ? e.message : "載入影音時發生錯誤，請稍後再試。"
+        );
+      } finally {
+        setVideoLoading(false);
+      }
+    },
+    [selectedTopicObjects, customKeyword]
+  );
 
   useEffect(() => {
     fetchNews(buildQuery());
-    fetchVideos();
   }, []);
 
   useEffect(() => {
@@ -371,21 +413,24 @@ export default function App() {
 
     const timer = window.setTimeout(() => {
       fetchNews(buildQuery());
-      fetchVideos();
     }, 450);
 
     return () => window.clearTimeout(timer);
   }, [selectedTopics]);
 
+  useEffect(() => {
+    if (tab !== "video") return;
+    void loadVideos(false);
+  }, [tab, loadVideos]);
+
   const updateMyNews = () => {
     setTab("home");
     fetchNews(buildQuery());
-    fetchVideos();
   };
 
   const updateVideos = () => {
     setTab("video");
-    fetchVideos();
+    void loadVideos(true);
   };
 
   const toggleTopic = (label: string) => {
@@ -693,9 +738,9 @@ ${newsText}
               </button>
             </div>
 
-            {videoError && (
-              <div style={styles.videoErrorBanner} role="alert">
-                {videoError}
+            {videoBanner && (
+              <div style={styles.videoInfoBanner} role="status">
+                {videoBanner}
               </div>
             )}
 
@@ -739,7 +784,7 @@ ${newsText}
               })}
             </div>
 
-            {!videoLoading && videos.length === 0 && !videoError && (
+            {!videoLoading && videos.length === 0 && !videoBanner && (
               <div style={styles.loading}>
                 尚無符合的影片。可調整追蹤主題或稍後再按「更新影音」。
               </div>
@@ -1441,10 +1486,10 @@ const styles: Record<string, CSSProperties> = {
     marginTop: "8px",
     marginBottom: "12px",
   },
-  videoErrorBanner: {
-    color: "#FECACA",
-    background: "rgba(127,29,29,.35)",
-    border: "1px solid rgba(248,113,113,.35)",
+  videoInfoBanner: {
+    color: "#BFDBFE",
+    background: "rgba(30,58,138,.45)",
+    border: "1px solid rgba(96,165,250,.35)",
     borderRadius: "14px",
     padding: "12px 14px",
     fontSize: "13px",
