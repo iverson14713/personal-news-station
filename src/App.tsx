@@ -454,31 +454,32 @@ ${newsText}
   return (
     <div style={styles.page}>
       <div style={styles.phone}>
-        <header style={styles.header}>
-          <div>
-            <div style={styles.kicker}>PERSONAL NEWS RADIO</div>
-            <h1 style={styles.title}>AI個人新聞台</h1>
-            <p style={styles.subtitle}>只聽你真正關心的重點</p>
-          </div>
-          <div style={styles.logo}>🎙️</div>
-        </header>
-
-        <section style={styles.heroCard}>
-          <div>
-            <div style={styles.heroBadge}>
-              {isSpeaking ? "播放中" : "今日新聞雷達"}
+        {tab === "home" ? (
+          <header style={styles.homeHeader}>
+            <div style={{ minWidth: 0 }}>
+              <h1 style={styles.homeBrand}>AI個人新聞台</h1>
+              <p style={styles.homeStats}>
+                追蹤 <span style={styles.homeStatNum}>{selectedTopics.length}</span> 主題 ·
+                已選 <span style={styles.homeStatNum}>{selectedNews.length}</span> 則
+              </p>
             </div>
-            <h2 style={styles.heroTitle}>{pageTitle}</h2>
-            <p style={styles.heroText}>
-              追蹤 {selectedTopics.length} 主題，已選 {selectedNews.length} 則，收藏{" "}
-              {favoriteNews.length} 則。
-            </p>
-          </div>
-
-          <button onClick={speakNews} style={styles.playButton}>
-            ▶ 播放
-          </button>
-        </section>
+            {isSpeaking ? (
+              <span style={styles.homeLivePill}>播放中</span>
+            ) : (
+              <div style={styles.homeMicIcon} aria-hidden>
+                🎙️
+              </div>
+            )}
+          </header>
+        ) : (
+          <header style={styles.headerOther}>
+            <div>
+              <div style={styles.kicker}>AI個人新聞台</div>
+              <h1 style={styles.titleOther}>{pageTitle}</h1>
+            </div>
+            <div style={styles.logoOther}>🎙️</div>
+          </header>
+        )}
 
         {tab === "home" && (
           <>
@@ -489,56 +490,63 @@ ${newsText}
                 placeholder="搜尋：俄烏戰爭、BTC、台積電..."
                 style={styles.searchInput}
               />
-              <button onClick={updateMyNews} style={styles.searchButton}>
+              <button type="button" onClick={updateMyNews} style={styles.searchButton}>
                 更新
               </button>
             </div>
 
-            <section style={styles.summaryCard}>
-              <div>
-                <div style={styles.summaryTitle}>目前追蹤</div>
-                <div style={styles.summaryText}>
-                  {selectedTopics.length > 0
-                    ? selectedTopics.slice(0, 6).join("、")
-                    : "尚未選擇主題"}
-                  {selectedTopics.length > 6 ? ` 等 ${selectedTopics.length} 個` : ""}
-                </div>
-              </div>
-
-              <button onClick={() => setTab("settings")} style={styles.smallSettingButton}>
-                設定主題
-              </button>
-            </section>
-
-            <div style={styles.topicHeader}>
-              <div>
-                <div>我的今日新聞</div>
-                <div style={styles.lastUpdated}>
-                  {lastUpdated ? `最後更新：${lastUpdated}` : "尚未更新"}
-                </div>
-              </div>
-
+            <div style={styles.homeToolbarScroll} className="hide-scrollbar">
               <button
+                type="button"
+                onClick={() => (isSpeaking ? stopSpeak() : speakNews())}
+                style={{
+                  ...styles.toolbarBtn,
+                  ...(isSpeaking ? styles.toolbarBtnDanger : styles.toolbarBtnPlay),
+                }}
+              >
+                {isSpeaking ? "■ 停止" : "▶ 播放"}
+              </button>
+              <button type="button" onClick={copyGptPrompt} style={styles.toolbarBtnGpt}>
+                GPT 精華
+              </button>
+              <button
+                type="button"
                 onClick={updateMyNews}
                 disabled={loading}
                 style={{
-                  ...styles.updateButton,
-                  opacity: loading ? 0.7 : 1,
+                  ...styles.toolbarBtnNeutral,
+                  opacity: loading ? 0.65 : 1,
                   cursor: loading ? "not-allowed" : "pointer",
                 }}
               >
-                {loading ? "更新中..." : "🔄 重新整理"}
+                {loading ? "…" : "重新整理"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setTab("settings")}
+                style={styles.toolbarBtnNeutral}
+              >
+                設定主題
               </button>
             </div>
 
-            <ActionButtons
-              selectAll={selectAll}
-              clearAll={clearAll}
-              copyGptPrompt={copyGptPrompt}
-            />
+            <div style={styles.homeSelectRow}>
+              <div style={styles.homeSelectBtns}>
+                <button type="button" onClick={selectAll} style={styles.tinyOutlineBtn}>
+                  全選
+                </button>
+                <button type="button" onClick={clearAll} style={styles.tinyOutlineBtn}>
+                  取消
+                </button>
+              </div>
+              <span style={styles.lastUpdatedInline}>
+                {lastUpdated ? `更新 ${lastUpdated}` : "尚未更新"}
+              </span>
+            </div>
 
             <NewsList
               title="新聞列表"
+              compact
               news={news}
               loading={loading}
               toggleNews={toggleNews}
@@ -837,6 +845,7 @@ function NewsList({
   toggleNews,
   toggleFavorite,
   emptyText = "沒有新聞",
+  compact = false,
 }: {
   title: string;
   news: NewsItem[];
@@ -844,11 +853,24 @@ function NewsList({
   toggleNews: (id: string) => void;
   toggleFavorite: (item: NewsItem) => void;
   emptyText?: string;
+  compact?: boolean;
 }) {
   return (
     <>
-      <div style={styles.sectionHeader}>
-        <h2 style={styles.sectionTitle}>{title}</h2>
+      <div
+        style={{
+          ...styles.sectionHeader,
+          ...(compact ? styles.sectionHeaderCompact : {}),
+        }}
+      >
+        <h2
+          style={{
+            ...styles.sectionTitle,
+            ...(compact ? styles.sectionTitleCompact : {}),
+          }}
+        >
+          {title}
+        </h2>
         <span style={styles.countText}>{news.length} 則</span>
       </div>
 
@@ -922,61 +944,157 @@ const styles: Record<string, CSSProperties> = {
     padding: "18px",
   },
   phone: { maxWidth: "460px", margin: "0 auto", paddingBottom: "98px" },
-  header: {
+  homeHeader: {
     display: "flex",
     justifyContent: "space-between",
-    alignItems: "center",
-    padding: "12px 2px 18px",
+    alignItems: "flex-start",
+    gap: "10px",
+    padding: "4px 0 8px",
   },
-  kicker: { color: "#93C5FD", fontSize: "12px", letterSpacing: "1px" },
-  title: { margin: 0, fontSize: "34px", fontWeight: 900, letterSpacing: "-1px" },
-  subtitle: { margin: "6px 0 0", color: "#CBD5E1", fontSize: "15px" },
-  logo: {
-    width: "54px",
-    height: "54px",
-    borderRadius: "18px",
+  homeBrand: {
+    margin: 0,
+    fontSize: "clamp(18px, 4.8vw, 21px)",
+    fontWeight: 900,
+    letterSpacing: "-0.02em",
+    lineHeight: 1.2,
+  },
+  homeStats: {
+    margin: "6px 0 0",
+    color: "#94A3B8",
+    fontSize: "12px",
+    lineHeight: 1.35,
+  },
+  homeStatNum: { color: "#E2E8F0", fontWeight: 800 },
+  homeLivePill: {
+    flexShrink: 0,
+    fontSize: "11px",
+    fontWeight: 800,
+    color: "#BFDBFE",
+    background: "rgba(124,58,237,.35)",
+    border: "1px solid rgba(167,139,250,.45)",
+    borderRadius: "999px",
+    padding: "5px 10px",
+    marginTop: "2px",
+  },
+  homeMicIcon: {
+    width: "40px",
+    height: "40px",
+    borderRadius: "14px",
     background: "linear-gradient(135deg, #2563EB, #7C3AED)",
     display: "grid",
     placeItems: "center",
-    fontSize: "26px",
-    boxShadow: "0 12px 30px rgba(37,99,235,.35)",
+    fontSize: "20px",
+    flexShrink: 0,
+    boxShadow: "0 8px 22px rgba(37,99,235,.28)",
   },
-  heroCard: {
-    background:
-      "linear-gradient(135deg, rgba(37,99,235,.95), rgba(124,58,237,.9))",
-    borderRadius: "28px",
-    padding: "22px",
+  headerOther: {
     display: "flex",
     justifyContent: "space-between",
-    gap: "16px",
     alignItems: "center",
-    boxShadow: "0 20px 60px rgba(37,99,235,.35)",
+    padding: "8px 0 14px",
+    gap: "10px",
   },
-  heroBadge: {
-    display: "inline-block",
-    background: "rgba(255,255,255,.18)",
-    padding: "6px 10px",
-    borderRadius: "999px",
-    fontSize: "12px",
-    marginBottom: "12px",
-  },
-  heroTitle: { margin: 0, fontSize: "24px", fontWeight: 900 },
-  heroText: { margin: "8px 0 0", color: "#DBEAFE", fontSize: "14px" },
-  playButton: {
-    minWidth: "86px",
-    height: "86px",
-    borderRadius: "28px",
-    border: "none",
-    background: "white",
-    color: "#1D4ED8",
+  titleOther: {
+    margin: "4px 0 0",
+    fontSize: "clamp(17px, 4.5vw, 20px)",
     fontWeight: 900,
-    fontSize: "16px",
+    letterSpacing: "-0.02em",
+  },
+  logoOther: {
+    width: "44px",
+    height: "44px",
+    borderRadius: "16px",
+    background: "linear-gradient(135deg, #2563EB, #7C3AED)",
+    display: "grid",
+    placeItems: "center",
+    fontSize: "22px",
+    flexShrink: 0,
+    boxShadow: "0 8px 22px rgba(37,99,235,.28)",
+  },
+  homeToolbarScroll: {
+    display: "flex",
+    gap: "6px",
+    overflowX: "auto",
+    flexWrap: "nowrap",
+    marginTop: "10px",
+    paddingBottom: "2px",
+    WebkitOverflowScrolling: "touch",
+  },
+  toolbarBtn: {
+    flexShrink: 0,
+    border: "none",
+    borderRadius: "999px",
+    padding: "8px 12px",
+    fontSize: "12px",
+    fontWeight: 800,
     cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
+  toolbarBtnPlay: {
+    background: "linear-gradient(135deg, #2563EB, #4F46E5)",
+    color: "white",
+    boxShadow: "0 4px 14px rgba(37,99,235,.35)",
+  },
+  toolbarBtnDanger: {
+    background: "rgba(220,38,38,.9)",
+    color: "white",
+  },
+  toolbarBtnGpt: {
+    background: "#7C3AED",
+    color: "white",
+    border: "none",
+    borderRadius: "999px",
+    padding: "8px 12px",
+    fontSize: "12px",
+    fontWeight: 800,
+    cursor: "pointer",
+    flexShrink: 0,
+    whiteSpace: "nowrap",
+  },
+  toolbarBtnNeutral: {
+    background: "rgba(255,255,255,.1)",
+    color: "#E2E8F0",
+    border: "1px solid rgba(255,255,255,.12)",
+    borderRadius: "999px",
+    padding: "8px 12px",
+    fontSize: "12px",
+    fontWeight: 700,
+    cursor: "pointer",
+    flexShrink: 0,
+    whiteSpace: "nowrap",
+  },
+  homeSelectRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "8px",
+    marginTop: "8px",
+    marginBottom: "2px",
+  },
+  homeSelectBtns: { display: "flex", gap: "6px", flexShrink: 0 },
+  tinyOutlineBtn: {
+    background: "transparent",
+    color: "#93C5FD",
+    border: "1px solid rgba(147,197,253,.35)",
+    borderRadius: "999px",
+    padding: "5px 10px",
+    fontSize: "11px",
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+  lastUpdatedInline: {
+    fontSize: "11px",
+    color: "#64748B",
+    textAlign: "right",
+    minWidth: 0,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
   },
   searchBox: {
     display: "flex",
     gap: "8px",
-    marginTop: "18px",
+    marginTop: "6px",
     background: "rgba(255,255,255,.08)",
     padding: "8px",
     borderRadius: "18px",
@@ -1000,51 +1118,18 @@ const styles: Record<string, CSSProperties> = {
     fontWeight: 800,
     cursor: "pointer",
   },
-  summaryCard: {
-    marginTop: "14px",
-    background: "rgba(255,255,255,.07)",
-    border: "1px solid rgba(255,255,255,.08)",
-    borderRadius: "18px",
-    padding: "14px",
-    display: "flex",
-    justifyContent: "space-between",
-    gap: "12px",
-    alignItems: "center",
-  },
-  summaryTitle: {
-    fontSize: "13px",
+  kicker: {
     color: "#93C5FD",
-    fontWeight: 900,
-    marginBottom: "4px",
+    fontSize: "10px",
+    letterSpacing: "0.12em",
+    fontWeight: 700,
+    textTransform: "uppercase",
   },
-  summaryText: {
-    color: "#CBD5E1",
-    fontSize: "13px",
-    lineHeight: 1.4,
+  sectionHeaderCompact: {
+    marginTop: "6px",
+    marginBottom: "8px",
   },
-  smallSettingButton: {
-    background: "rgba(255,255,255,.14)",
-    color: "white",
-    border: "1px solid rgba(255,255,255,.12)",
-    borderRadius: "999px",
-    padding: "9px 12px",
-    fontWeight: 800,
-    whiteSpace: "nowrap",
-    cursor: "pointer",
-  },
-  topicHeader: {
-    marginTop: "18px",
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    fontWeight: 900,
-  },
-  lastUpdated: {
-    marginTop: "4px",
-    color: "#94A3B8",
-    fontSize: "12px",
-    fontWeight: 500,
-  },
+  sectionTitleCompact: { fontSize: "15px" },
   updateButton: {
     background: "rgba(255,255,255,.12)",
     color: "white",
@@ -1173,8 +1258,8 @@ const styles: Record<string, CSSProperties> = {
     display: "flex",
     justifyContent: "space-between",
     alignItems: "center",
-    marginTop: "24px",
-    marginBottom: "12px",
+    marginTop: "16px",
+    marginBottom: "10px",
     gap: "10px",
   },
   sectionTitle: { margin: 0, fontSize: "20px", fontWeight: 900 },
