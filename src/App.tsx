@@ -76,6 +76,20 @@ function formatVideoPublished(iso: string) {
   }
 }
 
+/** 從 YouTube watch URL 取出 11 字元 video id（補足 API 偶發缺 id） */
+function youtubeVideoIdFromUrl(url: string): string | null {
+  if (!url) return null;
+  try {
+    const u = new URL(url, "https://www.youtube.com");
+    const v = u.searchParams.get("v");
+    if (v && /^[a-zA-Z0-9_-]{11}$/.test(v)) return v;
+  } catch {
+    /* ignore */
+  }
+  const m = url.match(/[?&]v=([a-zA-Z0-9_-]{11})(?:&|$)/);
+  return m?.[1] ?? null;
+}
+
 type RawVideoPayload = {
   id?: string;
   title?: string;
@@ -357,15 +371,24 @@ export default function App() {
         }
 
         const mapped: VideoItem[] = parsed.videos
-          .filter((v) => v.url && v.id)
-          .map((v) => ({
-            id: String(v.id || v.url),
-            title: v.title || "YouTube 影片",
-            link: String(v.url),
-            channel: v.channel || "YouTube",
-            thumbnail: v.thumbnail || "",
-            keyword: v.keyword || "影音",
-            publishedAt: v.publishedAt || "",
+          .map((v) => {
+            const link = String(v.url || "").trim();
+            const fromUrl = youtubeVideoIdFromUrl(link);
+            const id =
+              (v.id && String(v.id).trim()) ||
+              fromUrl ||
+              "";
+            return { raw: v, link, id };
+          })
+          .filter((row) => row.link && row.id.length === 11)
+          .map((row) => ({
+            id: row.id,
+            title: row.raw.title || "YouTube 影片",
+            link: row.link,
+            channel: row.raw.channel || "YouTube",
+            thumbnail: row.raw.thumbnail || "",
+            keyword: row.raw.keyword || "影音",
+            publishedAt: row.raw.publishedAt || "",
           }));
 
         setVideos(mapped);

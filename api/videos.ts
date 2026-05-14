@@ -7,7 +7,92 @@ const YT_SEARCH = "https://www.googleapis.com/youtube/v3/search";
 const YT_RSS = (channelId: string) =>
   `https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`;
 
+/** 上傳清單 feed（部分環境比 channel_id feed 更穩定） */
+const YT_RSS_UPLOADS = (channelId: string) => {
+  if (channelId.startsWith("UC") && channelId.length === 24) {
+    return `https://www.youtube.com/feeds/videos.xml?playlist_id=UU${channelId.slice(2)}`;
+  }
+  return "";
+};
+
+const RSS_HEADERS: Record<string, string> = {
+  Accept: "application/atom+xml,application/xml;q=0.9,*/*;q=0.8",
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+};
+
+type VideoOut = {
+  id: string;
+  title: string;
+  url: string;
+  channel: string;
+  thumbnail: string;
+  publishedAt: string;
+  keyword: string;
+};
+
 const MAX_API_RESULTS = 5;
+
+/**
+ * 當 API 額度用盡且 RSS 在伺服器端無法取得時，仍回傳可播放的備援清單（皆為公開長期影片）。
+ * 標題／頻道為固定字串，避免再依賴第三方 API。
+ */
+const STATIC_FALLBACK_VIDEOS: VideoOut[] = [
+  {
+    id: "M7lc1UVf-VE",
+    title: "YouTube Developers Live: Embedded Web Player Customization",
+    channel: "Google for Developers",
+    thumbnail: "https://i.ytimg.com/vi/M7lc1UVf-VE/hqdefault.jpg",
+    publishedAt: "2012-06-22T00:00:00.000Z",
+    url: "https://www.youtube.com/watch?v=M7lc1UVf-VE",
+    keyword: "備援影音",
+  },
+  {
+    id: "5MgBikgcWnY",
+    title: "The first 20 hours -- how to learn anything | Josh Kaufman | TEDxCSU",
+    channel: "TEDx Talks",
+    thumbnail: "https://i.ytimg.com/vi/5MgBikgcWnY/hqdefault.jpg",
+    publishedAt: "2013-03-14T00:00:00.000Z",
+    url: "https://www.youtube.com/watch?v=5MgBikgcWnY",
+    keyword: "備援影音",
+  },
+  {
+    id: "jNQXAC9IVRw",
+    title: "Me at the zoo",
+    channel: "jawed",
+    thumbnail: "https://i.ytimg.com/vi/jNQXAC9IVRw/hqdefault.jpg",
+    publishedAt: "2005-04-24T00:00:00.000Z",
+    url: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+    keyword: "備援影音",
+  },
+  {
+    id: "kJQP7kiw5Fk",
+    title: "Luis Fonsi - Despacito ft. Daddy Yankee",
+    channel: "LuisFonsiVEVO",
+    thumbnail: "https://i.ytimg.com/vi/kJQP7kiw5Fk/hqdefault.jpg",
+    publishedAt: "2017-01-13T00:00:00.000Z",
+    url: "https://www.youtube.com/watch?v=kJQP7kiw5Fk",
+    keyword: "備援影音",
+  },
+  {
+    id: "2LqzF5WauAw",
+    title: "Interstellar (2014) | Original Theatrical Trailer 1 | Paramount Movies",
+    channel: "Interstellar Movie",
+    thumbnail: "https://i.ytimg.com/vi/2LqzF5WauAw/hqdefault.jpg",
+    publishedAt: "2014-05-16T00:00:00.000Z",
+    url: "https://www.youtube.com/watch?v=2LqzF5WauAw",
+    keyword: "備援影音",
+  },
+  {
+    id: "9bZkp7q19f0",
+    title: "PSY - GANGNAM STYLE(강남스타일) M/V",
+    channel: "officialpsy",
+    thumbnail: "https://i.ytimg.com/vi/9bZkp7q19f0/hqdefault.jpg",
+    publishedAt: "2012-07-15T00:00:00.000Z",
+    url: "https://www.youtube.com/watch?v=9bZkp7q19f0",
+    keyword: "備援影音",
+  },
+];
 
 /** 主題對應 YouTube 頻道 RSS（channel_id）— 多個可輪替 */
 const RSS_FEEDS: Record<string, string[]> = {
@@ -31,16 +116,6 @@ const DEFAULT_NEWS_FEEDS = [
   "UC_x5XG1OV2P6uZZ5FSM9Ttw",
 ];
 
-type VideoOut = {
-  id: string;
-  title: string;
-  url: string;
-  channel: string;
-  thumbnail: string;
-  publishedAt: string;
-  keyword: string;
-};
-
 function decodeXmlText(s: string) {
   return s
     .replace(/&amp;/g, "&")
@@ -53,15 +128,24 @@ function decodeXmlText(s: string) {
 
 function parseYoutubeAtom(xml: string, maxPerFeed: number, keyword: string) {
   const videos: VideoOut[] = [];
-  const parts = xml.split("<entry>");
-  for (let i = 1; i < parts.length && videos.length < maxPerFeed; i++) {
-    const block = parts[i].split("</entry>")[0];
+  if (!xml.includes("<entry") || !xml.includes("</entry>")) return videos;
+
+  const entryRe = /<entry(?:\s[^>]*)?>([\s\S]*?)<\/entry>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = entryRe.exec(xml)) !== null && videos.length < maxPerFeed) {
+    const block = m[1];
     const vidMatch =
+      block.match(
+        /<link[^>]*rel=["']alternate["'][^>]*href=["']https?:\/\/(?:www\.)?youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})/
+      ) ||
+      block.match(
+        /href=["']https?:\/\/(?:www\.)?youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})[^>]*rel=["']alternate["']/
+      ) ||
       block.match(/<yt:videoId>([^<]+)<\/yt:videoId>/) ||
       block.match(/<id>yt:video:([^<]+)<\/id>/) ||
       block.match(/youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})/);
     const id = vidMatch?.[1]?.trim();
-    if (!id || id.length < 6) continue;
+    if (!id || id.length !== 11) continue;
 
     const titleRaw =
       block.match(/<title(?:[^>]*)>([^<]*)<\/title>/)?.[1]?.trim() || "YouTube 影片";
@@ -103,18 +187,21 @@ async function fetchRssVideos(
 
   for (const cid of channelIds) {
     if (out.length >= 24) break;
+    const uploadFeed = YT_RSS_UPLOADS(cid);
+    const urls = uploadFeed ? [YT_RSS(cid), uploadFeed] : [YT_RSS(cid)];
     try {
-      const res = await fetch(YT_RSS(cid), {
-        headers: { "User-Agent": "personal-news-station/1.0" },
-      });
-      if (!res.ok) continue;
-      const xml = await res.text();
-      const parsed = parseYoutubeAtom(xml, perFeed, keyword);
-      for (const v of parsed) {
-        if (seen.has(v.id)) continue;
-        seen.add(v.id);
-        out.push(v);
-        if (out.length >= 28) return out;
+      for (const feedUrl of urls) {
+        const res = await fetch(feedUrl, { headers: RSS_HEADERS });
+        if (!res.ok) continue;
+        const xml = await res.text();
+        const parsed = parseYoutubeAtom(xml, perFeed, keyword);
+        for (const v of parsed) {
+          if (seen.has(v.id)) continue;
+          seen.add(v.id);
+          out.push(v);
+          if (out.length >= 28) return out;
+        }
+        if (parsed.length > 0) break;
       }
     } catch {
       continue;
@@ -282,7 +369,11 @@ export default async function handler(req: any, res: any) {
 
   const apiKey = process.env.YOUTUBE_API_KEY || "";
   let banner: string | undefined;
-  let source: "youtube_api" | "youtube_rss" | "curated_rss" = "youtube_rss";
+  let source:
+    | "youtube_api"
+    | "youtube_rss"
+    | "curated_rss"
+    | "static_fallback" = "youtube_rss";
   let videos: VideoOut[] = [];
 
   const kwTag =
@@ -325,6 +416,13 @@ export default async function handler(req: any, res: any) {
   source = "curated_rss";
   if (!banner) {
     banner = "已改為預設新聞影音來源";
+  }
+
+  if (videos.length === 0) {
+    videos = STATIC_FALLBACK_VIDEOS.slice(0, MAX_API_RESULTS);
+    source = "static_fallback";
+    const extra = "RSS 無法取得最新影片，已改顯示備援精選";
+    banner = banner ? `${banner}；${extra}` : extra;
   }
 
   return res.status(200).json({
