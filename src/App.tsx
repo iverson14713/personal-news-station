@@ -13,6 +13,14 @@ type NewsItem = {
   favorite: boolean;
 };
 
+type AiDuration = 1 | 3 | 5;
+
+type AiHighlight = {
+  level: string;
+  title: string;
+  summary: string;
+};
+
 type VideoItem = {
   id: string;
   title: string;
@@ -93,13 +101,14 @@ function isNewsFreshEnough(pubDateRaw: string, nowMs: number): boolean {
   return age >= 0 && age <= NEWS_MAX_AGE_MS;
 }
 
-/** 已選新聞（最多 5 則）快取用 fingerprint */
-function aiSummaryCacheFingerprint(items: NewsItem[]): string {
-  return [...items]
+/** 已選新聞（最多 5 則）+ 稿長 快取用 fingerprint */
+function aiSummaryCacheFingerprint(items: NewsItem[], duration: AiDuration): string {
+  const base = [...items]
     .slice(0, 5)
     .map((n) => `${normalizeKey(n.title)}|${n.source.trim()}`)
     .sort()
     .join("\0");
+  return `${duration}\0${base}`;
 }
 
 function formatVideoPublished(iso: string) {
@@ -264,7 +273,13 @@ export default function App() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [voiceName, setVoiceName] = useState("");
-  const [aiSummary, setAiSummary] = useState("");
+  const [aiScript, setAiScript] = useState("");
+  const [aiHighlights, setAiHighlights] = useState<AiHighlight[]>([]);
+  const [aiJsonFallback, setAiJsonFallback] = useState(false);
+  const [aiDuration, setAiDuration] = useState<AiDuration>(1);
+  const [selectedScriptDuration, setSelectedScriptDuration] = useState<
+    AiDuration | null
+  >(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
 
@@ -407,7 +422,10 @@ export default function App() {
       }
 
       setNews(parsedNews);
-      setAiSummary("");
+      setAiScript("");
+      setAiHighlights([]);
+      setAiJsonFallback(false);
+      setSelectedScriptDuration(null);
       setAiError(null);
       setLastUpdated(
         new Date().toLocaleTimeString("zh-TW", {
@@ -598,9 +616,12 @@ export default function App() {
   };
 
   const createSpeech = (rate: number) => {
-    const text = selectedNews
-      .map((n, i) => `第 ${i + 1} 則新聞，${n.title}`)
-      .join("。");
+    const useAi = aiScript.trim().length > 0;
+    const text = useAi
+      ? aiScript.trim()
+      : selectedNews
+          .map((n, i) => `第 ${i + 1} 則新聞，${n.title}`)
+          .join("。");
 
     const speech = new SpeechSynthesisUtterance(text);
     speech.lang = "zh-TW";
@@ -619,8 +640,9 @@ export default function App() {
   const speakNews = () => {
     window.speechSynthesis.cancel();
 
-    if (selectedNews.length === 0) {
-      alert("請先選擇要播放的新聞");
+    const hasAi = aiScript.trim().length > 0;
+    if (!hasAi && selectedNews.length === 0) {
+      alert("請先選擇要播放的新聞，或先產生 AI 新聞稿");
       return;
     }
 
@@ -635,7 +657,9 @@ export default function App() {
   const changeSpeed = (newSpeed: number) => {
     setSpeed(newSpeed);
 
-    if (isSpeaking && selectedNews.length > 0) {
+    const canReplay =
+      isSpeaking && (aiScript.trim().length > 0 || selectedNews.length > 0);
+    if (canReplay) {
       window.speechSynthesis.cancel();
       setTimeout(() => {
         window.speechSynthesis.speak(createSpeech(newSpeed));
@@ -703,8 +727,9 @@ ${newsText}
       return;
     }
 
+    const duration = aiDuration;
     setAiError(null);
-    const fp = aiSummaryCacheFingerprint(picked);
+    const fp = aiSummaryCacheFingerprint(picked, duration);
 
     try {
       const raw = localStorage.getItem(AI_SUMMARY_CACHE_KEY);
@@ -712,17 +737,25 @@ ${newsText}
         const o = JSON.parse(raw) as {
           fp?: string;
           savedAt?: number;
-          text?: string;
+          duration?: number;
+          script?: string;
+          highlights?: AiHighlight[];
+          jsonFallback?: boolean;
         };
         if (
           o.fp === fp &&
           typeof o.savedAt === "number" &&
           Date.now() - o.savedAt < AI_SUMMARY_CACHE_MS &&
-          typeof o.text === "string" &&
-          o.text.length > 0
+          typeof o.script === "string" &&
+          o.script.length > 0
         ) {
           setAiError(null);
-          setAiSummary(o.text);
+          setAiScript(o.script);
+          setAiHighlights(Array.isArray(o.highlights) ? o.highlights : []);
+          setAiJsonFallback(Boolean(o.jsonFallback));
+          setSelectedScriptDuration(
+            o.duration === 3 || o.duration === 5 ? o.duration : 1
+          );
           return;
         }
       }
@@ -731,18 +764,24 @@ ${newsText}
     }
 
     setAiLoading(true);
-    setAiSummary("");
+    setAiScript("");
+    setAiHighlights([]);
+    setAiJsonFallback(false);
     try {
       const res = await fetch("/api/summary", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          duration,
           items: picked.map((n) => ({ title: n.title, source: n.source })),
         }),
       });
       const data = (await res.json()) as {
         ok?: boolean;
-        summary?: string;
+        script?: string;
+        highlights?: AiHighlight[];
+        jsonFallback?: boolean;
+        duration?: number;
         error?: string;
         code?: string;
       };
@@ -759,18 +798,32 @@ ${newsText}
         return;
       }
 
-      const text = String(data.summary || "").trim();
-      if (!text) {
+      const script = String(data.script || "").trim();
+      if (!script) {
         setAiError("AI 未回傳有效內容");
         await runGptFallbackClipboard();
         return;
       }
 
-      setAiSummary(text);
+      const highlights = Array.isArray(data.highlights) ? data.highlights : [];
+      setAiScript(script);
+      setAiHighlights(highlights);
+      setAiJsonFallback(Boolean(data.jsonFallback));
+      setSelectedScriptDuration(
+        data.duration === 3 || data.duration === 5 ? data.duration : duration
+      );
+
       try {
         localStorage.setItem(
           AI_SUMMARY_CACHE_KEY,
-          JSON.stringify({ fp, savedAt: Date.now(), text })
+          JSON.stringify({
+            fp,
+            savedAt: Date.now(),
+            duration,
+            highlights,
+            script,
+            jsonFallback: Boolean(data.jsonFallback),
+          })
         );
       } catch {
         /* ignore */
@@ -780,6 +833,20 @@ ${newsText}
       await runGptFallbackClipboard();
     } finally {
       setAiLoading(false);
+    }
+  };
+
+  const copyAiScript = async () => {
+    const t = aiScript.trim();
+    if (!t) {
+      alert("尚無 AI 新聞稿可複製");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(t);
+      alert("已複製 AI 新聞稿");
+    } catch {
+      alert("無法寫入剪貼簿，請檢查瀏覽器權限");
     }
   };
 
@@ -843,7 +910,11 @@ ${newsText}
                   ...(isSpeaking ? styles.toolbarBtnDanger : styles.toolbarBtnPlay),
                 }}
               >
-                {isSpeaking ? "■ 停止" : "▶ 播放"}
+                {isSpeaking
+                  ? "■ 停止"
+                  : aiScript.trim()
+                    ? "▶ 播放 AI 稿"
+                    : "▶ 播放"}
               </button>
               <button
                 type="button"
@@ -884,22 +955,100 @@ ${newsText}
               </button>
             </div>
 
-            {(aiLoading || aiSummary || aiError) && (
-              <div style={styles.aiSummaryWrap}>
-                <div style={styles.aiSummaryCard}>
-                  <div style={styles.aiSummaryHeaderRow}>
-                    <span style={styles.aiSummaryKicker}>AI 精華</span>
-                  </div>
-                  {aiLoading ? (
-                    <div style={styles.aiSummaryLoading}>AI 分析中...</div>
-                  ) : aiError ? (
-                    <div style={styles.aiSummaryError}>{aiError}</div>
-                  ) : (
-                    <div style={styles.aiSummaryBody}>{aiSummary}</div>
-                  )}
+            <div style={styles.aiSummaryWrap}>
+              <div style={styles.aiSummaryCard}>
+                <div style={styles.aiSummaryHeaderRow}>
+                  <span style={styles.aiSummaryKicker}>AI 精華</span>
+                  {selectedScriptDuration != null && aiScript.trim() ? (
+                    <span style={styles.aiSummaryBadge}>
+                      已產生 · {selectedScriptDuration} 分鐘
+                    </span>
+                  ) : null}
                 </div>
+
+                <div style={styles.aiDurationRow} role="group" aria-label="AI 新聞稿長度">
+                  {([1, 3, 5] as const).map((d) => (
+                    <button
+                      key={d}
+                      type="button"
+                      disabled={aiLoading}
+                      onClick={() => {
+                        if (!aiLoading) setAiDuration(d);
+                      }}
+                      style={{
+                        ...styles.aiDurationChip,
+                        ...(aiDuration === d ? styles.aiDurationChipActive : {}),
+                      }}
+                    >
+                      {d} 分鐘
+                    </button>
+                  ))}
+                </div>
+
+                {selectedScriptDuration != null &&
+                selectedScriptDuration !== aiDuration &&
+                aiScript.trim().length > 0 ? (
+                  <div style={styles.aiStaleHint}>
+                    已改為 {aiDuration} 分鐘模式，請再按「AI 精華」更新內容。
+                  </div>
+                ) : null}
+
+                {aiLoading ? (
+                  <div style={styles.aiSummaryLoading}>AI 分析中...</div>
+                ) : aiError ? (
+                  <div style={styles.aiSummaryError}>{aiError}</div>
+                ) : aiScript.trim() || aiHighlights.length > 0 ? (
+                  <>
+                    {aiJsonFallback ? (
+                      <div style={styles.aiJsonFallbackNote}>
+                        （AI 回傳非標準 JSON，以下以純文字顯示）
+                      </div>
+                    ) : null}
+                    {aiHighlights.length > 0 ? (
+                      <div style={styles.aiHighlightsSection}>
+                        <div style={styles.aiSubheading}>今日重點</div>
+                        <ul style={styles.aiHighlightList}>
+                          {aiHighlights.map((h, idx) => (
+                            <li key={idx} style={styles.aiHighlightItem}>
+                              <div style={styles.aiHighlightLevel}>{h.level}</div>
+                              <div style={styles.aiHighlightTitle}>{h.title}</div>
+                              <div style={styles.aiHighlightSummary}>{h.summary}</div>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                    {aiScript.trim() ? (
+                      <div style={styles.aiScriptSection}>
+                        <div style={styles.aiSubheading}>AI 主播稿</div>
+                        <div style={styles.aiSummaryBody}>{aiScript.trim()}</div>
+                        <div style={styles.aiScriptActions}>
+                          <button
+                            type="button"
+                            onClick={() => speakNews()}
+                            style={styles.aiScriptPlayBtn}
+                          >
+                            播放 AI 新聞稿
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void copyAiScript()}
+                            style={styles.aiScriptCopyBtn}
+                          >
+                            複製 AI 新聞稿
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+                  </>
+                ) : (
+                  <div style={styles.aiHintMuted}>
+                    勾選新聞後按「AI 精華」，將依「{aiDuration}
+                    分鐘」模式產生重點與主播稿（最多分析 5 則標題／來源）。
+                  </div>
+                )}
               </div>
-            )}
+            </div>
 
             <NewsList
               title="新聞"
@@ -952,7 +1101,7 @@ ${newsText}
 
               <div style={styles.actionRow}>
                 <button onClick={speakNews} style={styles.playSmallButton}>
-                  播放選取
+                  {aiScript.trim() ? "播放 AI 新聞稿" : "播放選取新聞"}
                 </button>
                 <button onClick={stopSpeak} style={styles.stopButton}>
                   停止
@@ -978,22 +1127,100 @@ ${newsText}
               </div>
             </section>
 
-            {(aiLoading || aiSummary || aiError) && (
-              <div style={styles.aiSummaryWrap}>
-                <div style={styles.aiSummaryCard}>
-                  <div style={styles.aiSummaryHeaderRow}>
-                    <span style={styles.aiSummaryKicker}>AI 精華</span>
-                  </div>
-                  {aiLoading ? (
-                    <div style={styles.aiSummaryLoading}>AI 分析中...</div>
-                  ) : aiError ? (
-                    <div style={styles.aiSummaryError}>{aiError}</div>
-                  ) : (
-                    <div style={styles.aiSummaryBody}>{aiSummary}</div>
-                  )}
+            <div style={styles.aiSummaryWrap}>
+              <div style={styles.aiSummaryCard}>
+                <div style={styles.aiSummaryHeaderRow}>
+                  <span style={styles.aiSummaryKicker}>AI 精華</span>
+                  {selectedScriptDuration != null && aiScript.trim() ? (
+                    <span style={styles.aiSummaryBadge}>
+                      已產生 · {selectedScriptDuration} 分鐘
+                    </span>
+                  ) : null}
                 </div>
+
+                <div style={styles.aiDurationRow} role="group" aria-label="AI 新聞稿長度">
+                  {([1, 3, 5] as const).map((d) => (
+                    <button
+                      key={d}
+                      type="button"
+                      disabled={aiLoading}
+                      onClick={() => {
+                        if (!aiLoading) setAiDuration(d);
+                      }}
+                      style={{
+                        ...styles.aiDurationChip,
+                        ...(aiDuration === d ? styles.aiDurationChipActive : {}),
+                      }}
+                    >
+                      {d} 分鐘
+                    </button>
+                  ))}
+                </div>
+
+                {selectedScriptDuration != null &&
+                selectedScriptDuration !== aiDuration &&
+                aiScript.trim().length > 0 ? (
+                  <div style={styles.aiStaleHint}>
+                    已改為 {aiDuration} 分鐘模式，請再按「AI 精華」更新內容。
+                  </div>
+                ) : null}
+
+                {aiLoading ? (
+                  <div style={styles.aiSummaryLoading}>AI 分析中...</div>
+                ) : aiError ? (
+                  <div style={styles.aiSummaryError}>{aiError}</div>
+                ) : aiScript.trim() || aiHighlights.length > 0 ? (
+                  <>
+                    {aiJsonFallback ? (
+                      <div style={styles.aiJsonFallbackNote}>
+                        （AI 回傳非標準 JSON，以下以純文字顯示）
+                      </div>
+                    ) : null}
+                    {aiHighlights.length > 0 ? (
+                      <div style={styles.aiHighlightsSection}>
+                        <div style={styles.aiSubheading}>今日重點</div>
+                        <ul style={styles.aiHighlightList}>
+                          {aiHighlights.map((h, idx) => (
+                            <li key={idx} style={styles.aiHighlightItem}>
+                              <div style={styles.aiHighlightLevel}>{h.level}</div>
+                              <div style={styles.aiHighlightTitle}>{h.title}</div>
+                              <div style={styles.aiHighlightSummary}>{h.summary}</div>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                    {aiScript.trim() ? (
+                      <div style={styles.aiScriptSection}>
+                        <div style={styles.aiSubheading}>AI 主播稿</div>
+                        <div style={styles.aiSummaryBody}>{aiScript.trim()}</div>
+                        <div style={styles.aiScriptActions}>
+                          <button
+                            type="button"
+                            onClick={() => speakNews()}
+                            style={styles.aiScriptPlayBtn}
+                          >
+                            播放 AI 新聞稿
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void copyAiScript()}
+                            style={styles.aiScriptCopyBtn}
+                          >
+                            複製 AI 新聞稿
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+                  </>
+                ) : (
+                  <div style={styles.aiHintMuted}>
+                    勾選新聞後按「AI 精華」，將依「{aiDuration}
+                    分鐘」模式產生重點與主播稿（最多分析 5 則標題／來源）。
+                  </div>
+                )}
               </div>
-            )}
+            </div>
 
             <NewsList
               title="即將播放"
@@ -1154,9 +1381,10 @@ ${newsText}
               <div style={styles.settingHint}>
                 「AI 精華」由伺服端的{" "}
                 <code style={{ color: "#93C5FD" }}>OPENAI_API_KEY</code>{" "}
-                呼叫 OpenAI；請在部署環境（例如 Vercel
-                Environment Variables）設定金鑰。未設定時會顯示提示，並可改用「GPT
-                精華」複製 Prompt。
+                呼叫 OpenAI；請在部署環境（例如 Vercel Environment
+                Variables）設定金鑰。可選 1／3／5 分鐘主播稿長度，回傳 JSON
+                後於畫面呈現；未設定時會顯示提示，並可改用「GPT 精華」複製
+                Prompt。
               </div>
             </section>
 
@@ -1819,6 +2047,127 @@ const styles: Record<string, CSSProperties> = {
     color: "#94A3B8",
     fontSize: "14px",
     fontWeight: 700,
+  },
+  aiSummaryBadge: {
+    fontSize: "10px",
+    fontWeight: 800,
+    color: "#A7F3D0",
+    background: "rgba(16,185,129,.2)",
+    border: "1px solid rgba(52,211,153,.4)",
+    borderRadius: "999px",
+    padding: "4px 9px",
+    flexShrink: 0,
+  },
+  aiDurationRow: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: "6px",
+    marginBottom: "12px",
+  },
+  aiDurationChip: {
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.06)",
+    color: "#CBD5E1",
+    borderRadius: "999px",
+    padding: "6px 12px",
+    fontSize: "11px",
+    fontWeight: 800,
+    cursor: "pointer",
+    flexShrink: 0,
+  },
+  aiDurationChipActive: {
+    background: "rgba(45,212,191,.22)",
+    border: "1px solid rgba(45,212,191,.55)",
+    color: "#ECFEFF",
+  },
+  aiStaleHint: {
+    fontSize: "11px",
+    color: "#FCD34D",
+    marginBottom: "10px",
+    lineHeight: 1.4,
+  },
+  aiJsonFallbackNote: {
+    fontSize: "11px",
+    color: "#94A3B8",
+    marginBottom: "10px",
+  },
+  aiHighlightsSection: {
+    marginBottom: "14px",
+  },
+  aiSubheading: {
+    fontSize: "12px",
+    fontWeight: 900,
+    color: "#93C5FD",
+    marginBottom: "8px",
+  },
+  aiHighlightList: {
+    margin: 0,
+    padding: 0,
+    listStyle: "none",
+    display: "flex",
+    flexDirection: "column",
+    gap: "10px",
+  },
+  aiHighlightItem: {
+    background: "rgba(255,255,255,.05)",
+    border: "1px solid rgba(255,255,255,.08)",
+    borderRadius: "14px",
+    padding: "10px 11px",
+  },
+  aiHighlightLevel: {
+    fontSize: "11px",
+    fontWeight: 900,
+    color: "#FDE68A",
+    marginBottom: "4px",
+  },
+  aiHighlightTitle: {
+    fontSize: "14px",
+    fontWeight: 800,
+    color: "#F1F5F9",
+    lineHeight: 1.35,
+    marginBottom: "4px",
+  },
+  aiHighlightSummary: {
+    fontSize: "13px",
+    lineHeight: 1.5,
+    color: "#CBD5E1",
+    whiteSpace: "pre-wrap",
+    wordBreak: "break-word",
+  },
+  aiScriptSection: {
+    marginTop: "4px",
+  },
+  aiScriptActions: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: "8px",
+    marginTop: "12px",
+  },
+  aiScriptPlayBtn: {
+    background: "linear-gradient(135deg, #2563EB, #4F46E5)",
+    color: "white",
+    border: "none",
+    borderRadius: "12px",
+    padding: "9px 14px",
+    fontWeight: 800,
+    fontSize: "12px",
+    cursor: "pointer",
+  },
+  aiScriptCopyBtn: {
+    background: "rgba(255,255,255,.1)",
+    color: "#E2E8F0",
+    border: "1px solid rgba(255,255,255,.14)",
+    borderRadius: "12px",
+    padding: "9px 14px",
+    fontWeight: 700,
+    fontSize: "12px",
+    cursor: "pointer",
+  },
+  aiHintMuted: {
+    fontSize: "12px",
+    lineHeight: 1.5,
+    color: "#64748B",
+    marginTop: "2px",
   },
   sectionHeader: {
     display: "flex",

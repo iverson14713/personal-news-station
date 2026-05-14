@@ -1,6 +1,9 @@
 const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
 
 type SummaryItem = { title: string; source: string };
+type AiDuration = 1 | 3 | 5;
+
+type HighlightOut = { level: string; title: string; summary: string };
 
 function parseBody(req: any): Record<string, unknown> {
   const b = req.body;
@@ -14,6 +17,59 @@ function parseBody(req: any): Record<string, unknown> {
   }
   if (typeof b === "object") return b as Record<string, unknown>;
   return {};
+}
+
+function normalizeDuration(raw: unknown): AiDuration {
+  const n = Number(raw);
+  if (n === 3 || n === 5) return n;
+  return 1;
+}
+
+function durationParams(d: AiDuration) {
+  switch (d) {
+    case 3:
+      return {
+        maxTokens: 1300,
+        scriptGuide: "「script」約 700～900 字：較完整、條理分明，適合約 3 分鐘口播。",
+      };
+    case 5:
+      return {
+        maxTokens: 2200,
+        scriptGuide:
+          "「script」約 1200～1500 字：深度、有層次與轉場，適合約 5 分鐘 Podcast 式主播稿。",
+      };
+    default:
+      return {
+        maxTokens: 700,
+        scriptGuide: "「script」約 250～350 字：快速重點、節奏明快，適合約 1 分鐘口播。",
+      };
+  }
+}
+
+function safeJsonParse(s: string): Record<string, unknown> | null {
+  try {
+    const o = JSON.parse(s) as unknown;
+    return typeof o === "object" && o !== null && !Array.isArray(o)
+      ? (o as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function coerceHighlights(raw: unknown): HighlightOut[] {
+  if (!Array.isArray(raw)) return [];
+  const out: HighlightOut[] = [];
+  for (const row of raw.slice(0, 8)) {
+    if (!row || typeof row !== "object") continue;
+    const o = row as Record<string, unknown>;
+    const level = String(o.level ?? "").slice(0, 32);
+    const title = String(o.title ?? "").slice(0, 300);
+    const summary = String(o.summary ?? "").slice(0, 800);
+    if (!title && !summary) continue;
+    out.push({ level: level || "ℹ️一般", title: title || "重點", summary });
+  }
+  return out;
 }
 
 export default async function handler(req: any, res: any) {
@@ -41,6 +97,9 @@ export default async function handler(req: any, res: any) {
   }
 
   const body = parseBody(req);
+  const duration = normalizeDuration(body.duration);
+  const { maxTokens, scriptGuide } = durationParams(duration);
+
   const rawItems = body.items;
   const items: SummaryItem[] = Array.isArray(rawItems)
     ? rawItems
@@ -73,16 +132,23 @@ export default async function handler(req: any, res: any) {
 使用者只會提供新聞「標題」與「來源」，沒有全文；請依標題合理推斷主題並整理，不要捏造具體數據或未被標題暗示的事實。
 語氣：繁體中文、中性、資訊性；避免誇大投資建議，可做一般風險提醒。
 
-輸出結構（請嚴格遵守段落標題與順序）：
+本次主播稿長度目標：${duration} 分鐘。
+${scriptGuide}
 
-一、今日最重要 5 個重點
-（若輸入少於 5 則，則列出全部即可；每則 2～3 句）
-每一則開頭請標示重要程度之一：🔥重大 / ⚠️注意 / ℹ️一般
+你必須只輸出一個 JSON 物件（不要 markdown 程式碼區、不要前後說明文字），結構如下：
+{
+  "highlights": [
+    { "level": "🔥重大", "title": "簡短標題", "summary": "2～3 句繁體中文說明" }
+  ],
+  "script": "完整 AI 主播新聞稿（單一字串，可含換行）"
+}
 
-二、1 分鐘 AI 主播稿
-（一段適合語音朗讀、約 1 分鐘長度的繁體中文口播稿，流暢、有起承轉合）`;
+規則：
+- highlights：最多 5 則，若輸入新聞少於 5 則則可少於 5；每則 summary 2～3 句。
+- level 必須為以下之一（擇一）：「🔥重大」「⚠️注意」「ℹ️一般」
+- script：符合上述字數區間的口播稿，流暢、有起承轉合，適合語音朗讀。`;
 
-  const userMsg = `以下為使用者選取的新聞條目（僅標題與來源，無全文）。請依上述規定輸出：\n\n${listText}`;
+  const userMsg = `以下為使用者選取的新聞條目（僅標題與來源，無全文）。請依規定輸出 JSON：\n\n${listText}`;
 
   try {
     const response = await fetch(OPENAI_URL, {
@@ -94,7 +160,8 @@ export default async function handler(req: any, res: any) {
       body: JSON.stringify({
         model: "gpt-4.1-mini",
         temperature: 0.5,
-        max_tokens: 700,
+        max_tokens: maxTokens,
+        response_format: { type: "json_object" },
         messages: [
           { role: "system", content: system },
           { role: "user", content: userMsg },
@@ -125,7 +192,32 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    return res.status(200).json({ ok: true, summary: content });
+    const parsed = safeJsonParse(content);
+    if (parsed && typeof parsed.script === "string") {
+      const script = parsed.script.trim();
+      const highlights = coerceHighlights(parsed.highlights);
+      if (!script) {
+        return res.status(200).json({
+          ok: false,
+          error: "AI 回傳的 script 為空",
+        });
+      }
+      return res.status(200).json({
+        ok: true,
+        duration,
+        highlights,
+        script,
+        jsonFallback: false,
+      });
+    }
+
+    return res.status(200).json({
+      ok: true,
+      duration,
+      highlights: [],
+      script: content,
+      jsonFallback: true,
+    });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "連線或解析失敗";
     return res.status(200).json({ ok: false, error: msg });
