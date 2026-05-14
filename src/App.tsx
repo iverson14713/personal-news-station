@@ -76,6 +76,62 @@ function formatVideoPublished(iso: string) {
   }
 }
 
+type RawVideoPayload = {
+  id?: string;
+  title?: string;
+  url?: string;
+  channel?: string;
+  thumbnail?: string;
+  publishedAt?: string;
+};
+
+async function parseVideosApiResponse(res: Response): Promise<
+  | { ok: true; videos: RawVideoPayload[] }
+  | { ok: false; error: string; code?: string }
+> {
+  const text = await res.text();
+  let data: unknown;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    return { ok: false, error: `無法解析伺服器回應（HTTP ${res.status}）` };
+  }
+
+  const d = data as Record<string, unknown>;
+
+  if (!res.ok) {
+    const errMsg =
+      typeof d.error === "string"
+        ? d.error
+        : typeof d.message === "string"
+          ? d.message
+          : `請求失敗（HTTP ${res.status}）`;
+    return {
+      ok: false,
+      error: errMsg,
+      code: typeof d.code === "string" ? d.code : undefined,
+    };
+  }
+
+  if (d.ok === false) {
+    return {
+      ok: false,
+      error: typeof d.error === "string" ? d.error : "未知錯誤",
+      code: typeof d.code === "string" ? d.code : undefined,
+    };
+  }
+
+  if (d.ok === true && Array.isArray(d.videos)) {
+    return { ok: true, videos: d.videos as RawVideoPayload[] };
+  }
+
+  if (Array.isArray(data)) {
+    return { ok: true, videos: data as RawVideoPayload[] };
+  }
+
+  return { ok: false, error: "伺服器回傳格式無法辨識（需 ok + videos 或陣列）" };
+}
+
 export default function App() {
   const [tab, setTab] = useState<Tab>("home");
   const [selectedTopics, setSelectedTopics] = useState<string[]>([
@@ -91,6 +147,7 @@ export default function App() {
   const [favoriteLinks, setFavoriteLinks] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [videoLoading, setVideoLoading] = useState(false);
+  const [videoError, setVideoError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState("");
   const [speed, setSpeed] = useState(1.2);
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -217,40 +274,39 @@ export default function App() {
 
   const fetchVideos = async () => {
     setVideoLoading(true);
+    setVideoError(null);
 
     try {
       const keywords = buildVideoKeywords();
       const perKeyword = 5;
+      const errors: string[] = [];
 
       const batches = await Promise.all(
         keywords.map(async (keyword) => {
           try {
             const res = await fetch(`/api/videos?q=${encodeURIComponent(keyword)}`);
-            const data = await res.json();
+            const parsed = await parseVideosApiResponse(res);
 
-            if (!Array.isArray(data) || data.length === 0) {
+            if (!parsed.ok) {
+              const line =
+                parsed.code && parsed.code !== parsed.error
+                  ? `${parsed.error}（${parsed.code}）`
+                  : parsed.error;
+              errors.push(line);
               return [] as VideoItem[];
             }
 
-            return data.slice(0, perKeyword).map(
-              (v: {
-                id?: string;
-                title?: string;
-                url?: string;
-                channel?: string;
-                thumbnail?: string;
-                publishedAt?: string;
-              }) => ({
-                id: v.id || v.url || keyword,
-                title: v.title || `${keyword} 最新影片`,
-                link: v.url || "",
-                channel: v.channel || "YouTube",
-                thumbnail: v.thumbnail || "",
-                keyword,
-                publishedAt: v.publishedAt || "",
-              })
-            );
-          } catch {
+            return parsed.videos.slice(0, perKeyword).map((v) => ({
+              id: v.id || v.url || keyword,
+              title: v.title || `${keyword} 最新影片`,
+              link: v.url || "",
+              channel: v.channel || "YouTube",
+              thumbnail: v.thumbnail || "",
+              keyword,
+              publishedAt: v.publishedAt || "",
+            }));
+          } catch (e) {
+            errors.push(e instanceof Error ? e.message : "網路或程式錯誤");
             return [] as VideoItem[];
           }
         })
@@ -269,8 +325,26 @@ export default function App() {
       }
 
       setVideos(uniqueVideos);
+
+      const uniqueMsgs = [...new Set(errors.filter(Boolean))];
+
+      if (uniqueVideos.length === 0) {
+        setVideoError(
+          uniqueMsgs.length > 0
+            ? uniqueMsgs.join("；")
+            : null
+        );
+      } else if (uniqueMsgs.length > 0) {
+        setVideoError(`部分關鍵字未載入：${uniqueMsgs.join("；")}`);
+      } else {
+        setVideoError(null);
+      }
     } catch (error) {
       console.error(error);
+      setVideos([]);
+      setVideoError(
+        error instanceof Error ? error.message : "載入影音時發生錯誤"
+      );
     }
 
     setVideoLoading(false);
@@ -445,7 +519,7 @@ ${newsText}
 
   const pageTitle =
     tab === "home"
-      ? "我的新聞首頁"
+      ? "首頁"
       : tab === "player"
       ? "播放控制台"
       : tab === "video"
@@ -468,11 +542,7 @@ ${newsText}
             </div>
             {isSpeaking ? (
               <span style={styles.homeLivePill}>播放中</span>
-            ) : (
-              <div style={styles.homeMicIcon} aria-hidden>
-                🎙️
-              </div>
-            )}
+            ) : null}
           </header>
         ) : (
           <header style={styles.headerOther}>
@@ -533,23 +603,15 @@ ${newsText}
               </button>
             </div>
 
-            <div style={styles.homeSelectRow}>
-              <div style={styles.homeSelectBtns}>
-                <button type="button" onClick={selectAll} style={styles.tinyOutlineBtn}>
-                  全選
-                </button>
-                <button type="button" onClick={clearAll} style={styles.tinyOutlineBtn}>
-                  取消
-                </button>
-              </div>
-              <span style={styles.lastUpdatedInline}>
-                {lastUpdated ? `更新 ${lastUpdated}` : "尚未更新"}
-              </span>
-            </div>
-
             <NewsList
-              title="新聞列表"
+              title="新聞"
               compact
+              denseCards
+              homeToolbar={{
+                selectAll,
+                clearAll,
+                lastUpdated,
+              }}
               news={news}
               loading={loading}
               toggleNews={toggleNews}
@@ -631,6 +693,12 @@ ${newsText}
               </button>
             </div>
 
+            {videoError && (
+              <div style={styles.videoErrorBanner} role="alert">
+                {videoError}
+              </div>
+            )}
+
             {videoLoading && (
               <div style={{ ...styles.loading, marginBottom: "12px" }}>影音讀取中…</div>
             )}
@@ -671,9 +739,9 @@ ${newsText}
               })}
             </div>
 
-            {!videoLoading && videos.length === 0 && (
+            {!videoLoading && videos.length === 0 && !videoError && (
               <div style={styles.loading}>
-                尚無影片。請確認已設定 YOUTUBE_API_KEY，或稍後再按「更新影音」。
+                尚無符合的影片。可調整追蹤主題或稍後再按「更新影音」。
               </div>
             )}
           </>
@@ -863,6 +931,8 @@ function NewsList({
   toggleFavorite,
   emptyText = "沒有新聞",
   compact = false,
+  denseCards = false,
+  homeToolbar,
 }: {
   title: string;
   news: NewsItem[];
@@ -871,39 +941,91 @@ function NewsList({
   toggleFavorite: (item: NewsItem) => void;
   emptyText?: string;
   compact?: boolean;
+  denseCards?: boolean;
+  homeToolbar?: {
+    selectAll: () => void;
+    clearAll: () => void;
+    lastUpdated: string;
+  };
 }) {
+  const headerMerged = !!homeToolbar;
+
   return (
     <>
       <div
         style={{
           ...styles.sectionHeader,
           ...(compact ? styles.sectionHeaderCompact : {}),
+          ...(headerMerged ? styles.sectionHeaderHomeMerged : {}),
         }}
       >
-        <h2
-          style={{
-            ...styles.sectionTitle,
-            ...(compact ? styles.sectionTitleCompact : {}),
-          }}
-        >
-          {title}
-        </h2>
-        <span style={styles.countText}>{news.length} 則</span>
+        {homeToolbar ? (
+          <>
+            <div style={styles.homeListHeaderLeft}>
+              <button
+                type="button"
+                onClick={homeToolbar.selectAll}
+                style={styles.tinyOutlineBtn}
+              >
+                全選
+              </button>
+              <button
+                type="button"
+                onClick={homeToolbar.clearAll}
+                style={styles.tinyOutlineBtn}
+              >
+                取消
+              </button>
+            </div>
+            <div style={styles.homeListHeaderMid}>
+              <h2
+                style={{
+                  ...styles.sectionTitle,
+                  ...(compact ? styles.sectionTitleCompact : {}),
+                  ...styles.sectionTitleHomeInline,
+                }}
+              >
+                {title}
+              </h2>
+              <span style={styles.countTextHome}>{news.length} 則</span>
+            </div>
+            <span style={styles.lastUpdatedHome}>
+              {homeToolbar.lastUpdated
+                ? `更新 ${homeToolbar.lastUpdated}`
+                : "尚未更新"}
+            </span>
+          </>
+        ) : (
+          <>
+            <h2
+              style={{
+                ...styles.sectionTitle,
+                ...(compact ? styles.sectionTitleCompact : {}),
+              }}
+            >
+              {title}
+            </h2>
+            <span style={styles.countText}>{news.length} 則</span>
+          </>
+        )}
       </div>
 
-      {loading && <div style={styles.loading}>新聞讀取中...</div>}
+      {loading && (
+        <div style={homeToolbar ? styles.loadingSlim : styles.loading}>新聞讀取中...</div>
+      )}
 
       {!loading && news.length === 0 && (
         <div style={styles.loading}>{emptyText}</div>
       )}
 
-      <div style={styles.newsList}>
+      <div style={denseCards ? styles.newsListDense : styles.newsList}>
         {news.map((item, index) => (
           <article
             key={item.id}
             onClick={() => toggleNews(item.id)}
             style={{
               ...styles.newsCard,
+              ...(denseCards ? styles.newsCardDense : {}),
               ...(item.selected ? styles.newsCardActive : {}),
             }}
           >
@@ -952,21 +1074,35 @@ function NewsList({
 
 const styles: Record<string, CSSProperties> = {
   page: {
-    minHeight: "100vh",
+    boxSizing: "border-box",
+    width: "100%",
+    maxWidth: "100%",
+    minHeight: "100dvh",
+    margin: 0,
+    padding: 0,
+    overflowX: "hidden",
     background:
       "radial-gradient(circle at top left, #1D4ED8 0, transparent 28%), linear-gradient(180deg, #020617 0%, #0F172A 100%)",
     color: "white",
     fontFamily:
       '-apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans TC", sans-serif',
-    padding: "18px",
   },
-  phone: { maxWidth: "460px", margin: "0 auto", paddingBottom: "98px" },
+  phone: {
+    boxSizing: "border-box",
+    width: "100%",
+    maxWidth: "460px",
+    margin: "0 auto",
+    paddingLeft: "max(16px, env(safe-area-inset-left, 0px))",
+    paddingRight: "max(16px, env(safe-area-inset-right, 0px))",
+    paddingTop: "max(12px, env(safe-area-inset-top, 0px))",
+    paddingBottom: "calc(92px + env(safe-area-inset-bottom, 0px))",
+  },
   homeHeader: {
     display: "flex",
     justifyContent: "space-between",
     alignItems: "flex-start",
     gap: "10px",
-    padding: "4px 0 8px",
+    padding: "2px 0 4px",
   },
   homeBrand: {
     margin: 0,
@@ -976,7 +1112,7 @@ const styles: Record<string, CSSProperties> = {
     lineHeight: 1.2,
   },
   homeStats: {
-    margin: "6px 0 0",
+    margin: "4px 0 0",
     color: "#94A3B8",
     fontSize: "12px",
     lineHeight: 1.35,
@@ -991,18 +1127,7 @@ const styles: Record<string, CSSProperties> = {
     border: "1px solid rgba(167,139,250,.45)",
     borderRadius: "999px",
     padding: "5px 10px",
-    marginTop: "2px",
-  },
-  homeMicIcon: {
-    width: "40px",
-    height: "40px",
-    borderRadius: "14px",
-    background: "linear-gradient(135deg, #2563EB, #7C3AED)",
-    display: "grid",
-    placeItems: "center",
-    fontSize: "20px",
-    flexShrink: 0,
-    boxShadow: "0 8px 22px rgba(37,99,235,.28)",
+    marginTop: "0",
   },
   headerOther: {
     display: "flex",
@@ -1030,10 +1155,10 @@ const styles: Record<string, CSSProperties> = {
   },
   homeToolbarScroll: {
     display: "flex",
-    gap: "6px",
+    gap: "5px",
     overflowX: "auto",
     flexWrap: "nowrap",
-    marginTop: "10px",
+    marginTop: "6px",
     paddingBottom: "2px",
     WebkitOverflowScrolling: "touch",
   },
@@ -1041,8 +1166,8 @@ const styles: Record<string, CSSProperties> = {
     flexShrink: 0,
     border: "none",
     borderRadius: "999px",
-    padding: "8px 12px",
-    fontSize: "12px",
+    padding: "7px 10px",
+    fontSize: "11px",
     fontWeight: 800,
     cursor: "pointer",
     whiteSpace: "nowrap",
@@ -1061,8 +1186,8 @@ const styles: Record<string, CSSProperties> = {
     color: "white",
     border: "none",
     borderRadius: "999px",
-    padding: "8px 12px",
-    fontSize: "12px",
+    padding: "7px 10px",
+    fontSize: "11px",
     fontWeight: 800,
     cursor: "pointer",
     flexShrink: 0,
@@ -1073,48 +1198,30 @@ const styles: Record<string, CSSProperties> = {
     color: "#E2E8F0",
     border: "1px solid rgba(255,255,255,.12)",
     borderRadius: "999px",
-    padding: "8px 12px",
-    fontSize: "12px",
+    padding: "7px 10px",
+    fontSize: "11px",
     fontWeight: 700,
     cursor: "pointer",
     flexShrink: 0,
     whiteSpace: "nowrap",
   },
-  homeSelectRow: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: "8px",
-    marginTop: "8px",
-    marginBottom: "2px",
-  },
-  homeSelectBtns: { display: "flex", gap: "6px", flexShrink: 0 },
   tinyOutlineBtn: {
     background: "transparent",
     color: "#93C5FD",
     border: "1px solid rgba(147,197,253,.35)",
     borderRadius: "999px",
-    padding: "5px 10px",
-    fontSize: "11px",
+    padding: "4px 9px",
+    fontSize: "10px",
     fontWeight: 700,
     cursor: "pointer",
   },
-  lastUpdatedInline: {
-    fontSize: "11px",
-    color: "#64748B",
-    textAlign: "right",
-    minWidth: 0,
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
-  },
   searchBox: {
     display: "flex",
-    gap: "8px",
-    marginTop: "6px",
+    gap: "6px",
+    marginTop: "4px",
     background: "rgba(255,255,255,.08)",
-    padding: "8px",
-    borderRadius: "18px",
+    padding: "6px",
+    borderRadius: "14px",
     border: "1px solid rgba(255,255,255,.08)",
   },
   searchInput: {
@@ -1123,8 +1230,8 @@ const styles: Record<string, CSSProperties> = {
     color: "white",
     border: "none",
     outline: "none",
-    fontSize: "15px",
-    padding: "10px",
+    fontSize: "14px",
+    padding: "8px",
   },
   searchButton: {
     background: "#22C55E",
@@ -1143,10 +1250,45 @@ const styles: Record<string, CSSProperties> = {
     textTransform: "uppercase",
   },
   sectionHeaderCompact: {
-    marginTop: "6px",
-    marginBottom: "8px",
+    marginTop: "2px",
+    marginBottom: "6px",
   },
-  sectionTitleCompact: { fontSize: "15px" },
+  sectionTitleCompact: { fontSize: "14px" },
+  sectionHeaderHomeMerged: {
+    justifyContent: "flex-start",
+    alignItems: "center",
+    gap: "8px",
+    flexWrap: "wrap",
+    rowGap: "6px",
+  },
+  homeListHeaderLeft: {
+    display: "flex",
+    gap: "5px",
+    flexShrink: 0,
+    alignItems: "center",
+  },
+  homeListHeaderMid: {
+    display: "flex",
+    alignItems: "baseline",
+    gap: "6px",
+    flex: "1 1 88px",
+    minWidth: 0,
+  },
+  sectionTitleHomeInline: { margin: 0, lineHeight: 1.2 },
+  countTextHome: {
+    fontSize: "11px",
+    color: "#94A3B8",
+    fontWeight: 600,
+    flexShrink: 0,
+  },
+  lastUpdatedHome: {
+    fontSize: "10px",
+    color: "#64748B",
+    marginLeft: "auto",
+    flexShrink: 0,
+    maxWidth: "100%",
+    textAlign: "right",
+  },
   updateButton: {
     background: "rgba(255,255,255,.12)",
     color: "white",
@@ -1287,8 +1429,26 @@ const styles: Record<string, CSSProperties> = {
     padding: "12px",
     borderRadius: "16px",
   },
+  loadingSlim: {
+    color: "#CBD5E1",
+    background: "rgba(255,255,255,.06)",
+    padding: "7px 10px",
+    borderRadius: "12px",
+    fontSize: "12px",
+    marginBottom: "6px",
+  },
   videoToolbar: {
     marginTop: "8px",
+    marginBottom: "12px",
+  },
+  videoErrorBanner: {
+    color: "#FECACA",
+    background: "rgba(127,29,29,.35)",
+    border: "1px solid rgba(248,113,113,.35)",
+    borderRadius: "14px",
+    padding: "12px 14px",
+    fontSize: "13px",
+    lineHeight: 1.45,
     marginBottom: "12px",
   },
   videoRefreshBtn: {
@@ -1389,6 +1549,7 @@ const styles: Record<string, CSSProperties> = {
     whiteSpace: "nowrap",
   },
   newsList: { display: "flex", flexDirection: "column", gap: "10px" },
+  newsListDense: { display: "flex", flexDirection: "column", gap: "7px" },
   newsCard: {
     display: "flex",
     gap: "12px",
@@ -1398,6 +1559,10 @@ const styles: Record<string, CSSProperties> = {
     borderRadius: "18px",
     padding: "13px",
     cursor: "pointer",
+  },
+  newsCardDense: {
+    padding: "9px 11px",
+    borderRadius: "14px",
   },
   newsCardActive: {
     background: "rgba(37,99,235,.26)",
@@ -1434,19 +1599,25 @@ const styles: Record<string, CSSProperties> = {
   link: { color: "#93C5FD", textDecoration: "none", flexShrink: 0 },
   bottomNav: {
     position: "fixed",
-    left: "50%",
-    bottom: "16px",
-    transform: "translateX(-50%)",
-    width: "calc(100% - 28px)",
-    maxWidth: "430px",
-    background: "rgba(15,23,42,.92)",
-    border: "1px solid rgba(255,255,255,.1)",
-    borderRadius: "24px",
-    padding: "9px 8px",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    width: "100%",
+    maxWidth: "100%",
+    margin: 0,
+    transform: "none",
+    background: "rgba(15,23,42,.96)",
+    border: "none",
+    borderTop: "1px solid rgba(255,255,255,.1)",
+    borderRadius: "20px 20px 0 0",
+    paddingTop: "10px",
+    paddingLeft: "max(10px, env(safe-area-inset-left, 0px))",
+    paddingRight: "max(10px, env(safe-area-inset-right, 0px))",
+    paddingBottom: "max(12px, env(safe-area-inset-bottom, 0px))",
     display: "flex",
     justifyContent: "space-around",
     backdropFilter: "blur(18px)",
-    boxShadow: "0 20px 50px rgba(0,0,0,.4)",
+    boxShadow: "0 -8px 32px rgba(0,0,0,.35)",
   },
   navItem: {
     background: "transparent",
