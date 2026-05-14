@@ -62,6 +62,24 @@ function normalizeKey(title: string) {
   return title.replace(/[，。！？、\s\-｜|:：]/g, "").slice(0, 28);
 }
 
+/** 只顯示此時間內的新聞（預設 48 小時＝不含兩天前更早的稿件） */
+const NEWS_MAX_AGE_MS = 2 * 24 * 60 * 60 * 1000;
+/** 多抓一些 RSS 條目再過濾日期，避免過濾後不足 25 則 */
+const NEWS_RSS_ITEM_SCAN = 280;
+
+function parseNewsPubDate(raw: string | null | undefined): Date | null {
+  if (!raw?.trim()) return null;
+  const d = new Date(raw.trim());
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function isNewsFreshEnough(pubDateRaw: string, nowMs: number): boolean {
+  const d = parseNewsPubDate(pubDateRaw);
+  if (!d) return false;
+  const age = nowMs - d.getTime();
+  return age >= 0 && age <= NEWS_MAX_AGE_MS;
+}
+
 function formatVideoPublished(iso: string) {
   if (!iso) return "";
   try {
@@ -287,10 +305,14 @@ export default function App() {
 
       const parser = new DOMParser();
       const xml = parser.parseFromString(xmlText, "text/xml");
-      const items = Array.from(xml.querySelectorAll("item")).slice(0, 70);
-      const seen = new Set<string>();
+      const items = Array.from(xml.querySelectorAll("item")).slice(
+        0,
+        NEWS_RSS_ITEM_SCAN
+      );
+      const nowMs = Date.now();
 
-      const parsedNews: NewsItem[] = items
+      type Row = NewsItem & { sortTime: number };
+      const dated: Row[] = items
         .map((item, index) => {
           const rawTitle = item.querySelector("title")?.textContent || "無標題";
           const title = cleanTitle(rawTitle);
@@ -299,24 +321,40 @@ export default function App() {
             item.querySelector("source")?.textContent ||
             rawTitle.split(" - ").pop() ||
             "Google News";
+          const pubDate = item.querySelector("pubDate")?.textContent || "";
+          const t = parseNewsPubDate(pubDate)?.getTime() ?? 0;
 
           return {
             id: link || `${title}-${index}`,
             title,
             link,
             source,
-            pubDate: item.querySelector("pubDate")?.textContent || "",
-            selected: index < 5,
+            pubDate,
+            selected: false,
             favorite: favoriteLinks.includes(link),
+            sortTime: t,
           };
         })
-        .filter((item) => {
-          const key = normalizeKey(item.title);
-          if (!key || seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        })
-        .slice(0, 25);
+        .filter((row) => isNewsFreshEnough(row.pubDate, nowMs))
+        .sort((a, b) => b.sortTime - a.sortTime);
+
+      const seen = new Set<string>();
+      const parsedNews: NewsItem[] = [];
+      for (const row of dated) {
+        const key = normalizeKey(row.title);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        parsedNews.push({
+          id: row.id,
+          title: row.title,
+          link: row.link,
+          source: row.source,
+          pubDate: row.pubDate,
+          selected: parsedNews.length < 5,
+          favorite: row.favorite,
+        });
+        if (parsedNews.length >= 25) break;
+      }
 
       setNews(parsedNews);
       setLastUpdated(
