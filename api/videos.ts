@@ -35,6 +35,10 @@ const MAX_RETURN = 5;
 const PRIMARY_SEARCH_MAX = 12;
 const FALLBACK_SEARCH_MAX = 15;
 const MAX_FALLBACK_QUERIES = 8;
+/** RSS：每頻道最多抓幾支、最多輪詢幾個頻道（額度滿時靠此補內容） */
+const RSS_PER_FEED = 10;
+const RSS_MAX_CHANNELS = 40;
+const RSS_POOL_CAP = 48;
 
 /** 主題 → 單一最佳化英文搜尋詞（避免只搜「NBA」「BTC」導致 MV／Shorts 洗版） */
 const OPTIMIZED_QUERIES: Record<string, string> = {
@@ -147,9 +151,42 @@ function channelLooksMusicOnly(channel: string): boolean {
   return false;
 }
 
-function passesQualityGate(v: VideoOut): boolean {
+/** 用於 YouTube Search API 回傳：較嚴，避免 MV／洗版 */
+function passesQualityGateStrict(v: VideoOut): boolean {
   if (titleLooksLowQuality(v.title)) return false;
   if (channelLooksMusicOnly(v.channel)) return false;
+  return true;
+}
+
+/**
+ * RSS 來自訂閱頻道：額度用盡時仍要能出片，規則較鬆（仍擋明顯 MV／Shorts／VEVO）。
+ * 避免「嚴格標題過濾」把新聞／賽事標題誤殺導致整頁空白。
+ */
+function passesQualityGateRssRelaxed(v: VideoOut): boolean {
+  const t = v.title.toLowerCase();
+  const hard = [
+    "official music video",
+    "music video",
+    "#shorts",
+    "lyric video",
+    " karaoke",
+    "nightcore",
+    "fan cam",
+    "fancam",
+  ];
+  for (const s of hard) {
+    if (t.includes(s)) return false;
+  }
+  if (/\bvevo\b/i.test(v.channel)) return false;
+  if (/- topic$/i.test(v.channel.trim())) return false;
+  return true;
+}
+
+/** 最後手段：只擋最離譜的 MV 標題與 VEVO */
+function passesQualityGateMinimal(v: VideoOut): boolean {
+  const t = v.title.toLowerCase();
+  if (t.includes("official music video") || t.includes("#shorts")) return false;
+  if (/\bvevo\b/i.test(v.channel)) return false;
   return true;
 }
 
@@ -200,8 +237,34 @@ function sortVideosForDisplay(videos: VideoOut[]): VideoOut[] {
   });
 }
 
+function filterVideosStrict(videos: VideoOut[]): VideoOut[] {
+  return videos.filter(passesQualityGateStrict);
+}
+
+function filterVideosRssRelaxed(videos: VideoOut[]): VideoOut[] {
+  return videos.filter(passesQualityGateRssRelaxed);
+}
+
+function filterVideosMinimal(videos: VideoOut[]): VideoOut[] {
+  return videos.filter(passesQualityGateMinimal);
+}
+
+/** Search API 結果仍用嚴格過濾 */
 function filterVideos(videos: VideoOut[]): VideoOut[] {
-  return videos.filter(passesQualityGate);
+  return filterVideosStrict(videos);
+}
+
+function pickVideosFromRssPool(raw: VideoOut[]): VideoOut[] {
+  if (raw.length === 0) return [];
+  let picked = sortVideosForDisplay(filterVideosStrict(raw)).slice(0, MAX_RETURN);
+  if (picked.length > 0) return picked;
+  picked = sortVideosForDisplay(filterVideosRssRelaxed(raw)).slice(0, MAX_RETURN);
+  if (picked.length > 0) return picked;
+  picked = sortVideosForDisplay(filterVideosMinimal(raw)).slice(0, MAX_RETURN);
+  if (picked.length > 0) return picked;
+  return sortVideosForDisplay(raw)
+    .filter((v) => !/\bvevo\b/i.test(v.channel))
+    .slice(0, MAX_RETURN);
 }
 
 function buildPrimarySearchQuery(labels: string[], custom: string): string {
@@ -250,25 +313,55 @@ function collectTopicSearchQueries(labels: string[], custom: string): string[] {
   return out.slice(0, 24);
 }
 
-/** 主題對應 YouTube 頻道 RSS（channel_id） */
+/** 主題對應 YouTube 頻道 RSS（channel_id）— 多放幾個，額度用盡時仍靠 RSS 盡量出片 */
 const RSS_FEEDS: Record<string, string[]> = {
-  nba: ["UCWJ2lwLlHCkVoAqpYF4O5A", "UCi-74PmZAF-JmKSxiQPTdBw"],
-  mlb: ["UCPCFIQU--9TuJZCBhJoRoTw"],
+  nba: [
+    "UCWJ2lwLlHCkVoAqpYF4O5A",
+    "UCi-74PmZAF-JmKSxiQPTdBw",
+    "UC9CoOnJkIBMdeaid9QYbPtw",
+    "UCE26OVBc9isw-ii6g_kiEPA",
+    "UCDeIVVHWrXIDVLbkgftp1Tg",
+    "UCD436eZDmhLjhmLFzmj6GKA",
+  ],
+  mlb: [
+    "UCPCFIQU--9TuJZCBhJoRoTw",
+    "UCLFT-m-weWReNJBLKXPNthQ",
+  ],
   taiwan: [
     "UC5nlbx1lFJ1vNBWxM9YQGTA",
     "UC7cSDz1mBBCcoSDkCRmqsKg",
     "UC4PTrU9THS1OqUp_PSoGHCw",
   ],
-  finance: ["UCUMZ7gohGI9HcU9VNOKLYCQ", "UCvJJFu7leELUzLZ-BdAuG4A"],
-  crypto: ["UC67eENbDJN6-ms66ZDuGCBA", "UCRV_qKGWtv8VRBCvDGuyXDA"],
-  intl: ["UC16niRr50-MSBwiO3Q_Dmw", "UCupvZG-5ko_eiAXpRVx06kw"],
-  tech: ["UCBJycsmduvYEL83Rd_FU90A", "UCXuqSBlHAE6Xw-yeJA0Tunw"],
-  gaming: ["UCIFQdZNU27Vjw8XVVEUVqYQ", "UCbu2_Fn61izNqKlQuGnvyTw"],
-  entertainment: ["UCupvZG-5ko_eiAXpRVx06kw"],
-  movie: ["UCupvZG-5ko_eiAXpRVx06kw"],
-  anime: ["UCIFQdZNU27Vjw8XVVEUVqYQ"],
-  music: ["UC16niRr50-MSBwiO3Q_Dmw"],
-  fashion: ["UC16niRr50-MSBwiO3Q_Dmw"],
+  finance: [
+    "UCUMZ7gohGI9HcU9VNOKLYCQ",
+    "UCvJJFu7leELUzLZ-BdAuG4A",
+    "UCV61sGxUSQlVasW7PHwoF9Q",
+  ],
+  crypto: [
+    "UC67eENbDJN6-ms66ZDuGCBA",
+    "UCRV_qKGWtv8VRBCvDGuyXDA",
+    "UCV61sGxUSQlVasW7PHwoF9Q",
+  ],
+  intl: [
+    "UC16niRr50-MSBwiO3Q_Dmw",
+    "UCupvZG-5ko_eiAXpRVx06kw",
+    "UCV61sGxUSQlVasW7PHwoF9Q",
+  ],
+  tech: [
+    "UCBJycsmduvYEL83Rd_FU90A",
+    "UCXuqSBlHAE6Xw-yeJA0Tunw",
+    "UCV61sGxUSQlVasW7PHwoF9Q",
+  ],
+  gaming: [
+    "UCIFQdZNU27Vjw8XVVEUVqYQ",
+    "UCbu2_Fn61izNqKlQuGnvyTw",
+    "UCupvZG-5ko_eiAXpRVx06kw",
+  ],
+  entertainment: ["UCupvZG-5ko_eiAXpRVx06kw", "UC16niRr50-MSBwiO3Q_Dmw"],
+  movie: ["UCupvZG-5ko_eiAXpRVx06kw", "UC16niRr50-MSBwiO3Q_Dmw"],
+  anime: ["UCIFQdZNU27Vjw8XVVEUVqYQ", "UCupvZG-5ko_eiAXpRVx06kw"],
+  music: ["UC16niRr50-MSBwiO3Q_Dmw", "UCupvZG-5ko_eiAXpRVx06kw"],
+  fashion: ["UC16niRr50-MSBwiO3Q_Dmw", "UCupvZG-5ko_eiAXpRVx06kw"],
 };
 
 const DEFAULT_NEWS_FEEDS = [
@@ -344,9 +437,10 @@ async function fetchRssVideos(
 ) {
   const out: VideoOut[] = [];
   const seen = new Set<string>();
+  const ids = channelIds.slice(0, RSS_MAX_CHANNELS);
 
-  for (const cid of channelIds) {
-    if (out.length >= 24) break;
+  for (const cid of ids) {
+    if (out.length >= RSS_POOL_CAP) break;
     const uploadFeed = YT_RSS_UPLOADS(cid);
     const urls = uploadFeed ? [YT_RSS(cid), uploadFeed] : [YT_RSS(cid)];
     try {
@@ -359,7 +453,7 @@ async function fetchRssVideos(
           if (seen.has(v.id)) continue;
           seen.add(v.id);
           out.push(v);
-          if (out.length >= 28) return out;
+          if (out.length >= RSS_POOL_CAP) return out;
         }
         if (parsed.length > 0) break;
       }
@@ -388,7 +482,8 @@ function classifyTopicLabel(label: string): string[] {
     L.includes("台股")
   )
     push("taiwan");
-  if (label === "財經" || label === "美股" || label === "ETF") push("finance");
+  if (label === "財經" || label === "美股" || label === "ETF" || label === "台股")
+    push("finance");
   if (
     label === "幣圈" ||
     label === "BTC" ||
@@ -421,6 +516,12 @@ function feedsForLabels(labels: string[]) {
   const uniq = [...new Set(acc)];
   if (uniq.length === 0) return [...DEFAULT_NEWS_FEEDS];
   return uniq;
+}
+
+/** 主題頻道優先，並併入預設新聞（額度滿時仍盡量有片可看） */
+function rssChannelIdsForRequest(labels: string[]): string[] {
+  const topic = feedsForLabels(labels.length ? labels : ["台灣熱門", "財經"]);
+  return [...new Set([...topic, ...DEFAULT_NEWS_FEEDS])];
 }
 
 function isQuotaLike(message: string, code?: string) {
@@ -680,33 +781,49 @@ export default async function handler(req: any, res: any) {
     banner = "未設定 API 金鑰，已改以新聞影音模式顯示";
   }
 
-  const feedIds = feedsForLabels(labels.length ? labels : ["台灣熱門", "財經"]);
-  const rssRaw = await fetchRssVideos(feedIds, 5, "RSS 新聞影音");
-  videos = sortVideosForDisplay(filterVideos(rssRaw)).slice(0, MAX_RETURN);
+  const feedIds = rssChannelIdsForRequest(labels.length ? labels : ["台灣熱門", "財經"]);
+  const rssRaw = await fetchRssVideos(feedIds, RSS_PER_FEED, "RSS 新聞影音");
+  videos = pickVideosFromRssPool(rssRaw);
 
   if (videos.length > 0) {
     source = "youtube_rss";
+    const rssNote =
+      "以下為主題相關頻道 RSS（不需搜尋 API；與即時搜尋結果可能略有差異）。";
+    const combinedBanner = youtubeApiQuotaBlocked
+      ? banner
+        ? `${banner}\n${rssNote}`
+        : rssNote
+      : banner;
     return res.status(200).json({
       ok: true,
       videos,
       source,
-      banner,
+      banner: combinedBanner,
     });
   }
 
-  const curated = await fetchRssVideos(DEFAULT_NEWS_FEEDS, 6, "國際新聞影音");
-  videos = sortVideosForDisplay(filterVideos(curated)).slice(0, MAX_RETURN);
+  const curated = await fetchRssVideos(
+    DEFAULT_NEWS_FEEDS,
+    RSS_PER_FEED + 2,
+    "國際新聞影音"
+  );
+  videos = pickVideosFromRssPool(curated);
   source = "curated_rss";
   if (!banner) {
     banner = "已改為預設新聞影音來源";
   }
 
   if (videos.length > 0) {
+    const rssNote =
+      "以下為新聞頻道 RSS（不需搜尋 API；與即時搜尋結果可能略有差異）。";
+    const combinedBanner = youtubeApiQuotaBlocked
+      ? `${banner}\n${rssNote}`
+      : banner;
     return res.status(200).json({
       ok: true,
       videos,
       source,
-      banner,
+      banner: combinedBanner,
     });
   }
 
