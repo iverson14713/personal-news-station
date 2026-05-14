@@ -3,6 +3,13 @@ import type { CSSProperties } from "react";
 
 type Tab = "home" | "player" | "video" | "favorites" | "settings";
 
+/**
+ * 設為 `true` 可再次顯示底部「影音」Tab 與影音分頁。
+ * `loadVideos`、`/api/videos` 與相關 state 均保留，僅隱藏 UI。
+ * 目前因影音 fallback 品質不穩，先關閉以維持產品專業感。
+ */
+const ENABLE_VIDEO_NEWS_UI = false;
+
 type NewsItem = {
   id: string;
   title: string;
@@ -611,7 +618,13 @@ export default function App() {
   }, [selectedTopics]);
 
   useEffect(() => {
-    if (tab !== "video") return;
+    if (!ENABLE_VIDEO_NEWS_UI && tab === "video") {
+      setTab("home");
+    }
+  }, [tab]);
+
+  useEffect(() => {
+    if (!ENABLE_VIDEO_NEWS_UI || tab !== "video") return;
     void loadVideos(false);
   }, [tab, loadVideos]);
 
@@ -621,6 +634,7 @@ export default function App() {
   };
 
   const updateVideos = () => {
+    if (!ENABLE_VIDEO_NEWS_UI) return;
     setTab("video");
     void loadVideos(true);
   };
@@ -915,12 +929,14 @@ ${newsText}
     tab === "home"
       ? "首頁"
       : tab === "player"
-      ? "播放控制台"
-      : tab === "video"
-      ? "影音新聞"
-      : tab === "favorites"
-      ? "收藏新聞"
-      : "個人設定";
+        ? "播放控制台"
+        : tab === "video"
+          ? ENABLE_VIDEO_NEWS_UI
+            ? "影音新聞"
+            : "首頁"
+          : tab === "favorites"
+            ? "收藏新聞"
+            : "個人設定";
 
   return (
     <div style={styles.page}>
@@ -1294,7 +1310,7 @@ ${newsText}
           </>
         )}
 
-        {tab === "video" && (
+        {ENABLE_VIDEO_NEWS_UI && tab === "video" && (
           <>
             <div style={styles.videoToolbar}>
               <button
@@ -1416,7 +1432,7 @@ ${newsText}
               <div style={styles.controlTitle}>我的追蹤主題</div>
 
               <div style={styles.settingHint}>
-                首頁會依照這些主題整理新聞與影音。想搜尋單一事件，可直接在首頁搜尋框輸入關鍵字。
+                首頁會依照這些主題整理新聞。想搜尋單一事件，可直接在首頁搜尋框輸入關鍵字。
               </div>
 
               <div style={styles.actionRow}>
@@ -1529,12 +1545,14 @@ ${newsText}
             🎧<span>播放</span>
           </button>
 
-          <button
-            onClick={() => setTab("video")}
-            style={tab === "video" ? styles.navItemActive : styles.navItem}
-          >
-            📺<span>影音</span>
-          </button>
+          {ENABLE_VIDEO_NEWS_UI ? (
+            <button
+              onClick={() => setTab("video")}
+              style={tab === "video" ? styles.navItemActive : styles.navItem}
+            >
+              📺<span>影音</span>
+            </button>
+          ) : null}
 
           <button
             onClick={() => setTab("favorites")}
