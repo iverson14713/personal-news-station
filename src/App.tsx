@@ -20,7 +20,7 @@ type VideoItem = {
   channel: string;
   thumbnail: string;
   keyword: string;
-  isFallback?: boolean;
+  publishedAt: string;
 };
 
 type Topic = {
@@ -62,10 +62,18 @@ function normalizeKey(title: string) {
   return title.replace(/[，。！？、\s\-｜|:：]/g, "").slice(0, 28);
 }
 
-function youtubeSearchUrl(keyword: string) {
-  return `https://www.youtube.com/results?search_query=${encodeURIComponent(
-    `${keyword} 最新 新聞 精華`
-  )}`;
+function formatVideoPublished(iso: string) {
+  if (!iso) return "";
+  try {
+    return new Date(iso).toLocaleString("zh-TW", {
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return "";
+  }
 }
 
 export default function App() {
@@ -212,58 +220,53 @@ export default function App() {
 
     try {
       const keywords = buildVideoKeywords();
+      const perKeyword = 5;
 
-      const results = await Promise.all(
+      const batches = await Promise.all(
         keywords.map(async (keyword) => {
           try {
             const res = await fetch(`/api/videos?q=${encodeURIComponent(keyword)}`);
             const data = await res.json();
 
-            const firstVideo = Array.isArray(data) ? data[0] : null;
-
-            if (!firstVideo) {
-              return {
-                id: keyword,
-                title: `${keyword} 最新影音`,
-                link: youtubeSearchUrl(keyword),
-                channel: "YouTube 搜尋",
-                thumbnail: "",
-                keyword,
-                isFallback: true,
-              };
+            if (!Array.isArray(data) || data.length === 0) {
+              return [] as VideoItem[];
             }
 
-            return {
-              id: firstVideo.id || keyword,
-              title: firstVideo.title || `${keyword} 最新影片`,
-              link: firstVideo.url || youtubeSearchUrl(keyword),
-              channel: firstVideo.channel || "YouTube",
-              thumbnail: firstVideo.thumbnail || "",
-              keyword,
-              isFallback: false,
-            };
+            return data.slice(0, perKeyword).map(
+              (v: {
+                id?: string;
+                title?: string;
+                url?: string;
+                channel?: string;
+                thumbnail?: string;
+                publishedAt?: string;
+              }) => ({
+                id: v.id || v.url || keyword,
+                title: v.title || `${keyword} 最新影片`,
+                link: v.url || "",
+                channel: v.channel || "YouTube",
+                thumbnail: v.thumbnail || "",
+                keyword,
+                publishedAt: v.publishedAt || "",
+              })
+            );
           } catch {
-            return {
-              id: keyword,
-              title: `${keyword} 最新影音`,
-              link: youtubeSearchUrl(keyword),
-              channel: "YouTube 搜尋",
-              thumbnail: "",
-              keyword,
-              isFallback: true,
-            };
+            return [] as VideoItem[];
           }
         })
       );
 
       const seen = new Set<string>();
+      const uniqueVideos: VideoItem[] = [];
 
-      const uniqueVideos = results.filter((video) => {
-        const key = video.link || video.title;
-        if (seen.has(key)) return false;
+      for (const v of batches.flat()) {
+        if (!v.link || !v.id) continue;
+        const key = v.link;
+        if (seen.has(key)) continue;
         seen.add(key);
-        return true;
-      });
+        uniqueVideos.push(v);
+        if (uniqueVideos.length >= 40) break;
+      }
 
       setVideos(uniqueVideos);
     } catch (error) {
@@ -613,52 +616,66 @@ ${newsText}
 
         {tab === "video" && (
           <>
-            <div style={styles.sectionHeader}>
-              <h2 style={styles.sectionTitle}>最新影音快報</h2>
+            <div style={styles.videoToolbar}>
               <button
+                type="button"
                 onClick={updateVideos}
                 disabled={videoLoading}
                 style={{
-                  ...styles.updateButton,
-                  opacity: videoLoading ? 0.7 : 1,
+                  ...styles.videoRefreshBtn,
+                  opacity: videoLoading ? 0.75 : 1,
                   cursor: videoLoading ? "not-allowed" : "pointer",
                 }}
               >
-                {videoLoading ? "更新中..." : "🔄 更新影音"}
+                {videoLoading ? "更新中…" : "更新影音"}
               </button>
             </div>
 
-            <div style={styles.videoHint}>
-              每個已選主題抓一支 YouTube 最新影片。若 API 沒回資料，會改成 YouTube 搜尋入口。
-            </div>
+            {videoLoading && (
+              <div style={{ ...styles.loading, marginBottom: "12px" }}>影音讀取中…</div>
+            )}
 
-            {videoLoading && <div style={styles.loading}>影音讀取中...</div>}
-
-            <div style={styles.newsList}>
-              {videos.map((video) => (
-                <a
-                  key={video.id}
-                  href={video.link}
-                  target="_blank"
-                  rel="noreferrer"
-                  style={styles.videoCard}
-                >
-                  {video.thumbnail ? (
-                    <img src={video.thumbnail} alt={video.title} style={styles.thumbnail} />
-                  ) : (
-                    <div style={styles.videoIcon}>▶</div>
-                  )}
-
-                  <div style={{ flex: 1 }}>
-                    <div style={styles.newsTitle}>{video.title}</div>
-                    <div style={styles.newsMeta}>
-                      <span>{video.channel}</span>
-                      <span>{video.isFallback ? "搜尋入口" : "最新影片"}</span>
+            <div style={styles.videoGrid}>
+              {videos.map((video) => {
+                const dateLine = formatVideoPublished(video.publishedAt);
+                return (
+                  <a
+                    key={video.id}
+                    href={video.link}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={styles.videoTile}
+                  >
+                    <div style={styles.videoThumbWrap}>
+                      {video.thumbnail ? (
+                        <img
+                          src={video.thumbnail}
+                          alt=""
+                          style={styles.videoThumbImg}
+                        />
+                      ) : (
+                        <div style={styles.videoThumbPlaceholder}>▶</div>
+                      )}
+                      <span style={styles.videoPlayBadge}>▶</span>
                     </div>
-                  </div>
-                </a>
-              ))}
+                    <div style={styles.videoTileBody}>
+                      <div style={styles.videoTileTitle}>{video.title}</div>
+                      <div style={styles.videoTileMeta}>{video.channel}</div>
+                      {dateLine ? (
+                        <div style={styles.videoTileDate}>{dateLine}</div>
+                      ) : null}
+                      <div style={styles.videoKeywordTag}>{video.keyword}</div>
+                    </div>
+                  </a>
+                );
+              })}
             </div>
+
+            {!videoLoading && videos.length === 0 && (
+              <div style={styles.loading}>
+                尚無影片。請確認已設定 YOUTUBE_API_KEY，或稍後再按「更新影音」。
+              </div>
+            )}
           </>
         )}
 
@@ -1270,42 +1287,106 @@ const styles: Record<string, CSSProperties> = {
     padding: "12px",
     borderRadius: "16px",
   },
-  videoHint: {
-    color: "#CBD5E1",
-    background: "rgba(255,255,255,.08)",
-    padding: "12px",
-    borderRadius: "16px",
-    fontSize: "13px",
-    lineHeight: 1.5,
+  videoToolbar: {
+    marginTop: "8px",
     marginBottom: "12px",
   },
-  videoCard: {
-    display: "flex",
+  videoRefreshBtn: {
+    width: "100%",
+    background: "linear-gradient(135deg, #2563EB, #7C3AED)",
+    color: "white",
+    border: "none",
+    borderRadius: "16px",
+    padding: "14px 16px",
+    fontWeight: 900,
+    fontSize: "15px",
+    boxShadow: "0 12px 32px rgba(37,99,235,.3)",
+  },
+  videoGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fill, minmax(152px, 1fr))",
     gap: "12px",
-    alignItems: "center",
+    paddingBottom: "8px",
+  },
+  videoTile: {
+    display: "flex",
+    flexDirection: "column",
+    borderRadius: "16px",
+    overflow: "hidden",
     background: "rgba(255,255,255,.07)",
-    border: "1px solid rgba(255,255,255,.08)",
-    borderRadius: "18px",
-    padding: "12px",
+    border: "1px solid rgba(255,255,255,.1)",
     textDecoration: "none",
     color: "white",
+    minWidth: 0,
   },
-  thumbnail: {
-    width: "116px",
-    height: "66px",
-    borderRadius: "12px",
+  videoThumbWrap: {
+    position: "relative",
+    aspectRatio: "16 / 9",
+    background: "rgba(15,23,42,.95)",
+  },
+  videoThumbImg: {
+    width: "100%",
+    height: "100%",
     objectFit: "cover",
-    flexShrink: 0,
+    display: "block",
   },
-  videoIcon: {
-    width: "64px",
-    height: "64px",
-    borderRadius: "18px",
-    background: "linear-gradient(135deg, #EF4444, #7C3AED)",
+  videoThumbPlaceholder: {
+    width: "100%",
+    height: "100%",
     display: "grid",
     placeItems: "center",
-    fontWeight: 900,
-    flexShrink: 0,
+    fontSize: "28px",
+    color: "#64748B",
+    background: "linear-gradient(145deg, #1e293b, #0f172a)",
+  },
+  videoPlayBadge: {
+    position: "absolute",
+    right: "8px",
+    bottom: "8px",
+    width: "34px",
+    height: "34px",
+    borderRadius: "50%",
+    background: "rgba(0,0,0,.62)",
+    color: "white",
+    display: "grid",
+    placeItems: "center",
+    fontSize: "13px",
+    pointerEvents: "none",
+  },
+  videoTileBody: {
+    padding: "10px 10px 12px",
+    display: "flex",
+    flexDirection: "column",
+    gap: "4px",
+    flex: 1,
+    minHeight: 0,
+  },
+  videoTileTitle: {
+    fontSize: "13px",
+    fontWeight: 800,
+    lineHeight: 1.35,
+    maxHeight: "3.6em",
+    overflow: "hidden",
+  },
+  videoTileMeta: {
+    fontSize: "11px",
+    color: "#94A3B8",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  videoTileDate: {
+    fontSize: "10px",
+    color: "#64748B",
+  },
+  videoKeywordTag: {
+    fontSize: "10px",
+    color: "#93C5FD",
+    fontWeight: 700,
+    marginTop: "2px",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
   },
   newsList: { display: "flex", flexDirection: "column", gap: "10px" },
   newsCard: {
