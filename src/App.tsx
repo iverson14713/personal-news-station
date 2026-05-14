@@ -64,8 +64,17 @@ function normalizeKey(title: string) {
 
 /** 只顯示此時間內的新聞（預設 48 小時＝不含兩天前更早的稿件） */
 const NEWS_MAX_AGE_MS = 2 * 24 * 60 * 60 * 1000;
-/** 多抓一些 RSS 條目再過濾日期，避免過濾後不足 25 則 */
+/** 多抓一些 RSS 條目再過濾日期，避免過濾後筆數太少 */
 const NEWS_RSS_ITEM_SCAN = 280;
+/** 合併後最多顯示幾則 */
+const NEWS_LIST_MAX = 48;
+/**
+ * 選中主題數 ≥ 此值且無自訂關鍵字時，改為每主題各抓 RSS 再合併。
+ * （一次用超長 OR 查 Google News 常只回極少筆或 URL 過長）
+ */
+const NEWS_MULTI_TOPIC_MIN = 4;
+/** 多主題模式下，每個主題最多先取幾則 RSS item 再合併過濾 */
+const NEWS_PER_TOPIC_ITEM_SCAN = 130;
 
 function parseNewsPubDate(raw: string | null | undefined): Date | null {
   if (!raw?.trim()) return null;
@@ -253,16 +262,6 @@ export default function App() {
     [selectedTopics]
   );
 
-  const buildQuery = () => {
-    if (customKeyword.trim()) return customKeyword.trim();
-
-    if (selectedTopicObjects.length > 0) {
-      return selectedTopicObjects.map((t) => `(${t.query})`).join(" OR ");
-    }
-
-    return "今日熱門新聞";
-  };
-
   useEffect(() => {
     const saved = localStorage.getItem("favoriteLinks");
     if (saved) setFavoriteLinks(JSON.parse(saved));
@@ -296,20 +295,52 @@ export default function App() {
     setTimeout(loadVoices, 1000);
   }, []);
 
-  const fetchNews = async (query: string) => {
+  const fetchNews = async () => {
     setLoading(true);
 
-    try {
-      const res = await fetch(`/api/news?q=${encodeURIComponent(query)}`);
-      const xmlText = await res.text();
+    const custom = customKeyword.trim();
+    const topicObjs = selectedTopicObjects;
 
+    try {
       const parser = new DOMParser();
-      const xml = parser.parseFromString(xmlText, "text/xml");
-      const items = Array.from(xml.querySelectorAll("item")).slice(
-        0,
-        NEWS_RSS_ITEM_SCAN
-      );
       const nowMs = Date.now();
+      let rawItems: Element[] = [];
+
+      const usePerTopic = !custom && topicObjs.length >= NEWS_MULTI_TOPIC_MIN;
+
+      if (usePerTopic) {
+        const responseTexts = await Promise.all(
+          topicObjs.map((t) =>
+            fetch(`/api/news?q=${encodeURIComponent(t.query)}`).then((r) =>
+              r.text()
+            )
+          )
+        );
+        for (const xmlText of responseTexts) {
+          const xml = parser.parseFromString(xmlText, "text/xml");
+          rawItems.push(
+            ...Array.from(xml.querySelectorAll("item")).slice(
+              0,
+              NEWS_PER_TOPIC_ITEM_SCAN
+            )
+          );
+        }
+      } else {
+        const query =
+          custom ||
+          (topicObjs.length > 0
+            ? topicObjs.map((t) => `(${t.query})`).join(" OR ")
+            : "今日熱門新聞");
+        const res = await fetch(`/api/news?q=${encodeURIComponent(query)}`);
+        const xmlText = await res.text();
+        const xml = parser.parseFromString(xmlText, "text/xml");
+        rawItems = Array.from(xml.querySelectorAll("item")).slice(
+          0,
+          NEWS_RSS_ITEM_SCAN
+        );
+      }
+
+      const items = rawItems.slice(0, 900);
 
       type Row = NewsItem & { sortTime: number };
       const dated: Row[] = items
@@ -338,12 +369,15 @@ export default function App() {
         .filter((row) => isNewsFreshEnough(row.pubDate, nowMs))
         .sort((a, b) => b.sortTime - a.sortTime);
 
-      const seen = new Set<string>();
+      const seenTitles = new Set<string>();
+      const seenLinks = new Set<string>();
       const parsedNews: NewsItem[] = [];
       for (const row of dated) {
+        if (row.link && seenLinks.has(row.link)) continue;
         const key = normalizeKey(row.title);
-        if (!key || seen.has(key)) continue;
-        seen.add(key);
+        if (!key || seenTitles.has(key)) continue;
+        seenTitles.add(key);
+        if (row.link) seenLinks.add(row.link);
         parsedNews.push({
           id: row.id,
           title: row.title,
@@ -353,7 +387,7 @@ export default function App() {
           selected: parsedNews.length < 5,
           favorite: row.favorite,
         });
-        if (parsedNews.length >= 25) break;
+        if (parsedNews.length >= NEWS_LIST_MAX) break;
       }
 
       setNews(parsedNews);
@@ -455,7 +489,7 @@ export default function App() {
   );
 
   useEffect(() => {
-    fetchNews(buildQuery());
+    void fetchNews();
   }, []);
 
   useEffect(() => {
@@ -473,7 +507,7 @@ export default function App() {
     topicSelectionKeyRef.current = key;
 
     const timer = window.setTimeout(() => {
-      fetchNews(buildQuery());
+      void fetchNews();
     }, 450);
 
     return () => window.clearTimeout(timer);
@@ -486,7 +520,7 @@ export default function App() {
 
   const updateMyNews = () => {
     setTab("home");
-    fetchNews(buildQuery());
+    void fetchNews();
   };
 
   const updateVideos = () => {
