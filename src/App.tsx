@@ -149,7 +149,7 @@ type RawVideoPayload = {
   keyword?: string;
 };
 
-const VIDEO_CACHE_KEY = "pns_video_pack_v2";
+const VIDEO_CACHE_KEY = "pns_video_pack_v3";
 const VIDEO_HOUR_MS = 60 * 60 * 1000;
 
 function videoCacheFingerprint(labels: string[], custom: string) {
@@ -163,6 +163,8 @@ function readVideoCache():
       videos: VideoItem[];
       banner: string | null;
       badge: string | null;
+      contentFlags: string[];
+      fallbackLevel: number | null;
     }
   | null {
   try {
@@ -174,6 +176,8 @@ function readVideoCache():
       videos?: VideoItem[];
       banner?: string | null;
       badge?: string | null;
+      contentFlags?: string[];
+      fallbackLevel?: number | null;
     };
     if (!o?.fp || typeof o.savedAt !== "number" || !Array.isArray(o.videos)) return null;
     return {
@@ -182,6 +186,13 @@ function readVideoCache():
       videos: o.videos,
       banner: o.banner ?? null,
       badge: typeof o.badge === "string" ? o.badge : null,
+      contentFlags: Array.isArray(o.contentFlags)
+        ? o.contentFlags.filter((x): x is string => typeof x === "string")
+        : [],
+      fallbackLevel:
+        typeof o.fallbackLevel === "number" && (o.fallbackLevel === 1 || o.fallbackLevel === 2 || o.fallbackLevel === 3)
+          ? o.fallbackLevel
+          : null,
     };
   } catch {
     return null;
@@ -192,12 +203,22 @@ function writeVideoCache(
   fp: string,
   videos: VideoItem[],
   banner: string | null,
-  badge: string | null
+  badge: string | null,
+  contentFlags: string[],
+  fallbackLevel: number | null
 ) {
   try {
     localStorage.setItem(
       VIDEO_CACHE_KEY,
-      JSON.stringify({ fp, savedAt: Date.now(), videos, banner, badge })
+      JSON.stringify({
+        fp,
+        savedAt: Date.now(),
+        videos,
+        banner,
+        badge,
+        contentFlags,
+        fallbackLevel,
+      })
     );
   } catch {
     /* ignore quota */
@@ -211,6 +232,8 @@ async function parseVideosApiResponse(res: Response): Promise<
       banner?: string;
       badge?: string;
       source?: string;
+      fallbackLevel?: number;
+      contentFlags?: string[];
     }
   | { ok: false; error: string; code?: string }
 > {
@@ -247,12 +270,20 @@ async function parseVideosApiResponse(res: Response): Promise<
   }
 
   if (d.ok === true && Array.isArray(d.videos)) {
+    const contentFlags = Array.isArray(d.contentFlags)
+      ? (d.contentFlags as unknown[]).filter((x): x is string => typeof x === "string")
+      : undefined;
+    const fl = d.fallbackLevel;
+    const fallbackLevel =
+      typeof fl === "number" && (fl === 1 || fl === 2 || fl === 3) ? fl : undefined;
     return {
       ok: true,
       videos: d.videos as RawVideoPayload[],
       banner: typeof d.banner === "string" ? d.banner : undefined,
       badge: typeof d.badge === "string" ? d.badge : undefined,
       source: typeof d.source === "string" ? d.source : undefined,
+      fallbackLevel,
+      contentFlags,
     };
   }
 
@@ -280,6 +311,7 @@ export default function App() {
   const [videoLoading, setVideoLoading] = useState(false);
   const [videoBanner, setVideoBanner] = useState<string | null>(null);
   const [videoBadge, setVideoBadge] = useState<string | null>(null);
+  const [videoContentFlags, setVideoContentFlags] = useState<string[]>([]);
   const [lastUpdated, setLastUpdated] = useState("");
   const [speed, setSpeed] = useState(1.2);
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -470,6 +502,7 @@ export default function App() {
           setVideos(hit.videos);
           setVideoBanner(hit.banner);
           setVideoBadge(hit.badge);
+          setVideoContentFlags(hit.contentFlags ?? []);
           return;
         }
       }
@@ -477,6 +510,7 @@ export default function App() {
       setVideoLoading(true);
       setVideoBanner(null);
       setVideoBadge(null);
+      setVideoContentFlags([]);
 
       try {
         const topicsParam = encodeURIComponent(labels.join(","));
@@ -489,6 +523,7 @@ export default function App() {
         if (!parsed.ok) {
           setVideos([]);
           setVideoBadge(null);
+          setVideoContentFlags([]);
           setVideoBanner(parsed.error || "暫時無法載入影音，請稍後再試。");
           return;
         }
@@ -523,14 +558,23 @@ export default function App() {
             : null);
         setVideoBanner(notice);
         setVideoBadge(parsed.badge ?? null);
+        setVideoContentFlags(parsed.contentFlags ?? []);
 
         if (mapped.length > 0) {
-          writeVideoCache(fp, mapped, parsed.banner ?? null, parsed.badge ?? null);
+          writeVideoCache(
+            fp,
+            mapped,
+            parsed.banner ?? null,
+            parsed.badge ?? null,
+            parsed.contentFlags ?? [],
+            parsed.fallbackLevel ?? null
+          );
         }
       } catch (e) {
         console.error(e);
         setVideos([]);
         setVideoBadge(null);
+        setVideoContentFlags([]);
         setVideoBanner(
           e instanceof Error ? e.message : "載入影音時發生錯誤，請稍後再試。"
         );
@@ -1267,19 +1311,35 @@ ${newsText}
               </button>
             </div>
 
-            {videoBanner && (
+            {(videoBanner ||
+              videoContentFlags.length > 0 ||
+              videoBadge) && (
               <div style={styles.videoInfoBanner} role="status">
-                {videoBadge ? (
-                  <span style={styles.videoBadgePill}>{videoBadge}</span>
+                {(videoContentFlags.length > 0 || videoBadge) && (
+                  <div
+                    style={{
+                      display: "flex",
+                      flexWrap: "wrap",
+                      gap: "8px",
+                      alignItems: "center",
+                      marginBottom: videoBanner ? "10px" : 0,
+                    }}
+                  >
+                    {(videoContentFlags.length > 0
+                      ? videoContentFlags
+                      : videoBadge
+                        ? [videoBadge]
+                        : []
+                    ).map((label) => (
+                      <span key={label} style={styles.videoBadgePill}>
+                        {label}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {videoBanner ? (
+                  <div style={{ whiteSpace: "pre-line" }}>{videoBanner}</div>
                 ) : null}
-                <div
-                  style={{
-                    marginTop: videoBadge ? "10px" : 0,
-                    whiteSpace: "pre-line",
-                  }}
-                >
-                  {videoBanner}
-                </div>
               </div>
             )}
 
