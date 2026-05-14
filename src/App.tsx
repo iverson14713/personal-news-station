@@ -149,7 +149,7 @@ type RawVideoPayload = {
   keyword?: string;
 };
 
-const VIDEO_CACHE_KEY = "pns_video_pack_v1";
+const VIDEO_CACHE_KEY = "pns_video_pack_v2";
 const VIDEO_HOUR_MS = 60 * 60 * 1000;
 
 function videoCacheFingerprint(labels: string[], custom: string) {
@@ -157,7 +157,13 @@ function videoCacheFingerprint(labels: string[], custom: string) {
 }
 
 function readVideoCache():
-  | { fp: string; savedAt: number; videos: VideoItem[]; banner: string | null }
+  | {
+      fp: string;
+      savedAt: number;
+      videos: VideoItem[];
+      banner: string | null;
+      badge: string | null;
+    }
   | null {
   try {
     const raw = localStorage.getItem(VIDEO_CACHE_KEY);
@@ -167,6 +173,7 @@ function readVideoCache():
       savedAt?: number;
       videos?: VideoItem[];
       banner?: string | null;
+      badge?: string | null;
     };
     if (!o?.fp || typeof o.savedAt !== "number" || !Array.isArray(o.videos)) return null;
     return {
@@ -174,6 +181,7 @@ function readVideoCache():
       savedAt: o.savedAt,
       videos: o.videos,
       banner: o.banner ?? null,
+      badge: typeof o.badge === "string" ? o.badge : null,
     };
   } catch {
     return null;
@@ -183,12 +191,13 @@ function readVideoCache():
 function writeVideoCache(
   fp: string,
   videos: VideoItem[],
-  banner: string | null
+  banner: string | null,
+  badge: string | null
 ) {
   try {
     localStorage.setItem(
       VIDEO_CACHE_KEY,
-      JSON.stringify({ fp, savedAt: Date.now(), videos, banner })
+      JSON.stringify({ fp, savedAt: Date.now(), videos, banner, badge })
     );
   } catch {
     /* ignore quota */
@@ -200,6 +209,7 @@ async function parseVideosApiResponse(res: Response): Promise<
       ok: true;
       videos: RawVideoPayload[];
       banner?: string;
+      badge?: string;
       source?: string;
     }
   | { ok: false; error: string; code?: string }
@@ -241,6 +251,7 @@ async function parseVideosApiResponse(res: Response): Promise<
       ok: true,
       videos: d.videos as RawVideoPayload[],
       banner: typeof d.banner === "string" ? d.banner : undefined,
+      badge: typeof d.badge === "string" ? d.badge : undefined,
       source: typeof d.source === "string" ? d.source : undefined,
     };
   }
@@ -268,6 +279,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [videoLoading, setVideoLoading] = useState(false);
   const [videoBanner, setVideoBanner] = useState<string | null>(null);
+  const [videoBadge, setVideoBadge] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState("");
   const [speed, setSpeed] = useState(1.2);
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -457,12 +469,14 @@ export default function App() {
         ) {
           setVideos(hit.videos);
           setVideoBanner(hit.banner);
+          setVideoBadge(hit.badge);
           return;
         }
       }
 
       setVideoLoading(true);
       setVideoBanner(null);
+      setVideoBadge(null);
 
       try {
         const topicsParam = encodeURIComponent(labels.join(","));
@@ -474,6 +488,7 @@ export default function App() {
 
         if (!parsed.ok) {
           setVideos([]);
+          setVideoBadge(null);
           setVideoBanner(parsed.error || "暫時無法載入影音，請稍後再試。");
           return;
         }
@@ -504,16 +519,18 @@ export default function App() {
         const notice =
           parsed.banner ||
           (mapped.length === 0
-            ? "目前沒有取得影片，請稍後再按「更新影音」或調整主題。"
+            ? "目前沒有相關影音內容。請稍後再按「更新影音」或調整主題。"
             : null);
         setVideoBanner(notice);
+        setVideoBadge(parsed.badge ?? null);
 
         if (mapped.length > 0) {
-          writeVideoCache(fp, mapped, parsed.banner ?? null);
+          writeVideoCache(fp, mapped, parsed.banner ?? null, parsed.badge ?? null);
         }
       } catch (e) {
         console.error(e);
         setVideos([]);
+        setVideoBadge(null);
         setVideoBanner(
           e instanceof Error ? e.message : "載入影音時發生錯誤，請稍後再試。"
         );
@@ -1252,7 +1269,17 @@ ${newsText}
 
             {videoBanner && (
               <div style={styles.videoInfoBanner} role="status">
-                {videoBanner}
+                {videoBadge ? (
+                  <span style={styles.videoBadgePill}>{videoBadge}</span>
+                ) : null}
+                <div
+                  style={{
+                    marginTop: videoBadge ? "10px" : 0,
+                    whiteSpace: "pre-line",
+                  }}
+                >
+                  {videoBanner}
+                </div>
               </div>
             )}
 
@@ -1298,7 +1325,7 @@ ${newsText}
 
             {!videoLoading && videos.length === 0 && !videoBanner && (
               <div style={styles.loading}>
-                尚無符合的影片。可調整追蹤主題或稍後再按「更新影音」。
+                目前沒有相關影音內容。可調整追蹤主題或稍後再按「更新影音」。
               </div>
             )}
           </>
@@ -2206,6 +2233,17 @@ const styles: Record<string, CSSProperties> = {
     fontSize: "13px",
     lineHeight: 1.45,
     marginBottom: "12px",
+  },
+  videoBadgePill: {
+    display: "inline-block",
+    fontSize: "11px",
+    fontWeight: 800,
+    letterSpacing: "0.04em",
+    color: "#0F172A",
+    background: "linear-gradient(135deg, #FDE68A, #FBBF24)",
+    padding: "4px 10px",
+    borderRadius: "999px",
+    border: "1px solid rgba(251,191,36,.6)",
   },
   videoRefreshBtn: {
     width: "100%",
