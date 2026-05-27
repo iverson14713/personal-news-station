@@ -2399,46 +2399,24 @@ function ProUpgradeCard({
 }) {
   if (planTier === "pro") {
     return (
-      <div style={styles.proCardPro}>
-        <div style={styles.proCardTopRow}>
-          <div style={styles.proCardTitle}>你已是 Pro</div>
-          <span style={styles.proPillOk}>PRO</span>
+      <div style={styles.proBannerPro} role="status">
+        <div style={styles.proBannerLeft}>
+          <div style={styles.proBannerTitle}>你已是 Pro</div>
+          <div style={styles.proBannerSub}>每日 30 次 AI 分析 · 解鎖 3/5 分鐘</div>
         </div>
-        <div style={styles.proCardSub}>每日 30 次 AI 分析 · 解鎖 3/5 分鐘 · AI 歷史紀錄</div>
+        <span style={styles.proBadgeOk}>PRO</span>
       </div>
     );
   }
 
   return (
-    <div style={styles.proCard}>
-      <div style={styles.proCardTopRow}>
-        <div style={styles.proCardTitle}>升級 Pro</div>
-        <span style={styles.proPill}>PRO</span>
+    <div style={styles.proBanner} role="note" aria-label="升級 Pro">
+      <div style={styles.proBannerLeft}>
+        <div style={styles.proBannerTitle}>✨ 解鎖 3/5 分鐘 AI 主播稿</div>
+        <div style={styles.proBannerSub}>每日 30 次 AI 分析</div>
       </div>
-      <div style={styles.proPriceRow}>
-        <div style={styles.proPriceBlock}>
-          <div style={styles.proPriceLabel}>月費</div>
-          <div style={styles.proPriceValue}>{PRO_PRICING.monthly.label}</div>
-        </div>
-        <div style={styles.proPriceDivider} />
-        <div style={styles.proPriceBlock}>
-          <div style={styles.proPriceLabel}>年費</div>
-          <div style={styles.proPriceValue}>{PRO_PRICING.yearly.label}</div>
-          <div style={styles.proSaveTag}>{PRO_PRICING.yearly.saveLabel}</div>
-        </div>
-      </div>
-      <ul style={styles.proFeatureList}>
-        <li style={styles.proFeatureItem}>每日 30 次 AI 分析</li>
-        <li style={styles.proFeatureItem}>解鎖 3 / 5 分鐘 AI 主播稿</li>
-        <li style={styles.proFeatureItem}>AI 歷史紀錄</li>
-        <li style={styles.proFeatureItem}>更多收藏</li>
-        <li style={styles.proFeatureItem}>未來每日自動簡報</li>
-      </ul>
-      <div style={styles.freeLimitsNote}>
-        Free：每日 3 次 AI 分析 · 1 分鐘主播稿可用（3/5 分鐘需 Pro）
-      </div>
-      <button type="button" onClick={onOpen} style={styles.proCtaBtn}>
-        立即升級
+      <button type="button" onClick={onOpen} style={styles.proBannerBtn}>
+        升級 Pro
       </button>
     </div>
   );
@@ -2584,10 +2562,9 @@ function OnboardingModal({
 function SplashScreen() {
   return (
     <div style={styles.splashWrap} role="status" aria-label="啟動畫面">
-      <div style={styles.splashCard}>
-        <div style={styles.splashIconWrap} aria-hidden>
-          <div style={styles.splashIcon}>🎙️</div>
-          <div style={styles.splashPulse} />
+      <div style={styles.splashCenter}>
+        <div style={styles.splashLogo} aria-hidden>
+          🎙️
         </div>
         <div style={styles.splashTitle}>AI個人新聞台</div>
         <div style={styles.splashSubtitle}>為你整理今日重點</div>
@@ -2596,7 +2573,6 @@ function SplashScreen() {
           <span className="splash-dot" />
           <span className="splash-dot" />
         </div>
-        <div style={styles.splashMeta}>正在準備你的新聞台…</div>
       </div>
     </div>
   );
@@ -2729,13 +2705,14 @@ function AiSummaryPanel({
           </div>
         )}
 
-        <ProUpgradeCard
-          planTier={planTier}
-          onOpen={() => {
-            if (planTier === "pro") return;
-            onOpenProModal();
-          }}
-        />
+        {planTier === "free" ? (
+          <ProUpgradeCard
+            planTier={planTier}
+            onOpen={() => {
+              onOpenProModal();
+            }}
+          />
+        ) : null}
 
         {!aiLoading && selectedNewsCount > 0 ? (
           <button
@@ -4432,36 +4409,64 @@ const styles: Record<string, CSSProperties> = {
     fontSize: "14px",
     cursor: "pointer",
   },
-  proCard: {
-    marginTop: "12px",
-    borderRadius: "18px",
-    padding: "14px 14px 16px",
+  proBanner: {
+    marginTop: "10px",
+    borderRadius: "16px",
+    padding: "12px 12px",
+    minHeight: "78px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "12px",
     background:
-      "linear-gradient(135deg, rgba(124,58,237,.22) 0%, rgba(15,23,42,.88) 55%, rgba(251,191,36,.12) 100%)",
-    border: "1px solid rgba(167,139,250,.35)",
-    boxShadow: "0 10px 34px rgba(0,0,0,.35)",
+      "linear-gradient(135deg, rgba(124,58,237,.16) 0%, rgba(15,23,42,.88) 58%, rgba(96,165,250,.10) 100%)",
+    border: "1px solid rgba(255,255,255,.10)",
   },
-  proCardPro: {
-    marginTop: "12px",
-    borderRadius: "18px",
-    padding: "14px 14px 16px",
-    background: "rgba(16,185,129,.08)",
-    border: "1px solid rgba(52,211,153,.25)",
+  proBannerPro: {
+    marginTop: "10px",
+    borderRadius: "16px",
+    padding: "12px 12px",
+    minHeight: "74px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "12px",
+    background: "rgba(16,185,129,.07)",
+    border: "1px solid rgba(52,211,153,.18)",
   },
-  proCardTopRow: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px" },
-  proCardTitle: { fontSize: "15px", fontWeight: 900, color: "#F8FAFC" },
-  proCardSub: { marginTop: "6px", fontSize: "12px", color: "#94A3B8", lineHeight: 1.45 },
-  proPill: {
-    fontSize: "10px",
+  proBannerLeft: { minWidth: 0 },
+  proBannerTitle: {
+    fontSize: "14px",
     fontWeight: 900,
-    letterSpacing: "0.14em",
-    color: "#FDE68A",
-    background: "rgba(251,191,36,.12)",
-    border: "1px solid rgba(251,191,36,.25)",
-    borderRadius: "999px",
-    padding: "4px 10px",
+    color: "#F8FAFC",
+    lineHeight: 1.2,
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
   },
-  proPillOk: {
+  proBannerSub: {
+    marginTop: "6px",
+    fontSize: "12px",
+    color: "#94A3B8",
+    fontWeight: 700,
+    lineHeight: 1.2,
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+  },
+  proBannerBtn: {
+    flexShrink: 0,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.06)",
+    color: "#E2E8F0",
+    borderRadius: "999px",
+    padding: "10px 14px",
+    fontWeight: 900,
+    fontSize: "13px",
+    cursor: "pointer",
+  },
+  proBadgeOk: {
+    flexShrink: 0,
     fontSize: "10px",
     fontWeight: 900,
     letterSpacing: "0.14em",
@@ -4470,28 +4475,6 @@ const styles: Record<string, CSSProperties> = {
     border: "1px solid rgba(52,211,153,.22)",
     borderRadius: "999px",
     padding: "4px 10px",
-  },
-  proPriceRow: { display: "flex", alignItems: "stretch", gap: "12px", marginTop: "10px" },
-  proPriceBlock: { flex: 1, minWidth: 0 },
-  proPriceDivider: { width: "1px", background: "rgba(255,255,255,.10)" },
-  proPriceLabel: { fontSize: "11px", color: "#94A3B8", fontWeight: 700 },
-  proPriceValue: { marginTop: "2px", fontSize: "14px", fontWeight: 900, color: "#F8FAFC" },
-  proSaveTag: { marginTop: "4px", fontSize: "11px", fontWeight: 800, color: "#FDE68A" },
-  proFeatureList: { margin: "12px 0 0", padding: "0 0 0 18px", color: "#E2E8F0" },
-  proFeatureItem: { margin: "6px 0", fontSize: "13px", lineHeight: 1.4 },
-  freeLimitsNote: { marginTop: "10px", fontSize: "12px", color: "#94A3B8", lineHeight: 1.45 },
-  proCtaBtn: {
-    width: "100%",
-    marginTop: "12px",
-    border: "none",
-    borderRadius: "14px",
-    padding: "12px 14px",
-    fontSize: "14px",
-    fontWeight: 900,
-    cursor: "pointer",
-    color: "#0F172A",
-    background: "linear-gradient(135deg, #FDE68A, #A78BFA)",
-    boxShadow: "0 10px 26px rgba(167,139,250,.22)",
   },
   proModalBackdrop: {
     position: "fixed",
@@ -4670,49 +4653,38 @@ const styles: Record<string, CSSProperties> = {
     position: "fixed",
     inset: 0,
     zIndex: 200,
-    display: "grid",
-    placeItems: "center",
-    padding: "24px",
     background:
-      "radial-gradient(circle at 20% 10%, rgba(99,102,241,.38) 0%, transparent 40%), radial-gradient(circle at 80% 30%, rgba(34,211,238,.22) 0%, transparent 45%), linear-gradient(180deg, #020617 0%, #0B1220 100%)",
+      "radial-gradient(circle at 22% 12%, rgba(99,102,241,.32) 0%, transparent 42%), radial-gradient(circle at 78% 24%, rgba(34,211,238,.18) 0%, transparent 46%), linear-gradient(180deg, #020617 0%, #0B1220 100%)",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "max(24px, env(safe-area-inset-top, 0px)) 24px max(24px, env(safe-area-inset-bottom, 0px))",
   },
-  splashCard: {
-    width: "min(420px, 92vw)",
-    borderRadius: "24px",
-    padding: "22px 18px 20px",
-    border: "1px solid rgba(255,255,255,.10)",
-    background: "rgba(15,23,42,.62)",
-    backdropFilter: "blur(18px)",
-    boxShadow: "0 18px 60px rgba(0,0,0,.55)",
-    textAlign: "center",
+  splashCenter: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "10px",
   },
-  splashIconWrap: {
-    width: "78px",
-    height: "78px",
-    borderRadius: "26px",
-    margin: "0 auto 14px",
+  splashLogo: {
+    width: "64px",
+    height: "64px",
+    borderRadius: "20px",
     display: "grid",
     placeItems: "center",
-    position: "relative",
-    background: "linear-gradient(135deg, rgba(96,165,250,.22), rgba(167,139,250,.20))",
-    border: "1px solid rgba(147,197,253,.22)",
+    fontSize: "30px",
+    background: "rgba(255,255,255,.06)",
+    border: "1px solid rgba(255,255,255,.10)",
   },
-  splashIcon: { fontSize: "34px", position: "relative", zIndex: 1 },
-  splashPulse: {
-    position: "absolute",
-    inset: 10,
-    borderRadius: "20px",
-    background: "rgba(96,165,250,.10)",
-    filter: "blur(10px)",
-  },
-  splashTitle: { fontSize: "20px", fontWeight: 900, letterSpacing: "-0.02em" },
-  splashSubtitle: { marginTop: "6px", fontSize: "13px", color: "#94A3B8", fontWeight: 700 },
+  splashTitle: { fontSize: "18px", fontWeight: 900, letterSpacing: "-0.02em" },
+  splashSubtitle: { fontSize: "13px", color: "#94A3B8", fontWeight: 700 },
   splashLoader: {
-    marginTop: "14px",
+    marginTop: "2px",
     display: "flex",
     justifyContent: "center",
-    gap: "6px",
-    height: "12px",
+    gap: "5px",
+    height: "10px",
   },
-  splashMeta: { marginTop: "10px", fontSize: "12px", color: "#64748B", fontWeight: 600 },
 };
