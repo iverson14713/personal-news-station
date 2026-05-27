@@ -51,7 +51,20 @@
       to { transform: translateY(0); }
     }
     .bottom-nav-item:active {
-      transform: scale(0.92);
+      transform: scale(0.94);
+    }
+    .bottom-nav-item--active {
+      position: relative;
+    }
+    .home-select-btn:active,
+    .home-clear-btn:active {
+      transform: scale(0.96);
+    }
+    .home-select-btn:active {
+      background: rgba(37, 99, 235, 0.65);
+    }
+    .home-clear-btn:active {
+      background: rgba(255, 255, 255, 0.14);
     }
     .ai-duration-option:active {
       transform: scale(0.98);
@@ -60,8 +73,28 @@
       opacity: 0.75;
     }
     .ai-text-collapsed,
-    .ai-text-expanded {
-      transition: max-height 0.35s ease;
+    .ai-text-expanded,
+    .ai-highlight-body-collapsed,
+    .ai-highlight-body-expanded {
+      transition: max-height 0.35s ease, opacity 0.25s ease;
+    }
+    .ai-highlight-card:active {
+      background: rgba(255, 255, 255, 0.09);
+    }
+    .player-waveform-bar {
+      display: block;
+      width: 4px;
+      height: 10px;
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.45);
+    }
+    .player-waveform--active .player-waveform-bar {
+      background: linear-gradient(180deg, #818cf8, #22d3ee);
+      animation: waveBar 0.85s ease-in-out infinite alternate;
+    }
+    @keyframes waveBar {
+      from { height: 8px; opacity: 0.55; }
+      to { height: 28px; opacity: 1; }
     }
   </style>
 </head>

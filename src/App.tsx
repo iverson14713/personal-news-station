@@ -94,6 +94,55 @@ const SPEED_MIN = 0.8;
 const SPEED_MAX = 1.1;
 const SPEED_STEP = 0.05;
 const SPEED_DEFAULT = 1;
+const SCRIPT_FONT_KEY = "pns_script_font_v1";
+
+type ScriptFontSize = "sm" | "md" | "lg" | "xl";
+type PlaybackMode = "ai" | "news" | null;
+
+const SCRIPT_FONT_PX: Record<ScriptFontSize, number> = {
+  sm: 13,
+  md: 15,
+  lg: 17,
+  xl: 20,
+};
+
+function readScriptFontSize(): ScriptFontSize {
+  try {
+    const v = localStorage.getItem(SCRIPT_FONT_KEY);
+    if (v === "sm" || v === "md" || v === "lg" || v === "xl") return v;
+  } catch {
+    /* ignore */
+  }
+  return "md";
+}
+
+function splitSpeechChunks(text: string): string[] {
+  const raw = text
+    .split(/(?<=[。！？!?;；])\s*|\n+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (raw.length === 0) return text.trim() ? [text.trim()] : [];
+  const merged: string[] = [];
+  for (const part of raw) {
+    if (merged.length > 0 && part.length < 10) {
+      merged[merged.length - 1] += part;
+    } else {
+      merged.push(part);
+    }
+  }
+  return merged;
+}
+
+function estimateChunkDurationMs(text: string, rate: number): number {
+  return Math.max(650, Math.round((text.length * 92) / rate));
+}
+
+function formatRemainingTime(ms: number): string {
+  const sec = Math.max(0, Math.ceil(ms / 1000));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return m > 0 ? `剩餘 ${m}:${String(s).padStart(2, "0")}` : `剩餘 ${sec} 秒`;
+}
 
 function normalizeKey(title: string) {
   return title.replace(/[，。！？、\s\-｜|:：]/g, "").slice(0, 28);
@@ -405,8 +454,26 @@ export default function App() {
   >(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
+  const [isPaused, setIsPaused] = useState(false);
+  const [playbackProgress, setPlaybackProgress] = useState(0);
+  const [currentChunkIndex, setCurrentChunkIndex] = useState(-1);
+  const [playbackMode, setPlaybackMode] = useState<PlaybackMode>(null);
+  const [remainingMs, setRemainingMs] = useState(0);
+  const [totalChunks, setTotalChunks] = useState(0);
+  const [scriptFontSize, setScriptFontSize] = useState<ScriptFontSize>(readScriptFontSize);
 
   const topicSelectionKeyRef = useRef<string | null>(null);
+  const speechRef = useRef({
+    chunks: [] as string[],
+    chunkIndex: 0,
+    rate: SPEED_DEFAULT,
+    mode: null as PlaybackMode,
+    chunkStartedAt: 0,
+    chunkDurationMs: 0,
+    totalEstimatedMs: 0,
+    elapsedBeforeChunkMs: 0,
+  });
+  const progressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const selectedNews = news.filter((n) => n.selected);
   const favoriteNews = news.filter((n) => n.favorite);
@@ -424,6 +491,23 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("favoriteLinks", JSON.stringify(favoriteLinks));
   }, [favoriteLinks]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SCRIPT_FONT_KEY, scriptFontSize);
+    } catch {
+      /* ignore */
+    }
+  }, [scriptFontSize]);
+
+  useEffect(() => {
+    return () => {
+      if (progressTimerRef.current != null) {
+        clearInterval(progressTimerRef.current);
+      }
+      window.speechSynthesis.cancel();
+    };
+  }, []);
 
   useEffect(() => {
     const latest = readAiHistory()[0];
@@ -783,56 +867,167 @@ export default function App() {
     setNews((prev) => prev.map((item) => ({ ...item, favorite: false })));
   };
 
-  const createSpeech = (rate: number) => {
-    const useAi = aiScript.trim().length > 0;
-    const text = useAi
-      ? aiScript.trim()
-      : selectedNews
-          .map((n, i) => `第 ${i + 1} 則新聞，${n.title}`)
-          .join("。");
-
-    const speech = new SpeechSynthesisUtterance(text);
-    speech.lang = "zh-TW";
-    speech.rate = rate;
-
-    const selectedVoice = voices.find((v) => v.name === voiceName);
-    if (selectedVoice) speech.voice = selectedVoice;
-
-    speech.onstart = () => setIsSpeaking(true);
-    speech.onend = () => setIsSpeaking(false);
-    speech.onerror = () => setIsSpeaking(false);
-
-    return speech;
+  const clearProgressTimer = () => {
+    if (progressTimerRef.current != null) {
+      clearInterval(progressTimerRef.current);
+      progressTimerRef.current = null;
+    }
   };
 
-  const speakNews = () => {
-    window.speechSynthesis.cancel();
+  const tickPlaybackProgress = useCallback(() => {
+    const s = speechRef.current;
+    if (!s.chunks.length || s.totalEstimatedMs <= 0) return;
+    const inChunk = Date.now() - s.chunkStartedAt;
+    const elapsed = s.elapsedBeforeChunkMs + Math.min(inChunk, s.chunkDurationMs);
+    const progress = Math.min(1, elapsed / s.totalEstimatedMs);
+    setPlaybackProgress(progress);
+    setRemainingMs(Math.max(0, s.totalEstimatedMs - elapsed));
+  }, []);
 
+  const speakChunkAt = useCallback(
+    (index: number) => {
+      const s = speechRef.current;
+      const chunks = s.chunks;
+      if (index >= chunks.length) {
+        clearProgressTimer();
+        setIsSpeaking(false);
+        setIsPaused(false);
+        setCurrentChunkIndex(-1);
+        setPlaybackProgress(1);
+        setRemainingMs(0);
+        return;
+      }
+
+      window.speechSynthesis.cancel();
+
+      s.chunkIndex = index;
+      s.chunkStartedAt = Date.now();
+      s.elapsedBeforeChunkMs = chunks
+        .slice(0, index)
+        .reduce((sum, c) => sum + estimateChunkDurationMs(c, s.rate), 0);
+      s.chunkDurationMs = estimateChunkDurationMs(chunks[index], s.rate);
+
+      setCurrentChunkIndex(index);
+      setIsSpeaking(true);
+      setIsPaused(false);
+
+      const utterance = new SpeechSynthesisUtterance(chunks[index]);
+      utterance.lang = "zh-TW";
+      utterance.rate = s.rate;
+      const selectedVoice = voices.find((v) => v.name === voiceName);
+      if (selectedVoice) utterance.voice = selectedVoice;
+
+      utterance.onend = () => {
+        if (speechRef.current.chunkIndex !== index) return;
+        speakChunkAt(index + 1);
+      };
+      utterance.onerror = () => {
+        if (speechRef.current.chunkIndex !== index) return;
+        clearProgressTimer();
+        setIsSpeaking(false);
+        setIsPaused(false);
+      };
+
+      window.speechSynthesis.speak(utterance);
+      clearProgressTimer();
+      progressTimerRef.current = setInterval(tickPlaybackProgress, 180);
+      tickPlaybackProgress();
+    },
+    [voices, voiceName, tickPlaybackProgress]
+  );
+
+  const stopPlayback = useCallback(() => {
+    window.speechSynthesis.cancel();
+    clearProgressTimer();
+    setIsSpeaking(false);
+    setIsPaused(false);
+    setCurrentChunkIndex(-1);
+    setPlaybackProgress(0);
+    setRemainingMs(0);
+    setPlaybackMode(null);
+    setTotalChunks(0);
+  }, []);
+
+  const pausePlayback = useCallback(() => {
+    if (!isSpeaking || isPaused) return;
+    if (window.speechSynthesis.speaking && !window.speechSynthesis.paused) {
+      window.speechSynthesis.pause();
+      setIsPaused(true);
+      clearProgressTimer();
+      tickPlaybackProgress();
+    }
+  }, [isSpeaking, isPaused, tickPlaybackProgress]);
+
+  const resumePlayback = useCallback(() => {
+    if (!isPaused) return;
+    window.speechSynthesis.resume();
+    setIsPaused(false);
+    progressTimerRef.current = setInterval(tickPlaybackProgress, 180);
+  }, [isPaused, tickPlaybackProgress]);
+
+  const startPlayback = useCallback(() => {
     const hasAi = aiScript.trim().length > 0;
     if (!hasAi && selectedNews.length === 0) {
       alert("請先選擇要播放的新聞，或先產生 AI 新聞稿");
       return;
     }
 
-    window.speechSynthesis.speak(createSpeech(speed));
-  };
+    const mode: PlaybackMode = hasAi ? "ai" : "news";
+    const chunks = hasAi
+      ? splitSpeechChunks(aiScript.trim())
+      : selectedNews.map((n, i) => `第 ${i + 1} 則新聞，${n.title}`);
 
-  const stopSpeak = () => {
-    window.speechSynthesis.cancel();
-    setIsSpeaking(false);
-  };
+    const rate = speed;
+    const totalEstimatedMs = chunks.reduce(
+      (sum, c) => sum + estimateChunkDurationMs(c, rate),
+      0
+    );
+
+    speechRef.current = {
+      chunks,
+      chunkIndex: 0,
+      rate,
+      mode,
+      chunkStartedAt: 0,
+      chunkDurationMs: 0,
+      totalEstimatedMs,
+      elapsedBeforeChunkMs: 0,
+    };
+
+    setPlaybackMode(mode);
+    setTotalChunks(chunks.length);
+    setTab("player");
+    setPlaybackProgress(0);
+    setRemainingMs(totalEstimatedMs);
+    speakChunkAt(0);
+  }, [aiScript, selectedNews, speed, speakChunkAt]);
+
+  const togglePlayPause = useCallback(() => {
+    if (isPaused) {
+      resumePlayback();
+      return;
+    }
+    if (isSpeaking) {
+      pausePlayback();
+      return;
+    }
+    startPlayback();
+  }, [isPaused, isSpeaking, resumePlayback, pausePlayback, startPlayback]);
 
   const changeSpeed = (newSpeed: number) => {
     const next = persistPlaybackSpeed(newSpeed);
+    if (!isSpeaking && !isPaused) return;
 
-    const canReplay =
-      isSpeaking && (aiScript.trim().length > 0 || selectedNews.length > 0);
-    if (canReplay) {
-      window.speechSynthesis.cancel();
-      setTimeout(() => {
-        window.speechSynthesis.speak(createSpeech(next));
-      }, 120);
-    }
+    const s = speechRef.current;
+    s.rate = next;
+    s.totalEstimatedMs = s.chunks.reduce(
+      (sum, c) => sum + estimateChunkDurationMs(c, next),
+      0
+    );
+    const idx = s.chunkIndex;
+    window.speechSynthesis.cancel();
+    setIsPaused(false);
+    speakChunkAt(idx);
   };
 
   const clearAiCache = () => {
@@ -1114,17 +1309,13 @@ ${newsText}
             <div style={styles.homeToolbarScroll} className="hide-scrollbar">
               <button
                 type="button"
-                onClick={() => (isSpeaking ? stopSpeak() : speakNews())}
+                onClick={() => startPlayback()}
                 style={{
                   ...styles.toolbarBtn,
-                  ...(isSpeaking ? styles.toolbarBtnDanger : styles.toolbarBtnPlay),
+                  ...styles.toolbarBtnPlay,
                 }}
               >
-                {isSpeaking
-                  ? "■ 停止"
-                  : aiScript.trim()
-                    ? "▶ 播放 AI 稿"
-                    : "▶ 播放"}
+                {aiScript.trim() ? "▶ 播放 AI 稿" : "▶ 播放"}
               </button>
               <button
                 type="button"
@@ -1169,7 +1360,12 @@ ${newsText}
               aiHighlights={aiHighlights}
               aiJsonFallback={aiJsonFallback}
               selectedScriptDuration={selectedScriptDuration}
-              onPlayScript={speakNews}
+              scriptFontSize={scriptFontSize}
+              onScriptFontSizeChange={setScriptFontSize}
+              isSpeaking={isSpeaking}
+              isPaused={isPaused}
+              onPlayScript={startPlayback}
+              onStopScript={stopPlayback}
               onCopyScript={() => void copyAiScript()}
               onOpenAnalysis={openAiAnalysis}
               selectedNewsCount={selectedNews.length}
@@ -1194,60 +1390,27 @@ ${newsText}
 
         {tab === "player" && (
           <>
-            <section style={styles.controlPanel}>
-              <div style={styles.controlTitle}>
-                播放設定 {isSpeaking ? "｜播放中" : ""}
-              </div>
-
-              <select
-                value={voiceName}
-                onChange={(e) => setVoiceName(e.target.value)}
-                style={styles.select}
-              >
-                {voices.map((voice) => (
-                  <option key={voice.name} value={voice.name}>
-                    {voice.name}（{voice.lang}）
-                  </option>
-                ))}
-              </select>
-
-              <div style={styles.speedRow}>
-                <span>速度 {speed.toFixed(2)}x</span>
-                <input
-                  type="range"
-                  min={String(SPEED_MIN)}
-                  max={String(SPEED_MAX)}
-                  step={String(SPEED_STEP)}
-                  value={speed}
-                  onChange={(e) => changeSpeed(Number(e.target.value))}
-                  style={{ width: "55%" }}
-                />
-              </div>
-
-              <div style={styles.actionRow}>
-                <button onClick={speakNews} style={styles.playSmallButton}>
-                  {aiScript.trim() ? "播放 AI 新聞稿" : "播放選取新聞"}
-                </button>
-                <button onClick={stopSpeak} style={styles.stopButton}>
-                  停止
-                </button>
-                <button
-                  type="button"
-                  onClick={openAiAnalysis}
-                  disabled={aiLoading || selectedNews.length === 0}
-                  style={{
-                    ...styles.aiSummaryButtonSmall,
-                    opacity: aiLoading || selectedNews.length === 0 ? 0.65 : 1,
-                    cursor:
-                      aiLoading || selectedNews.length === 0
-                        ? "not-allowed"
-                        : "pointer",
-                  }}
-                >
-                  {aiLoading ? "AI 分析中..." : "✨ AI 分析"}
-                </button>
-              </div>
-            </section>
+            <PlayerDeck
+              isSpeaking={isSpeaking}
+              isPaused={isPaused}
+              playbackProgress={playbackProgress}
+              remainingMs={remainingMs}
+              speed={speed}
+              playbackMode={playbackMode}
+              currentChunkIndex={currentChunkIndex}
+              totalChunks={totalChunks}
+              aiScript={aiScript}
+              selectedNewsCount={selectedNews.length}
+              voiceName={voiceName}
+              voices={voices}
+              onVoiceChange={setVoiceName}
+              onSpeedChange={changeSpeed}
+              onTogglePlayPause={togglePlayPause}
+              onStop={stopPlayback}
+              onStart={startPlayback}
+              onOpenAnalysis={openAiAnalysis}
+              aiLoading={aiLoading}
+            />
 
             <AiSummaryPanel
               aiLoading={aiLoading}
@@ -1256,7 +1419,12 @@ ${newsText}
               aiHighlights={aiHighlights}
               aiJsonFallback={aiJsonFallback}
               selectedScriptDuration={selectedScriptDuration}
-              onPlayScript={speakNews}
+              scriptFontSize={scriptFontSize}
+              onScriptFontSizeChange={setScriptFontSize}
+              isSpeaking={isSpeaking}
+              isPaused={isPaused}
+              onPlayScript={startPlayback}
+              onStopScript={stopPlayback}
               onCopyScript={() => void copyAiScript()}
               onOpenAnalysis={openAiAnalysis}
               selectedNewsCount={selectedNews.length}
@@ -1269,6 +1437,11 @@ ${newsText}
               toggleNews={toggleNews}
               toggleFavorite={toggleFavorite}
               emptyText="目前沒有選取新聞，請回首頁勾選。"
+              playingIndex={
+                playbackMode === "news" && currentChunkIndex >= 0
+                  ? currentChunkIndex
+                  : -1
+              }
             />
           </>
         )}
@@ -1516,6 +1689,19 @@ ${newsText}
 
         <BottomNav tab={tab} setTab={setTab} />
 
+        {(isSpeaking || isPaused) && tab !== "player" ? (
+          <FloatingPlayerBar
+            isPaused={isPaused}
+            playbackProgress={playbackProgress}
+            remainingMs={remainingMs}
+            speed={speed}
+            playbackMode={playbackMode}
+            onTogglePlayPause={togglePlayPause}
+            onStop={stopPlayback}
+            onOpenPlayer={() => setTab("player")}
+          />
+        ) : null}
+
         {aiDurationSheetOpen ? (
           <AiDurationSheet
             loading={aiLoading}
@@ -1529,6 +1715,311 @@ ${newsText}
 }
 
 const COLLAPSED_LINES = 5;
+const HIGHLIGHT_PREVIEW_LINES = 2;
+
+function CollapsibleHighlightItem({ highlight }: { highlight: AiHighlight }) {
+  const [expanded, setExpanded] = useState(false);
+  const summary = highlight.summary.trim();
+  const needsCollapse =
+    summary.length > 48 || summary.split("\n").length > HIGHLIGHT_PREVIEW_LINES;
+
+  return (
+    <li style={styles.aiHighlightItem}>
+      <button
+        type="button"
+        className="ai-highlight-card"
+        onClick={() => needsCollapse && setExpanded((v) => !v)}
+        style={{
+          ...styles.aiHighlightCardBtn,
+          cursor: needsCollapse ? "pointer" : "default",
+        }}
+        aria-expanded={needsCollapse ? expanded : undefined}
+      >
+        <div style={styles.aiHighlightLevel}>{highlight.level}</div>
+        <div style={styles.aiHighlightTitle}>{highlight.title}</div>
+        {summary ? (
+          <div
+            className={expanded ? "ai-highlight-body-expanded" : "ai-highlight-body-collapsed"}
+            style={{
+              ...styles.aiHighlightSummary,
+              ...(needsCollapse && !expanded
+                ? {
+                    display: "-webkit-box",
+                    WebkitLineClamp: HIGHLIGHT_PREVIEW_LINES,
+                    WebkitBoxOrient: "vertical",
+                    overflow: "hidden",
+                  }
+                : {}),
+            }}
+          >
+            {summary}
+          </div>
+        ) : null}
+        {needsCollapse ? (
+          <span style={styles.aiHighlightExpandHint}>
+            {expanded ? "▲ 收合" : "▼ 展開完整內容"}
+          </span>
+        ) : null}
+      </button>
+    </li>
+  );
+}
+
+function ScriptFontSizeControl({
+  value,
+  onChange,
+}: {
+  value: ScriptFontSize;
+  onChange: (v: ScriptFontSize) => void;
+}) {
+  const options: { id: ScriptFontSize; label: string }[] = [
+    { id: "sm", label: "小" },
+    { id: "md", label: "中" },
+    { id: "lg", label: "大" },
+    { id: "xl", label: "超大" },
+  ];
+  return (
+    <div style={styles.scriptFontRow} role="group" aria-label="主播稿字體大小">
+      <span style={styles.scriptFontLabel}>字體</span>
+      <div style={styles.scriptFontChips}>
+        {options.map((o) => (
+          <button
+            key={o.id}
+            type="button"
+            onClick={() => onChange(o.id)}
+            style={{
+              ...styles.scriptFontChip,
+              ...(value === o.id ? styles.scriptFontChipActive : {}),
+            }}
+          >
+            {o.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function WaveformBars({ active }: { active: boolean }) {
+  return (
+    <div
+      className={active ? "player-waveform player-waveform--active" : "player-waveform"}
+      style={styles.waveform}
+      aria-hidden
+    >
+      {[0, 1, 2, 3, 4].map((i) => (
+        <span key={i} className="player-waveform-bar" style={{ animationDelay: `${i * 0.12}s` }} />
+      ))}
+    </div>
+  );
+}
+
+function PlayerDeck({
+  isSpeaking,
+  isPaused,
+  playbackProgress,
+  remainingMs,
+  speed,
+  playbackMode,
+  currentChunkIndex,
+  totalChunks,
+  aiScript,
+  selectedNewsCount,
+  voiceName,
+  voices,
+  onVoiceChange,
+  onSpeedChange,
+  onTogglePlayPause,
+  onStop,
+  onStart,
+  onOpenAnalysis,
+  aiLoading,
+}: {
+  isSpeaking: boolean;
+  isPaused: boolean;
+  playbackProgress: number;
+  remainingMs: number;
+  speed: number;
+  playbackMode: PlaybackMode;
+  currentChunkIndex: number;
+  totalChunks: number;
+  aiScript: string;
+  selectedNewsCount: number;
+  voiceName: string;
+  voices: SpeechSynthesisVoice[];
+  onVoiceChange: (name: string) => void;
+  onSpeedChange: (rate: number) => void;
+  onTogglePlayPause: () => void;
+  onStop: () => void;
+  onStart: () => void;
+  onOpenAnalysis: () => void;
+  aiLoading: boolean;
+}) {
+  const active = isSpeaking || isPaused;
+  const canPlay = aiScript.trim().length > 0 || selectedNewsCount > 0;
+  const statusLabel = isPaused
+    ? "已暫停"
+    : isSpeaking
+      ? playbackMode === "ai"
+        ? "AI 主播稿播放中"
+        : "新聞播放中"
+      : "待播放";
+
+  return (
+    <section style={styles.playerDeck}>
+      <div style={styles.playerDeckTop}>
+        <WaveformBars active={isSpeaking && !isPaused} />
+        <div style={styles.playerDeckMeta}>
+          <div style={styles.playerStatus}>{statusLabel}</div>
+          <div style={styles.playerSubMeta}>
+            <span style={styles.playerSpeedTag}>{speed.toFixed(2)}x</span>
+            {active && remainingMs > 0 ? (
+              <span style={styles.playerRemaining}>{formatRemainingTime(remainingMs)}</span>
+            ) : null}
+            {totalChunks > 0 && currentChunkIndex >= 0 ? (
+              <span style={styles.playerChunkMeta}>
+                {currentChunkIndex + 1} / {totalChunks}
+              </span>
+            ) : null}
+          </div>
+        </div>
+      </div>
+
+      <div style={styles.playerProgressTrack}>
+        <div
+          style={{
+            ...styles.playerProgressFill,
+            width: `${Math.round(playbackProgress * 100)}%`,
+          }}
+        />
+      </div>
+
+      <div style={styles.playerControlRow}>
+        <button
+          type="button"
+          onClick={onTogglePlayPause}
+          disabled={!active && !canPlay}
+          style={styles.playerPlayBtn}
+        >
+          {isPaused ? "▶ 繼續" : isSpeaking ? "⏸ 暫停" : "▶ 播放"}
+        </button>
+        <button
+          type="button"
+          onClick={onStop}
+          disabled={!active}
+          style={{
+            ...styles.playerStopBtn,
+            opacity: active ? 1 : 0.45,
+          }}
+        >
+          ■ 停止
+        </button>
+        {!active ? (
+          <button
+            type="button"
+            onClick={onStart}
+            disabled={!canPlay}
+            style={{
+              ...styles.playerAltPlayBtn,
+              opacity: canPlay ? 1 : 0.5,
+            }}
+          >
+            {aiScript.trim() ? "AI 稿" : "新聞"}
+          </button>
+        ) : null}
+      </div>
+
+      <select
+        value={voiceName}
+        onChange={(e) => onVoiceChange(e.target.value)}
+        style={styles.select}
+      >
+        {voices.map((voice) => (
+          <option key={voice.name} value={voice.name}>
+            {voice.name}（{voice.lang}）
+          </option>
+        ))}
+      </select>
+
+      <div style={styles.speedRow}>
+        <span>語速 {speed.toFixed(2)}x</span>
+        <input
+          type="range"
+          min={String(SPEED_MIN)}
+          max={String(SPEED_MAX)}
+          step={String(SPEED_STEP)}
+          value={speed}
+          onChange={(e) => onSpeedChange(Number(e.target.value))}
+          style={{ width: "58%" }}
+        />
+      </div>
+
+      <button
+        type="button"
+        onClick={onOpenAnalysis}
+        disabled={aiLoading || selectedNewsCount === 0}
+        style={{
+          ...styles.aiSummaryButtonSmall,
+          width: "100%",
+          marginTop: "4px",
+          opacity: aiLoading || selectedNewsCount === 0 ? 0.65 : 1,
+        }}
+      >
+        {aiLoading ? "AI 分析中..." : "✨ AI 分析"}
+      </button>
+    </section>
+  );
+}
+
+function FloatingPlayerBar({
+  isPaused,
+  playbackProgress,
+  remainingMs,
+  speed,
+  playbackMode,
+  onTogglePlayPause,
+  onStop,
+  onOpenPlayer,
+}: {
+  isPaused: boolean;
+  playbackProgress: number;
+  remainingMs: number;
+  speed: number;
+  playbackMode: PlaybackMode;
+  onTogglePlayPause: () => void;
+  onStop: () => void;
+  onOpenPlayer: () => void;
+}) {
+  return (
+    <div style={styles.floatingPlayer} role="region" aria-label="迷你播放器">
+      <button type="button" onClick={onOpenPlayer} style={styles.floatingPlayerMain}>
+        <WaveformBars active={!isPaused} />
+        <div style={styles.floatingPlayerText}>
+          <span style={styles.floatingPlayerTitle}>
+            {isPaused ? "已暫停" : playbackMode === "ai" ? "AI 主播稿" : "新聞播放"}
+          </span>
+          <span style={styles.floatingPlayerSub}>
+            {speed.toFixed(2)}x · {formatRemainingTime(remainingMs)}
+          </span>
+        </div>
+        <div style={styles.floatingProgressTrack}>
+          <div
+            style={{
+              ...styles.floatingProgressFill,
+              width: `${Math.round(playbackProgress * 100)}%`,
+            }}
+          />
+        </div>
+      </button>
+      <button type="button" onClick={onTogglePlayPause} style={styles.floatingIconBtn}>
+        {isPaused ? "▶" : "⏸"}
+      </button>
+      <button type="button" onClick={onStop} style={styles.floatingIconBtnStop}>
+        ■
+      </button>
+    </div>
+  );
+}
 
 function CollapsibleText({
   text,
@@ -1585,7 +2076,12 @@ function AiSummaryPanel({
   aiHighlights,
   aiJsonFallback,
   selectedScriptDuration,
+  scriptFontSize,
+  onScriptFontSizeChange,
+  isSpeaking,
+  isPaused,
   onPlayScript,
+  onStopScript,
   onCopyScript,
   onOpenAnalysis,
   selectedNewsCount,
@@ -1596,11 +2092,18 @@ function AiSummaryPanel({
   aiHighlights: AiHighlight[];
   aiJsonFallback: boolean;
   selectedScriptDuration: AiDuration | null;
+  scriptFontSize: ScriptFontSize;
+  onScriptFontSizeChange: (v: ScriptFontSize) => void;
+  isSpeaking: boolean;
+  isPaused: boolean;
   onPlayScript: () => void;
+  onStopScript: () => void;
   onCopyScript: () => void;
   onOpenAnalysis: () => void;
   selectedNewsCount: number;
 }) {
+  const scriptFontPx = SCRIPT_FONT_PX[scriptFontSize];
+  const playbackActive = isSpeaking || isPaused;
   const hasContent = aiScript.trim().length > 0 || aiHighlights.length > 0;
 
   return (
@@ -1631,37 +2134,47 @@ function AiSummaryPanel({
                 <div style={styles.aiSubheading}>今日重點</div>
                 <ul style={styles.aiHighlightList}>
                   {aiHighlights.map((h, idx) => (
-                    <li key={idx} style={styles.aiHighlightItem}>
-                      <div style={styles.aiHighlightLevel}>{h.level}</div>
-                      <div style={styles.aiHighlightTitle}>{h.title}</div>
-                      <CollapsibleText
-                        text={h.summary}
-                        style={styles.aiHighlightSummary}
-                        collapsedLines={3}
-                      />
-                    </li>
+                    <CollapsibleHighlightItem key={idx} highlight={h} />
                   ))}
                 </ul>
               </div>
             ) : null}
             {aiScript.trim() ? (
               <div style={styles.aiScriptSection}>
-                <div style={styles.aiSubheading}>AI 主播稿</div>
-                <CollapsibleText text={aiScript.trim()} style={styles.aiSummaryBody} />
+                <div style={styles.aiScriptSectionHead}>
+                  <div style={styles.aiSubheading}>AI 主播稿</div>
+                  <ScriptFontSizeControl
+                    value={scriptFontSize}
+                    onChange={onScriptFontSizeChange}
+                  />
+                </div>
+                <CollapsibleText
+                  text={aiScript.trim()}
+                  style={{ ...styles.aiSummaryBody, fontSize: `${scriptFontPx}px` }}
+                />
                 <div style={styles.aiScriptActions}>
                   <button
                     type="button"
                     onClick={onPlayScript}
                     style={styles.aiScriptPlayBtn}
                   >
-                    播放 AI 新聞稿
+                    {playbackActive ? "▶ 前往播放頁" : "播放 AI 新聞稿"}
                   </button>
+                  {playbackActive ? (
+                    <button
+                      type="button"
+                      onClick={onStopScript}
+                      style={styles.aiScriptStopBtn}
+                    >
+                      ■ 停止
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     onClick={onCopyScript}
                     style={styles.aiScriptCopyBtn}
                   >
-                    複製 AI 新聞稿
+                    複製
                   </button>
                 </div>
               </div>
@@ -1776,21 +2289,17 @@ function BottomNav({
             type="button"
             className={`bottom-nav-item${active ? " bottom-nav-item--active" : ""}`}
             onClick={() => setTab(id)}
-            style={{
-              ...(active ? styles.navItemActive : styles.navItem),
-            }}
+            style={active ? styles.navItemActive : styles.navItem}
             aria-current={active ? "page" : undefined}
           >
             <span
-              style={{
-                ...styles.navIconWrap,
-                ...(active ? styles.navIconWrapActive : {}),
-              }}
+              className={active ? "bottom-nav-icon bottom-nav-icon--active" : "bottom-nav-icon"}
+              style={active ? styles.navIconActive : styles.navIcon}
             >
               <Icon
-                size={27}
-                strokeWidth={active ? 2.4 : 2}
-                color={active ? "#FFFFFF" : "#94A3B8"}
+                size={22}
+                strokeWidth={active ? 2.35 : 1.85}
+                color={active ? "#F8FAFC" : "#64748B"}
               />
             </span>
             <span style={active ? styles.navLabelActive : styles.navLabel}>
@@ -1837,6 +2346,7 @@ function NewsList({
   compact = false,
   denseCards = false,
   homeToolbar,
+  playingIndex = -1,
 }: {
   title: string;
   news: NewsItem[];
@@ -1851,8 +2361,11 @@ function NewsList({
     clearAll: () => void;
     lastUpdated: string;
   };
+  playingIndex?: number;
 }) {
   const headerMerged = !!homeToolbar;
+  const selectedCount = news.filter((n) => n.selected).length;
+  const allSelected = news.length > 0 && selectedCount === news.length;
 
   return (
     <>
@@ -1860,44 +2373,40 @@ function NewsList({
         style={{
           ...styles.sectionHeader,
           ...(compact ? styles.sectionHeaderCompact : {}),
-          ...(headerMerged ? styles.sectionHeaderHomeMerged : {}),
+          ...(headerMerged ? styles.sectionHeaderHomeToolbar : {}),
         }}
       >
         {homeToolbar ? (
           <>
-            <div style={styles.homeListHeaderLeft}>
+            <div style={styles.homeNewsToolbarLeft}>
               <button
                 type="button"
+                className={`home-select-btn${allSelected ? " home-select-btn--active" : ""}`}
                 onClick={homeToolbar.selectAll}
-                style={styles.tinyOutlineBtn}
+                style={{
+                  ...styles.homeSelectBtn,
+                  ...(allSelected ? styles.homeSelectBtnActive : {}),
+                }}
               >
                 全選
               </button>
               <button
                 type="button"
+                className="home-clear-btn"
                 onClick={homeToolbar.clearAll}
-                style={styles.tinyOutlineBtn}
+                style={styles.homeClearBtn}
               >
                 取消
               </button>
             </div>
-            <div style={styles.homeListHeaderMid}>
-              <h2
-                style={{
-                  ...styles.sectionTitle,
-                  ...(compact ? styles.sectionTitleCompact : {}),
-                  ...styles.sectionTitleHomeInline,
-                }}
-              >
-                {title}
-              </h2>
-              <span style={styles.countTextHome}>{news.length} 則</span>
+            <div style={styles.homeNewsToolbarRight}>
+              <span style={styles.homeNewsCount}>{news.length} 則新聞</span>
+              <span style={styles.homeNewsUpdated}>
+                {homeToolbar.lastUpdated
+                  ? `更新 ${homeToolbar.lastUpdated}`
+                  : "尚未更新"}
+              </span>
             </div>
-            <span style={styles.lastUpdatedHome}>
-              {homeToolbar.lastUpdated
-                ? `更新 ${homeToolbar.lastUpdated}`
-                : "尚未更新"}
-            </span>
           </>
         ) : (
           <>
@@ -1931,6 +2440,7 @@ function NewsList({
               ...styles.newsCard,
               ...(denseCards ? styles.newsCardDense : {}),
               ...(item.selected ? styles.newsCardActive : {}),
+              ...(playingIndex === index ? styles.newsCardPlaying : {}),
             }}
           >
             <div style={styles.newsIndex}>
@@ -1999,7 +2509,8 @@ const styles: Record<string, CSSProperties> = {
     paddingLeft: "max(16px, env(safe-area-inset-left, 0px))",
     paddingRight: "max(16px, env(safe-area-inset-right, 0px))",
     paddingTop: "max(12px, env(safe-area-inset-top, 0px))",
-    paddingBottom: "calc(100px + env(safe-area-inset-bottom, 0px))",
+    paddingBottom: "calc(84px + env(safe-area-inset-bottom, 0px))",
+    transition: "padding-bottom 0.2s ease",
   },
   homeHeader: {
     display: "flex",
@@ -2131,6 +2642,82 @@ const styles: Record<string, CSSProperties> = {
     fontWeight: 700,
     cursor: "pointer",
   },
+  sectionHeaderHomeToolbar: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "12px",
+    marginTop: "4px",
+    marginBottom: "10px",
+    padding: "10px 12px",
+    background: "rgba(15,23,42,.55)",
+    border: "1px solid rgba(255,255,255,.08)",
+    borderRadius: "16px",
+  },
+  homeNewsToolbarLeft: {
+    display: "flex",
+    gap: "8px",
+    flexShrink: 0,
+    alignItems: "center",
+  },
+  homeSelectBtn: {
+    minHeight: "40px",
+    padding: "10px 18px",
+    fontSize: "14px",
+    fontWeight: 800,
+    color: "#E2E8F0",
+    background: "rgba(37,99,235,.28)",
+    border: "1px solid rgba(96,165,250,.45)",
+    borderRadius: "12px",
+    cursor: "pointer",
+    WebkitTapHighlightColor: "transparent",
+    transition: "transform 0.12s ease, background 0.15s ease, box-shadow 0.15s ease",
+    boxShadow: "0 2px 10px rgba(37,99,235,.2)",
+  },
+  homeSelectBtnActive: {
+    color: "#FFFFFF",
+    background: "rgba(37,99,235,.55)",
+    border: "1px solid rgba(147,197,253,.65)",
+    boxShadow: "0 0 0 1px rgba(147,197,253,.25), 0 4px 14px rgba(37,99,235,.35)",
+  },
+  homeClearBtn: {
+    minHeight: "40px",
+    padding: "10px 16px",
+    fontSize: "14px",
+    fontWeight: 700,
+    color: "#CBD5E1",
+    background: "rgba(255,255,255,.08)",
+    border: "1px solid rgba(255,255,255,.14)",
+    borderRadius: "12px",
+    cursor: "pointer",
+    WebkitTapHighlightColor: "transparent",
+    transition: "transform 0.12s ease, background 0.15s ease",
+  },
+  homeNewsToolbarRight: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-end",
+    gap: "3px",
+    minWidth: 0,
+    flex: "1 1 auto",
+  },
+  homeNewsCount: {
+    fontSize: "13px",
+    fontWeight: 800,
+    color: "#94A3B8",
+    lineHeight: 1.2,
+    whiteSpace: "nowrap",
+  },
+  homeNewsUpdated: {
+    fontSize: "11px",
+    fontWeight: 600,
+    color: "#64748B",
+    lineHeight: 1.2,
+    whiteSpace: "nowrap",
+    maxWidth: "100%",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+  },
   searchBox: {
     display: "flex",
     gap: "6px",
@@ -2170,41 +2757,7 @@ const styles: Record<string, CSSProperties> = {
     marginBottom: "6px",
   },
   sectionTitleCompact: { fontSize: "14px" },
-  sectionHeaderHomeMerged: {
-    justifyContent: "flex-start",
-    alignItems: "center",
-    gap: "8px",
-    flexWrap: "wrap",
-    rowGap: "6px",
-  },
-  homeListHeaderLeft: {
-    display: "flex",
-    gap: "5px",
-    flexShrink: 0,
-    alignItems: "center",
-  },
-  homeListHeaderMid: {
-    display: "flex",
-    alignItems: "baseline",
-    gap: "6px",
-    flex: "1 1 88px",
-    minWidth: 0,
-  },
   sectionTitleHomeInline: { margin: 0, lineHeight: 1.2 },
-  countTextHome: {
-    fontSize: "11px",
-    color: "#94A3B8",
-    fontWeight: 600,
-    flexShrink: 0,
-  },
-  lastUpdatedHome: {
-    fontSize: "10px",
-    color: "#64748B",
-    marginLeft: "auto",
-    flexShrink: 0,
-    maxWidth: "100%",
-    textAlign: "right",
-  },
   updateButton: {
     background: "rgba(255,255,255,.12)",
     color: "white",
@@ -2444,10 +2997,27 @@ const styles: Record<string, CSSProperties> = {
     gap: "10px",
   },
   aiHighlightItem: {
+    listStyle: "none",
+    margin: 0,
+    padding: 0,
+  },
+  aiHighlightCardBtn: {
+    width: "100%",
+    textAlign: "left",
     background: "rgba(255,255,255,.05)",
     border: "1px solid rgba(255,255,255,.08)",
     borderRadius: "14px",
-    padding: "10px 11px",
+    padding: "10px 12px",
+    color: "inherit",
+    WebkitTapHighlightColor: "transparent",
+    transition: "background 0.15s ease, border-color 0.15s ease",
+  },
+  aiHighlightExpandHint: {
+    display: "block",
+    marginTop: "8px",
+    fontSize: "12px",
+    fontWeight: 700,
+    color: "#5EEAD4",
   },
   aiHighlightLevel: {
     fontSize: "11px",
@@ -2471,6 +3041,54 @@ const styles: Record<string, CSSProperties> = {
   },
   aiScriptSection: {
     marginTop: "4px",
+  },
+  aiScriptSectionHead: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "10px",
+    flexWrap: "wrap",
+    marginBottom: "8px",
+  },
+  scriptFontRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+    flexShrink: 0,
+  },
+  scriptFontLabel: {
+    fontSize: "11px",
+    color: "#64748B",
+    fontWeight: 700,
+  },
+  scriptFontChips: {
+    display: "flex",
+    gap: "4px",
+  },
+  scriptFontChip: {
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.06)",
+    color: "#94A3B8",
+    borderRadius: "8px",
+    padding: "4px 8px",
+    fontSize: "11px",
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+  scriptFontChipActive: {
+    background: "rgba(45,212,191,.18)",
+    border: "1px solid rgba(45,212,191,.45)",
+    color: "#CCFBF1",
+  },
+  aiScriptStopBtn: {
+    background: "rgba(220,38,38,.88)",
+    color: "white",
+    border: "none",
+    borderRadius: "12px",
+    padding: "9px 14px",
+    fontWeight: 800,
+    fontSize: "12px",
+    cursor: "pointer",
   },
   aiScriptActions: {
     display: "flex",
@@ -2670,6 +3288,206 @@ const styles: Record<string, CSSProperties> = {
     background: "rgba(37,99,235,.26)",
     border: "1px solid rgba(147,197,253,.45)",
   },
+  newsCardPlaying: {
+    background: "rgba(124,58,237,.22)",
+    border: "1px solid rgba(167,139,250,.55)",
+    boxShadow: "0 0 0 1px rgba(167,139,250,.2), 0 6px 20px rgba(124,58,237,.2)",
+  },
+  playerDeck: {
+    marginTop: "4px",
+    marginBottom: "12px",
+    padding: "16px",
+    borderRadius: "22px",
+    background: "linear-gradient(165deg, rgba(30,41,59,.95) 0%, rgba(15,23,42,.92) 100%)",
+    border: "1px solid rgba(255,255,255,.1)",
+    boxShadow: "0 12px 40px rgba(0,0,0,.35)",
+  },
+  playerDeckTop: {
+    display: "flex",
+    alignItems: "center",
+    gap: "14px",
+    marginBottom: "12px",
+  },
+  playerDeckMeta: { flex: 1, minWidth: 0 },
+  playerStatus: {
+    fontSize: "16px",
+    fontWeight: 900,
+    color: "#F8FAFC",
+    lineHeight: 1.25,
+  },
+  playerSubMeta: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: "8px",
+    marginTop: "6px",
+    alignItems: "center",
+  },
+  playerSpeedTag: {
+    fontSize: "12px",
+    fontWeight: 800,
+    color: "#A5B4FC",
+    background: "rgba(99,102,241,.2)",
+    padding: "3px 8px",
+    borderRadius: "999px",
+  },
+  playerRemaining: {
+    fontSize: "12px",
+    color: "#94A3B8",
+    fontWeight: 600,
+  },
+  playerChunkMeta: {
+    fontSize: "11px",
+    color: "#64748B",
+    fontWeight: 700,
+  },
+  waveform: {
+    display: "flex",
+    alignItems: "flex-end",
+    gap: "3px",
+    height: "36px",
+    flexShrink: 0,
+  },
+  playerProgressTrack: {
+    height: "5px",
+    borderRadius: "999px",
+    background: "rgba(255,255,255,.1)",
+    overflow: "hidden",
+    marginBottom: "14px",
+  },
+  playerProgressFill: {
+    height: "100%",
+    borderRadius: "999px",
+    background: "linear-gradient(90deg, #6366F1, #22D3EE)",
+    transition: "width 0.2s ease",
+  },
+  playerControlRow: {
+    display: "flex",
+    gap: "8px",
+    marginBottom: "12px",
+    flexWrap: "wrap",
+  },
+  playerPlayBtn: {
+    flex: "1 1 120px",
+    background: "linear-gradient(135deg, #2563EB, #4F46E5)",
+    color: "white",
+    border: "none",
+    borderRadius: "14px",
+    padding: "12px 16px",
+    fontWeight: 900,
+    fontSize: "14px",
+    cursor: "pointer",
+  },
+  playerStopBtn: {
+    flex: "0 0 auto",
+    background: "rgba(220,38,38,.9)",
+    color: "white",
+    border: "none",
+    borderRadius: "14px",
+    padding: "12px 18px",
+    fontWeight: 800,
+    fontSize: "14px",
+    cursor: "pointer",
+  },
+  playerAltPlayBtn: {
+    flex: "0 0 auto",
+    background: "rgba(255,255,255,.1)",
+    color: "#E2E8F0",
+    border: "1px solid rgba(255,255,255,.14)",
+    borderRadius: "14px",
+    padding: "12px 14px",
+    fontWeight: 700,
+    fontSize: "13px",
+    cursor: "pointer",
+  },
+  floatingPlayer: {
+    position: "fixed",
+    left: "50%",
+    transform: "translateX(-50%)",
+    bottom: "calc(78px + env(safe-area-inset-bottom, 0px))",
+    width: "min(440px, calc(100% - 20px))",
+    zIndex: 45,
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+    padding: "8px 10px",
+    borderRadius: "18px",
+    background: "rgba(15,23,42,.94)",
+    border: "1px solid rgba(255,255,255,.12)",
+    backdropFilter: "blur(20px)",
+    boxShadow: "0 8px 32px rgba(0,0,0,.45)",
+  },
+  floatingPlayerMain: {
+    flex: 1,
+    minWidth: 0,
+    display: "flex",
+    alignItems: "center",
+    gap: "10px",
+    background: "transparent",
+    border: "none",
+    color: "white",
+    cursor: "pointer",
+    padding: "4px 6px",
+    textAlign: "left",
+    position: "relative",
+  },
+  floatingPlayerText: {
+    flex: 1,
+    minWidth: 0,
+    display: "flex",
+    flexDirection: "column",
+    gap: "2px",
+  },
+  floatingPlayerTitle: {
+    fontSize: "13px",
+    fontWeight: 800,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  floatingPlayerSub: {
+    fontSize: "11px",
+    color: "#94A3B8",
+    fontWeight: 600,
+  },
+  floatingProgressTrack: {
+    position: "absolute",
+    left: 6,
+    right: 6,
+    bottom: 0,
+    height: "2px",
+    background: "rgba(255,255,255,.1)",
+    borderRadius: "999px",
+    overflow: "hidden",
+  },
+  floatingProgressFill: {
+    height: "100%",
+    background: "linear-gradient(90deg, #6366F1, #22D3EE)",
+    transition: "width 0.2s ease",
+  },
+  floatingIconBtn: {
+    width: "40px",
+    height: "40px",
+    borderRadius: "12px",
+    border: "none",
+    background: "rgba(99,102,241,.35)",
+    color: "white",
+    fontSize: "14px",
+    fontWeight: 900,
+    cursor: "pointer",
+    flexShrink: 0,
+  },
+  floatingIconBtnStop: {
+    width: "40px",
+    height: "40px",
+    borderRadius: "12px",
+    border: "none",
+    background: "rgba(220,38,38,.85)",
+    color: "white",
+    fontSize: "12px",
+    fontWeight: 900,
+    cursor: "pointer",
+    flexShrink: 0,
+  },
   newsIndex: {
     width: "34px",
     height: "34px",
@@ -2701,88 +3519,94 @@ const styles: Record<string, CSSProperties> = {
   link: { color: "#93C5FD", textDecoration: "none", flexShrink: 0 },
   bottomNav: {
     position: "fixed",
-    left: 0,
-    right: 0,
-    bottom: 0,
-    width: "100%",
-    maxWidth: "100%",
+    left: "50%",
+    transform: "translateX(-50%)",
+    bottom: "max(8px, env(safe-area-inset-bottom, 0px))",
+    width: "min(460px, calc(100% - 20px))",
+    maxWidth: "calc(100% - 20px)",
+    minHeight: "64px",
+    height: "auto",
     margin: 0,
-    transform: "none",
-    minHeight: "88px",
-    background: "rgba(10,15,30,.97)",
-    border: "none",
-    borderTop: "1px solid rgba(255,255,255,.12)",
-    borderRadius: "22px 22px 0 0",
-    paddingTop: "8px",
-    paddingLeft: "max(8px, env(safe-area-inset-left, 0px))",
-    paddingRight: "max(8px, env(safe-area-inset-right, 0px))",
-    paddingBottom: "max(10px, env(safe-area-inset-bottom, 0px))",
+    background: "rgba(15,23,42,.82)",
+    border: "1px solid rgba(255,255,255,.1)",
+    borderRadius: "22px",
+    padding: "6px 10px",
     display: "flex",
     justifyContent: "space-around",
-    alignItems: "flex-start",
-    backdropFilter: "blur(20px)",
-    boxShadow: "0 -10px 40px rgba(0,0,0,.45)",
+    alignItems: "center",
+    backdropFilter: "blur(24px) saturate(1.2)",
+    WebkitBackdropFilter: "blur(24px) saturate(1.2)",
+    boxShadow:
+      "0 4px 24px rgba(0,0,0,.35), 0 0 1px rgba(255,255,255,.12) inset",
     zIndex: 50,
   },
   navItem: {
     background: "transparent",
     border: "none",
-    color: "#94A3B8",
+    color: "#64748B",
     display: "flex",
     flexDirection: "column",
     alignItems: "center",
     justifyContent: "center",
-    gap: "5px",
-    minWidth: "68px",
-    minHeight: "72px",
-    padding: "6px 10px 4px",
+    gap: "2px",
+    flex: "1 1 0",
+    minWidth: 0,
+    minHeight: "52px",
+    padding: "6px 4px",
+    borderRadius: "14px",
     cursor: "pointer",
     WebkitTapHighlightColor: "transparent",
-    transition: "transform 0.15s ease",
+    transition: "transform 0.12s ease, color 0.15s ease",
   },
   navItemActive: {
-    background: "rgba(59,130,246,.22)",
-    border: "1px solid rgba(147,197,253,.35)",
-    color: "white",
+    background: "rgba(255,255,255,.06)",
+    border: "none",
+    color: "#F8FAFC",
     display: "flex",
     flexDirection: "column",
     alignItems: "center",
     justifyContent: "center",
-    gap: "5px",
-    minWidth: "72px",
-    minHeight: "72px",
-    padding: "6px 12px 4px",
-    borderRadius: "18px",
+    gap: "2px",
+    flex: "1 1 0",
+    minWidth: 0,
+    minHeight: "52px",
+    padding: "6px 4px",
+    borderRadius: "14px",
     cursor: "pointer",
-    boxShadow:
-      "0 0 24px rgba(59,130,246,.35), 0 4px 16px rgba(37,99,235,.25), inset 0 1px 0 rgba(255,255,255,.12)",
     WebkitTapHighlightColor: "transparent",
-    transition: "transform 0.15s ease",
+    transition: "transform 0.12s ease, color 0.15s ease",
   },
-  navIconWrap: {
+  navIcon: {
     display: "grid",
     placeItems: "center",
-    width: "44px",
-    height: "36px",
-    borderRadius: "14px",
-    transition: "background 0.2s ease",
+    width: "28px",
+    height: "28px",
+    borderRadius: "10px",
+    transition: "box-shadow 0.2s ease, background 0.2s ease",
   },
-  navIconWrapActive: {
-    background: "rgba(96,165,250,.2)",
-    boxShadow: "0 0 16px rgba(96,165,250,.45)",
+  navIconActive: {
+    display: "grid",
+    placeItems: "center",
+    width: "28px",
+    height: "28px",
+    borderRadius: "10px",
+    background: "rgba(96,165,250,.14)",
+    boxShadow: "0 0 14px rgba(96,165,250,.35)",
+    transition: "box-shadow 0.2s ease, background 0.2s ease",
   },
   navLabel: {
-    fontSize: "12px",
+    fontSize: "10px",
     fontWeight: 600,
-    letterSpacing: "0.02em",
-    lineHeight: 1.1,
+    letterSpacing: "0.01em",
+    lineHeight: 1.15,
+    color: "#64748B",
   },
   navLabelActive: {
-    fontSize: "12px",
-    fontWeight: 800,
-    color: "#FFFFFF",
-    letterSpacing: "0.02em",
-    lineHeight: 1.1,
+    fontSize: "10px",
+    fontWeight: 700,
+    color: "#F1F5F9",
+    letterSpacing: "0.01em",
+    lineHeight: 1.15,
   },
   aiExpandToggle: {
     marginTop: "8px",
