@@ -559,6 +559,7 @@ export default function App() {
   const [scriptFontSize, setScriptFontSize] = useState<ScriptFontSize>(readScriptFontSize);
   const [planTier, setPlanTier] = useState<PlanTier>(readPlanTier);
   const [proModalOpen, setProModalOpen] = useState(false);
+  const [authModalOpen, setAuthModalOpen] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState(() => !readOnboardingSeen());
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [splashOpen, setSplashOpen] = useState(() => !readSplashSeenSession());
@@ -1759,6 +1760,11 @@ ${newsText}
 
         {tab === "settings" && (
           <>
+            <AccountSyncSection
+              planTier={planTier}
+              onOpenAuthModal={() => setAuthModalOpen(true)}
+            />
+
             <section style={styles.controlPanel}>
               <div style={styles.controlTitle}>我的追蹤主題</div>
 
@@ -1961,6 +1967,10 @@ ${newsText}
               setProModalOpen(false);
             }}
           />
+        ) : null}
+
+        {authModalOpen ? (
+          <AuthComingSoonModal onClose={() => setAuthModalOpen(false)} />
         ) : null}
 
         {onboardingOpen && !splashOpen ? (
@@ -2418,6 +2428,87 @@ function ProUpgradeCard({
       <button type="button" onClick={onOpen} style={styles.proBannerBtn}>
         升級 Pro
       </button>
+    </div>
+  );
+}
+
+function AccountSyncSection({
+  planTier,
+  onOpenAuthModal,
+}: {
+  planTier: PlanTier;
+  onOpenAuthModal: () => void;
+}) {
+  const isPro = planTier === "pro";
+
+  return (
+    <section style={styles.accountPanel}>
+      <div style={styles.controlTitle}>帳號與同步</div>
+
+      <div style={styles.accountCard}>
+        <div style={styles.accountTop}>
+          <div style={styles.accountAvatar} aria-hidden>
+            <span style={styles.accountAvatarIcon}>👤</span>
+          </div>
+          <div style={styles.accountInfo}>
+            <div style={styles.accountStatusRow}>
+              <span style={styles.accountStatus}>尚未登入</span>
+              <span
+                style={{
+                  ...styles.planStatusBadge,
+                  ...(isPro ? styles.planStatusBadgePro : styles.planStatusBadgeFree),
+                }}
+              >
+                {isPro ? "Pro" : "Free"}
+              </span>
+            </div>
+            <p style={styles.accountHint}>
+              登入後可同步收藏、AI 歷史、主題偏好與 Pro 狀態
+            </p>
+          </div>
+        </div>
+
+        <div style={styles.accountSyncRow}>
+          <span style={styles.accountSyncLabel}>資料儲存</span>
+          <span style={styles.accountSyncValue}>本機儲存</span>
+          <span style={styles.accountSyncDot}>·</span>
+          <span style={styles.accountSyncFuture}>登入後：雲端同步</span>
+        </div>
+
+        <div style={styles.accountAuthBtns}>
+          <button type="button" onClick={onOpenAuthModal} style={styles.authBtnGoogle}>
+            <span style={styles.authBtnIcon}>G</span>
+            使用 Google 登入
+          </button>
+          <button type="button" onClick={onOpenAuthModal} style={styles.authBtnApple}>
+            <span style={styles.authBtnIcon}></span>
+            使用 Apple 登入
+          </button>
+          <button type="button" onClick={onOpenAuthModal} style={styles.authBtnEmail}>
+            Email 登入
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function AuthComingSoonModal({ onClose }: { onClose: () => void }) {
+  return (
+    <div style={styles.authModalBackdrop} onClick={onClose} role="presentation">
+      <div
+        style={styles.authModal}
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="帳號同步"
+      >
+        <div style={styles.authModalTitle}>帳號同步功能即將開放</div>
+        <div style={styles.authModalBody}>目前所有資料會安全保存在本機</div>
+        <button type="button" onClick={onClose} style={styles.authModalPrimary}>
+          我知道了
+        </button>
+      </div>
     </div>
   );
 }
@@ -3390,6 +3481,183 @@ const styles: Record<string, CSSProperties> = {
     color: "#64748B",
     lineHeight: 1.35,
     textAlign: "right",
+  },
+  accountPanel: {
+    marginTop: "4px",
+    marginBottom: "6px",
+  },
+  accountCard: {
+    marginTop: "10px",
+    padding: "14px",
+    borderRadius: "18px",
+    background: "rgba(255,255,255,.04)",
+    border: "1px solid rgba(255,255,255,.10)",
+  },
+  accountTop: {
+    display: "flex",
+    gap: "14px",
+    alignItems: "flex-start",
+  },
+  accountAvatar: {
+    width: "52px",
+    height: "52px",
+    borderRadius: "16px",
+    flexShrink: 0,
+    display: "grid",
+    placeItems: "center",
+    background: "linear-gradient(135deg, rgba(96,165,250,.18), rgba(167,139,250,.12))",
+    border: "1px solid rgba(147,197,253,.22)",
+  },
+  accountAvatarIcon: { fontSize: "22px", opacity: 0.85 },
+  accountInfo: { flex: 1, minWidth: 0 },
+  accountStatusRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    flexWrap: "wrap",
+  },
+  accountStatus: {
+    fontSize: "16px",
+    fontWeight: 900,
+    color: "#F8FAFC",
+  },
+  planStatusBadge: {
+    fontSize: "10px",
+    fontWeight: 900,
+    letterSpacing: "0.08em",
+    textTransform: "uppercase",
+    borderRadius: "999px",
+    padding: "4px 10px",
+  },
+  planStatusBadgeFree: {
+    color: "#CBD5E1",
+    background: "rgba(148,163,184,.15)",
+    border: "1px solid rgba(148,163,184,.28)",
+  },
+  planStatusBadgePro: {
+    color: "#FDE68A",
+    background: "rgba(251,191,36,.12)",
+    border: "1px solid rgba(251,191,36,.28)",
+  },
+  accountHint: {
+    margin: "8px 0 0",
+    fontSize: "13px",
+    lineHeight: 1.5,
+    color: "#94A3B8",
+  },
+  accountSyncRow: {
+    display: "flex",
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: "6px",
+    marginTop: "12px",
+    padding: "10px 12px",
+    borderRadius: "12px",
+    background: "rgba(15,23,42,.55)",
+    border: "1px solid rgba(255,255,255,.06)",
+    fontSize: "12px",
+  },
+  accountSyncLabel: { color: "#64748B", fontWeight: 700 },
+  accountSyncValue: { color: "#E2E8F0", fontWeight: 800 },
+  accountSyncDot: { color: "#475569" },
+  accountSyncFuture: { color: "#64748B", fontWeight: 600 },
+  accountAuthBtns: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "8px",
+    marginTop: "12px",
+  },
+  authBtnGoogle: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "10px",
+    width: "100%",
+    padding: "12px 14px",
+    borderRadius: "14px",
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.08)",
+    color: "#F1F5F9",
+    fontSize: "14px",
+    fontWeight: 800,
+    cursor: "pointer",
+  },
+  authBtnApple: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "10px",
+    width: "100%",
+    padding: "12px 14px",
+    borderRadius: "14px",
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.06)",
+    color: "#F1F5F9",
+    fontSize: "14px",
+    fontWeight: 800,
+    cursor: "pointer",
+  },
+  authBtnEmail: {
+    width: "100%",
+    padding: "12px 14px",
+    borderRadius: "14px",
+    border: "1px solid rgba(96,165,250,.35)",
+    background: "rgba(37,99,235,.18)",
+    color: "#E2E8F0",
+    fontSize: "14px",
+    fontWeight: 800,
+    cursor: "pointer",
+  },
+  authBtnIcon: {
+    width: "22px",
+    height: "22px",
+    borderRadius: "8px",
+    display: "grid",
+    placeItems: "center",
+    fontSize: "13px",
+    fontWeight: 900,
+    background: "rgba(255,255,255,.10)",
+  },
+  authModalBackdrop: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(2,6,23,.72)",
+    backdropFilter: "blur(4px)",
+    zIndex: 125,
+    display: "flex",
+    alignItems: "flex-end",
+    justifyContent: "center",
+    animation: "fadeIn 0.2s ease",
+  },
+  authModal: {
+    width: "100%",
+    maxWidth: "460px",
+    borderRadius: "24px 24px 0 0",
+    padding: "18px 20px 24px",
+    paddingBottom: "max(24px, env(safe-area-inset-bottom, 0px))",
+    background: "linear-gradient(180deg, #1E293B 0%, #0F172A 100%)",
+    border: "1px solid rgba(255,255,255,.12)",
+    boxShadow: "0 -16px 48px rgba(0,0,0,.5)",
+    animation: "slideUp 0.28s cubic-bezier(0.22, 1, 0.36, 1)",
+  },
+  authModalTitle: { fontSize: "18px", fontWeight: 900, marginBottom: "10px" },
+  authModalBody: {
+    fontSize: "14px",
+    lineHeight: 1.55,
+    color: "#CBD5E1",
+    whiteSpace: "pre-line",
+    marginBottom: "16px",
+  },
+  authModalPrimary: {
+    width: "100%",
+    border: "none",
+    borderRadius: "14px",
+    padding: "13px 14px",
+    fontSize: "15px",
+    fontWeight: 900,
+    cursor: "pointer",
+    color: "#0F172A",
+    background: "linear-gradient(135deg, #60A5FA, #A78BFA)",
   },
   settingInput: {
     width: "100%",
