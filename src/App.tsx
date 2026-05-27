@@ -95,9 +95,54 @@ const SPEED_MAX = 1.1;
 const SPEED_STEP = 0.05;
 const SPEED_DEFAULT = 1;
 const SCRIPT_FONT_KEY = "pns_script_font_v1";
+const PLAN_TIER_KEY = "pns_plan_tier_v1";
+const AI_DAILY_QUOTA_KEY = "pns_ai_daily_quota_v1";
 
 type ScriptFontSize = "sm" | "md" | "lg" | "xl";
 type PlaybackMode = "ai" | "news" | null;
+type PlanTier = "free" | "pro";
+
+const AI_DAILY_LIMIT: Record<PlanTier, number> = { free: 3, pro: 30 };
+const PRO_PRICING = {
+  monthly: { price: 49, label: "NT$49 / 月" },
+  yearly: { price: 499, label: "NT$499 / 年", saveLabel: "約省 15%" },
+} as const;
+
+const ONBOARDING_SEEN_KEY = "pns_onboarding_seen_v1";
+const SPLASH_SEEN_SESSION_KEY = "pns_splash_seen_session_v1";
+const SPLASH_DURATION_MS = 1500;
+
+function readOnboardingSeen(): boolean {
+  try {
+    return localStorage.getItem(ONBOARDING_SEEN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeOnboardingSeen(seen: boolean) {
+  try {
+    localStorage.setItem(ONBOARDING_SEEN_KEY, seen ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
+}
+
+function readSplashSeenSession(): boolean {
+  try {
+    return sessionStorage.getItem(SPLASH_SEEN_SESSION_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeSplashSeenSession() {
+  try {
+    sessionStorage.setItem(SPLASH_SEEN_SESSION_KEY, "1");
+  } catch {
+    /* ignore */
+  }
+}
 
 const SCRIPT_FONT_PX: Record<ScriptFontSize, number> = {
   sm: 13,
@@ -114,6 +159,57 @@ function readScriptFontSize(): ScriptFontSize {
     /* ignore */
   }
   return "md";
+}
+
+function todayYmdLocal(): string {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function readPlanTier(): PlanTier {
+  try {
+    const v = localStorage.getItem(PLAN_TIER_KEY);
+    return v === "pro" ? "pro" : "free";
+  } catch {
+    return "free";
+  }
+}
+
+function writePlanTier(tier: PlanTier) {
+  try {
+    localStorage.setItem(PLAN_TIER_KEY, tier);
+  } catch {
+    /* ignore */
+  }
+}
+
+function readAiDailyQuota(): { date: string; used: number } {
+  const today = todayYmdLocal();
+  try {
+    const raw = localStorage.getItem(AI_DAILY_QUOTA_KEY);
+    if (!raw) return { date: today, used: 0 };
+    const o = JSON.parse(raw) as { date?: unknown; used?: unknown };
+    const date = typeof o?.date === "string" ? o.date : today;
+    const used = typeof o?.used === "number" && o.used >= 0 ? Math.floor(o.used) : 0;
+    if (date !== today) return { date: today, used: 0 };
+    return { date, used };
+  } catch {
+    return { date: today, used: 0 };
+  }
+}
+
+function writeAiDailyQuota(q: { date: string; used: number }) {
+  try {
+    localStorage.setItem(
+      AI_DAILY_QUOTA_KEY,
+      JSON.stringify({ date: q.date, used: Math.max(0, Math.floor(q.used)) })
+    );
+  } catch {
+    /* ignore */
+  }
 }
 
 function splitSpeechChunks(text: string): string[] {
@@ -461,6 +557,17 @@ export default function App() {
   const [remainingMs, setRemainingMs] = useState(0);
   const [totalChunks, setTotalChunks] = useState(0);
   const [scriptFontSize, setScriptFontSize] = useState<ScriptFontSize>(readScriptFontSize);
+  const [planTier, setPlanTier] = useState<PlanTier>(readPlanTier);
+  const [proModalOpen, setProModalOpen] = useState(false);
+  const [onboardingOpen, setOnboardingOpen] = useState(() => !readOnboardingSeen());
+  const [onboardingStep, setOnboardingStep] = useState(0);
+  const [splashOpen, setSplashOpen] = useState(() => !readSplashSeenSession());
+  const [aiQuota, setAiQuota] = useState(() => {
+    const q = readAiDailyQuota();
+    // 同步回寫一次，確保 key 存在、日期一致
+    writeAiDailyQuota(q);
+    return q;
+  });
 
   const topicSelectionKeyRef = useRef<string | null>(null);
   const speechRef = useRef({
@@ -477,6 +584,43 @@ export default function App() {
 
   const selectedNews = news.filter((n) => n.selected);
   const favoriteNews = news.filter((n) => n.favorite);
+
+  const aiDailyLimit = AI_DAILY_LIMIT[planTier];
+  const aiQuotaRemaining = Math.max(0, aiDailyLimit - aiQuota.used);
+
+  useEffect(() => {
+    writePlanTier(planTier);
+  }, [planTier]);
+
+  useEffect(() => {
+    if (onboardingOpen) {
+      // 避免進入 onboarding 時繼續播放
+      window.speechSynthesis.cancel();
+    }
+  }, [onboardingOpen]);
+
+  useEffect(() => {
+    if (!splashOpen) return;
+    const t = window.setTimeout(() => {
+      writeSplashSeenSession();
+      setSplashOpen(false);
+    }, SPLASH_DURATION_MS);
+    return () => window.clearTimeout(t);
+  }, [splashOpen]);
+
+  useEffect(() => {
+    // 跨日自動重置（以本機 YYYY-MM-DD）
+    const t = window.setInterval(() => {
+      const today = todayYmdLocal();
+      setAiQuota((prev) => {
+        if (prev.date === today) return prev;
+        const next = { date: today, used: 0 };
+        writeAiDailyQuota(next);
+        return next;
+      });
+    }, 10_000);
+    return () => window.clearInterval(t);
+  }, []);
 
   const selectedTopicObjects = useMemo(
     () => topics.filter((t) => selectedTopics.includes(t.label)),
@@ -1049,10 +1193,30 @@ export default function App() {
       alert("請先勾選新聞");
       return;
     }
+    const q = readAiDailyQuota();
+    if (q.date !== todayYmdLocal()) {
+      const next = { date: todayYmdLocal(), used: 0 };
+      writeAiDailyQuota(next);
+      setAiQuota(next);
+    } else {
+      setAiQuota(q);
+    }
+    const remaining = Math.max(0, AI_DAILY_LIMIT[planTier] - q.used);
+    if (remaining <= 0) {
+      alert(
+        `今日 AI 分析次數已用完（0 / ${AI_DAILY_LIMIT[planTier]}）。\n\n提示：可在「設定」頁切換到 Pro（Demo）以增加每日額度。`
+      );
+      return;
+    }
     setAiDurationSheetOpen(true);
   };
 
   const runAiAnalysisWithDuration = (duration: AiDuration) => {
+    if (planTier !== "pro" && duration !== 1) {
+      setAiDurationSheetOpen(false);
+      setProModalOpen(true);
+      return;
+    }
     setAiDuration(duration);
     setAiDurationSheetOpen(false);
     void fetchAiSummary(duration);
@@ -1119,6 +1283,20 @@ ${newsText}
     }
 
     const duration = durationOverride ?? aiDuration;
+
+    // 每次呼叫前先檢查今日額度（用完就阻止，不呼叫 API）
+    const q = readAiDailyQuota();
+    const today = todayYmdLocal();
+    const normalized = q.date === today ? q : { date: today, used: 0 };
+    if (q.date !== normalized.date || q.used !== normalized.used) {
+      writeAiDailyQuota(normalized);
+    }
+    setAiQuota(normalized);
+    const remaining = Math.max(0, AI_DAILY_LIMIT[planTier] - normalized.used);
+    if (remaining <= 0) {
+      setAiError(`今日 AI 分析次數已用完（0 / ${AI_DAILY_LIMIT[planTier]}）。`);
+      return;
+    }
     setAiError(null);
     const fp = aiSummaryCacheFingerprint(picked, duration);
 
@@ -1230,6 +1408,15 @@ ${newsText}
         highlights,
         jsonFallback: Boolean(data.jsonFallback),
         newsTitles: picked.map((n) => n.title),
+      });
+
+      // 僅在成功產生後才扣次數（API 失敗 / 沒選新聞 / 回傳空字串都不扣）
+      setAiQuota((prev) => {
+        const today = todayYmdLocal();
+        const base = prev.date === today ? prev : { date: today, used: 0 };
+        const next = { date: today, used: base.used + 1 };
+        writeAiDailyQuota(next);
+        return next;
       });
     } catch (e) {
       setAiError(e instanceof Error ? e.message : "網路或伺服器錯誤");
@@ -1369,6 +1556,10 @@ ${newsText}
               onCopyScript={() => void copyAiScript()}
               onOpenAnalysis={openAiAnalysis}
               selectedNewsCount={selectedNews.length}
+              planTier={planTier}
+              aiQuotaRemaining={aiQuotaRemaining}
+              aiDailyLimit={aiDailyLimit}
+              onOpenProModal={() => setProModalOpen(true)}
             />
 
             <NewsList
@@ -1428,6 +1619,10 @@ ${newsText}
               onCopyScript={() => void copyAiScript()}
               onOpenAnalysis={openAiAnalysis}
               selectedNewsCount={selectedNews.length}
+              planTier={planTier}
+              aiQuotaRemaining={aiQuotaRemaining}
+              aiDailyLimit={aiDailyLimit}
+              onOpenProModal={() => setProModalOpen(true)}
             />
 
             <NewsList
@@ -1623,12 +1818,56 @@ ${newsText}
                 <code style={{ color: "#93C5FD" }}>OPENAI_API_KEY</code>{" "}
                 呼叫；分析結果會保存在本機，重新開啟仍可瀏覽最近紀錄。
               </div>
+              <div style={styles.planQuotaRow}>
+                <div style={styles.planQuotaLeft}>
+                  <div style={styles.planQuotaTitle}>今日 AI 額度</div>
+                  <div style={styles.planQuotaValue}>
+                    剩餘 {aiQuotaRemaining} / {aiDailyLimit} 次
+                  </div>
+                </div>
+                <div style={styles.planQuotaRight}>
+                  <div style={styles.planChipRow} role="group" aria-label="方案切換（Demo）">
+                    <button
+                      type="button"
+                      onClick={() => setPlanTier("free")}
+                      style={{
+                        ...styles.planChip,
+                        ...(planTier === "free" ? styles.planChipActive : {}),
+                      }}
+                    >
+                      Free
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPlanTier("pro")}
+                      style={{
+                        ...styles.planChip,
+                        ...(planTier === "pro" ? styles.planChipActive : {}),
+                      }}
+                    >
+                      Pro（Demo）
+                    </button>
+                  </div>
+                  <div style={styles.planQuotaNote}>此為本機 localStorage 模擬，尚未接付款。</div>
+                </div>
+              </div>
               <button
                 type="button"
                 onClick={copyGptPrompt}
                 style={{ ...styles.gptButton, marginTop: "12px", width: "100%" }}
               >
                 複製 GPT 精華 Prompt（備用）
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  writeOnboardingSeen(false);
+                  setOnboardingStep(0);
+                  setOnboardingOpen(true);
+                }}
+                style={{ ...styles.toolbarBtnNeutral, width: "100%", marginTop: "10px" }}
+              >
+                重新觀看新手教學
               </button>
               <button
                 type="button"
@@ -1707,6 +1946,36 @@ ${newsText}
             loading={aiLoading}
             onClose={() => setAiDurationSheetOpen(false)}
             onSelect={runAiAnalysisWithDuration}
+            planTier={planTier}
+            onOpenProModal={() => setProModalOpen(true)}
+          />
+        ) : null}
+
+        {splashOpen ? <SplashScreen /> : null}
+
+        {proModalOpen ? (
+          <ProUpgradeModal
+            onClose={() => setProModalOpen(false)}
+            onSwitchToProDemo={() => {
+              setPlanTier("pro");
+              setProModalOpen(false);
+            }}
+          />
+        ) : null}
+
+        {onboardingOpen && !splashOpen ? (
+          <OnboardingModal
+            step={onboardingStep}
+            onPrev={() => setOnboardingStep((s) => Math.max(0, s - 1))}
+            onNext={() => setOnboardingStep((s) => Math.min(3, s + 1))}
+            onSkip={() => {
+              writeOnboardingSeen(true);
+              setOnboardingOpen(false);
+            }}
+            onDone={() => {
+              writeOnboardingSeen(true);
+              setOnboardingOpen(false);
+            }}
           />
         ) : null}
       </div>
@@ -2121,6 +2390,218 @@ function CollapsibleHighlightsSection({ highlights }: { highlights: AiHighlight[
   );
 }
 
+function ProUpgradeCard({
+  planTier,
+  onOpen,
+}: {
+  planTier: PlanTier;
+  onOpen: () => void;
+}) {
+  if (planTier === "pro") {
+    return (
+      <div style={styles.proCardPro}>
+        <div style={styles.proCardTopRow}>
+          <div style={styles.proCardTitle}>你已是 Pro</div>
+          <span style={styles.proPillOk}>PRO</span>
+        </div>
+        <div style={styles.proCardSub}>每日 30 次 AI 分析 · 解鎖 3/5 分鐘 · AI 歷史紀錄</div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={styles.proCard}>
+      <div style={styles.proCardTopRow}>
+        <div style={styles.proCardTitle}>升級 Pro</div>
+        <span style={styles.proPill}>PRO</span>
+      </div>
+      <div style={styles.proPriceRow}>
+        <div style={styles.proPriceBlock}>
+          <div style={styles.proPriceLabel}>月費</div>
+          <div style={styles.proPriceValue}>{PRO_PRICING.monthly.label}</div>
+        </div>
+        <div style={styles.proPriceDivider} />
+        <div style={styles.proPriceBlock}>
+          <div style={styles.proPriceLabel}>年費</div>
+          <div style={styles.proPriceValue}>{PRO_PRICING.yearly.label}</div>
+          <div style={styles.proSaveTag}>{PRO_PRICING.yearly.saveLabel}</div>
+        </div>
+      </div>
+      <ul style={styles.proFeatureList}>
+        <li style={styles.proFeatureItem}>每日 30 次 AI 分析</li>
+        <li style={styles.proFeatureItem}>解鎖 3 / 5 分鐘 AI 主播稿</li>
+        <li style={styles.proFeatureItem}>AI 歷史紀錄</li>
+        <li style={styles.proFeatureItem}>更多收藏</li>
+        <li style={styles.proFeatureItem}>未來每日自動簡報</li>
+      </ul>
+      <div style={styles.freeLimitsNote}>
+        Free：每日 3 次 AI 分析 · 1 分鐘主播稿可用（3/5 分鐘需 Pro）
+      </div>
+      <button type="button" onClick={onOpen} style={styles.proCtaBtn}>
+        立即升級
+      </button>
+    </div>
+  );
+}
+
+function ProUpgradeModal({
+  onClose,
+  onSwitchToProDemo,
+}: {
+  onClose: () => void;
+  onSwitchToProDemo: () => void;
+}) {
+  return (
+    <div style={styles.proModalBackdrop} onClick={onClose} role="presentation">
+      <div
+        style={styles.proModal}
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Pro 訂閱"
+      >
+        <div style={styles.proModalTitle}>Pro 訂閱即將開放</div>
+        <div style={styles.proModalBody}>
+          目前為 Demo 模式，尚未接付款。\n\n你可以先切換到 Pro Demo 以體驗完整功能與每日 30 次額度。
+        </div>
+        <div style={styles.proModalActions}>
+          <button type="button" onClick={onSwitchToProDemo} style={styles.proModalPrimary}>
+            切換成 Pro Demo
+          </button>
+          <button type="button" onClick={onClose} style={styles.proModalSecondary}>
+            取消
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OnboardingModal({
+  step,
+  onPrev,
+  onNext,
+  onSkip,
+  onDone,
+}: {
+  step: number;
+  onPrev: () => void;
+  onNext: () => void;
+  onSkip: () => void;
+  onDone: () => void;
+}) {
+  const steps = [
+    {
+      title: "選主題",
+      body: "選 NBA、MLB、幣圈、台股、國際等你關心的主題，首頁會自動整理最新新聞。",
+      icon: "🎯",
+    },
+    {
+      title: "勾新聞",
+      body: "從新聞列表勾選你想聽的內容，打造今天的個人新聞清單。",
+      icon: "✅",
+    },
+    {
+      title: "AI 產生主播稿",
+      body: "一鍵產生 1／3／5 分鐘 AI 新聞稿（Free 可用 1 分鐘；3／5 分鐘需 Pro）。",
+      icon: "✨",
+    },
+    {
+      title: "播放收聽",
+      body: "像個人新聞台一樣播放、調整語速、收藏喜歡的新聞，隨時回來繼續聽。",
+      icon: "🎙️",
+    },
+  ] as const;
+
+  const total = steps.length;
+  const s = steps[Math.min(total - 1, Math.max(0, step))];
+  const isLast = step >= total - 1;
+
+  return (
+    <div style={styles.onboardingBackdrop} role="presentation" onClick={onSkip}>
+      <div
+        style={styles.onboardingModal}
+        role="dialog"
+        aria-modal="true"
+        aria-label="新手教學"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={styles.onboardingTopRow}>
+          <span style={styles.onboardingBrand}>AI個人新聞台</span>
+          <button type="button" onClick={onSkip} style={styles.onboardingSkipBtn}>
+            略過
+          </button>
+        </div>
+
+        <div style={styles.onboardingCard}>
+          <div style={styles.onboardingIcon}>{s.icon}</div>
+          <div style={styles.onboardingStepKicker}>
+            Step {step + 1} / {total}
+          </div>
+          <div style={styles.onboardingTitle}>{s.title}</div>
+          <div style={styles.onboardingBody}>{s.body}</div>
+        </div>
+
+        <div style={styles.onboardingDots} aria-hidden>
+          {steps.map((_, i) => (
+            <span
+              key={i}
+              style={{
+                ...styles.onboardingDot,
+                ...(i === step ? styles.onboardingDotActive : {}),
+              }}
+            />
+          ))}
+        </div>
+
+        <div style={styles.onboardingActions}>
+          <button
+            type="button"
+            onClick={onPrev}
+            style={{
+              ...styles.onboardingSecondary,
+              opacity: step === 0 ? 0.5 : 1,
+            }}
+            disabled={step === 0}
+          >
+            上一步
+          </button>
+          {isLast ? (
+            <button type="button" onClick={onDone} style={styles.onboardingPrimary}>
+              開始使用
+            </button>
+          ) : (
+            <button type="button" onClick={onNext} style={styles.onboardingPrimary}>
+              下一步
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SplashScreen() {
+  return (
+    <div style={styles.splashWrap} role="status" aria-label="啟動畫面">
+      <div style={styles.splashCard}>
+        <div style={styles.splashIconWrap} aria-hidden>
+          <div style={styles.splashIcon}>🎙️</div>
+          <div style={styles.splashPulse} />
+        </div>
+        <div style={styles.splashTitle}>AI個人新聞台</div>
+        <div style={styles.splashSubtitle}>為你整理今日重點</div>
+        <div style={styles.splashLoader} aria-hidden>
+          <span className="splash-dot" />
+          <span className="splash-dot" />
+          <span className="splash-dot" />
+        </div>
+        <div style={styles.splashMeta}>正在準備你的新聞台…</div>
+      </div>
+    </div>
+  );
+}
+
 function AiSummaryPanel({
   aiLoading,
   aiError,
@@ -2137,6 +2618,10 @@ function AiSummaryPanel({
   onCopyScript,
   onOpenAnalysis,
   selectedNewsCount,
+  planTier,
+  aiQuotaRemaining,
+  aiDailyLimit,
+  onOpenProModal,
 }: {
   aiLoading: boolean;
   aiError: string | null;
@@ -2153,6 +2638,10 @@ function AiSummaryPanel({
   onCopyScript: () => void;
   onOpenAnalysis: () => void;
   selectedNewsCount: number;
+  planTier: PlanTier;
+  aiQuotaRemaining: number;
+  aiDailyLimit: number;
+  onOpenProModal: () => void;
 }) {
   const scriptFontPx = SCRIPT_FONT_PX[scriptFontSize];
   const playbackActive = isSpeaking || isPaused;
@@ -2162,7 +2651,12 @@ function AiSummaryPanel({
     <div style={styles.aiSummaryWrap}>
       <div style={styles.aiSummaryCard}>
         <div style={styles.aiSummaryHeaderRow}>
-          <span style={styles.aiSummaryKicker}>AI 分析</span>
+          <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+            <span style={styles.aiSummaryKicker}>AI 分析</span>
+            <span style={styles.aiQuotaLine}>
+              今日剩餘 {aiQuotaRemaining} / {aiDailyLimit} 次（{planTier === "pro" ? "Pro" : "Free"}）
+            </span>
+          </div>
           {selectedScriptDuration != null && aiScript.trim() ? (
             <span style={styles.aiSummaryBadge}>
               已產生 · {selectedScriptDuration} 分鐘
@@ -2235,6 +2729,14 @@ function AiSummaryPanel({
           </div>
         )}
 
+        <ProUpgradeCard
+          planTier={planTier}
+          onOpen={() => {
+            if (planTier === "pro") return;
+            onOpenProModal();
+          }}
+        />
+
         {!aiLoading && selectedNewsCount > 0 ? (
           <button
             type="button"
@@ -2253,10 +2755,14 @@ function AiDurationSheet({
   loading,
   onClose,
   onSelect,
+  planTier,
+  onOpenProModal,
 }: {
   loading: boolean;
   onClose: () => void;
   onSelect: (d: AiDuration) => void;
+  planTier: PlanTier;
+  onOpenProModal: () => void;
 }) {
   return (
     <div
@@ -2283,12 +2789,26 @@ function AiDurationSheet({
             <button
               key={d}
               type="button"
-              disabled={loading}
+              disabled={loading || (planTier !== "pro" && d !== 1)}
               className="ai-duration-option"
-              onClick={() => onSelect(d)}
-              style={styles.aiSheetOptionBtn}
+              onClick={() => {
+                if (planTier !== "pro" && d !== 1) {
+                  onOpenProModal();
+                  return;
+                }
+                onSelect(d);
+              }}
+              style={{
+                ...styles.aiSheetOptionBtn,
+                ...(planTier !== "pro" && d !== 1 ? styles.aiSheetOptionLocked : {}),
+              }}
             >
-              <span style={styles.aiSheetOptionMain}>{d} 分鐘</span>
+              <span style={styles.aiSheetOptionMain}>
+                {d} 分鐘{" "}
+                {planTier !== "pro" && d !== 1 ? (
+                  <span style={styles.proLockTag}>🔒 Pro</span>
+                ) : null}
+              </span>
               <span style={styles.aiSheetOptionSub}>
                 {d === 1
                   ? "快報 · 依重要度詳略"
@@ -2845,6 +3365,55 @@ const styles: Record<string, CSSProperties> = {
     fontSize: "13px",
     lineHeight: 1.5,
   },
+  planQuotaRow: {
+    display: "flex",
+    gap: "12px",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    flexWrap: "wrap",
+    marginTop: "12px",
+    padding: "12px",
+    borderRadius: "16px",
+    background: "rgba(255,255,255,.05)",
+    border: "1px solid rgba(255,255,255,.08)",
+  },
+  planQuotaLeft: { minWidth: 0 },
+  planQuotaTitle: { fontSize: "12px", fontWeight: 900, color: "#93C5FD" },
+  planQuotaValue: {
+    marginTop: "4px",
+    fontSize: "14px",
+    fontWeight: 900,
+    color: "#E2E8F0",
+  },
+  planQuotaRight: { flex: "1 1 180px", minWidth: 0 },
+  planChipRow: {
+    display: "flex",
+    gap: "6px",
+    justifyContent: "flex-end",
+    flexWrap: "wrap",
+  },
+  planChip: {
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.06)",
+    color: "#94A3B8",
+    borderRadius: "999px",
+    padding: "6px 12px",
+    fontSize: "12px",
+    fontWeight: 800,
+    cursor: "pointer",
+  },
+  planChipActive: {
+    background: "rgba(45,212,191,.18)",
+    border: "1px solid rgba(45,212,191,.45)",
+    color: "#CCFBF1",
+  },
+  planQuotaNote: {
+    marginTop: "6px",
+    fontSize: "11px",
+    color: "#64748B",
+    lineHeight: 1.35,
+    textAlign: "right",
+  },
   settingInput: {
     width: "100%",
     boxSizing: "border-box",
@@ -2965,6 +3534,15 @@ const styles: Record<string, CSSProperties> = {
     fontWeight: 800,
     letterSpacing: "0.12em",
     textTransform: "uppercase",
+  },
+  aiQuotaLine: {
+    fontSize: "12px",
+    color: "#64748B",
+    fontWeight: 700,
+    lineHeight: 1.2,
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
   },
   aiSummaryBody: {
     fontSize: "14px",
@@ -3816,9 +4394,26 @@ const styles: Record<string, CSSProperties> = {
     cursor: "pointer",
     textAlign: "left",
   },
+  aiSheetOptionLocked: {
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.06)",
+    color: "#CBD5E1",
+  },
   aiSheetOptionMain: {
     fontSize: "16px",
     fontWeight: 900,
+  },
+  proLockTag: {
+    display: "inline-block",
+    marginLeft: "8px",
+    fontSize: "12px",
+    fontWeight: 900,
+    color: "#FDE68A",
+    background: "rgba(251,191,36,.12)",
+    border: "1px solid rgba(251,191,36,.25)",
+    padding: "2px 8px",
+    borderRadius: "999px",
+    verticalAlign: "middle",
   },
   aiSheetOptionSub: {
     fontSize: "12px",
@@ -3837,4 +4432,287 @@ const styles: Record<string, CSSProperties> = {
     fontSize: "14px",
     cursor: "pointer",
   },
+  proCard: {
+    marginTop: "12px",
+    borderRadius: "18px",
+    padding: "14px 14px 16px",
+    background:
+      "linear-gradient(135deg, rgba(124,58,237,.22) 0%, rgba(15,23,42,.88) 55%, rgba(251,191,36,.12) 100%)",
+    border: "1px solid rgba(167,139,250,.35)",
+    boxShadow: "0 10px 34px rgba(0,0,0,.35)",
+  },
+  proCardPro: {
+    marginTop: "12px",
+    borderRadius: "18px",
+    padding: "14px 14px 16px",
+    background: "rgba(16,185,129,.08)",
+    border: "1px solid rgba(52,211,153,.25)",
+  },
+  proCardTopRow: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px" },
+  proCardTitle: { fontSize: "15px", fontWeight: 900, color: "#F8FAFC" },
+  proCardSub: { marginTop: "6px", fontSize: "12px", color: "#94A3B8", lineHeight: 1.45 },
+  proPill: {
+    fontSize: "10px",
+    fontWeight: 900,
+    letterSpacing: "0.14em",
+    color: "#FDE68A",
+    background: "rgba(251,191,36,.12)",
+    border: "1px solid rgba(251,191,36,.25)",
+    borderRadius: "999px",
+    padding: "4px 10px",
+  },
+  proPillOk: {
+    fontSize: "10px",
+    fontWeight: 900,
+    letterSpacing: "0.14em",
+    color: "#A7F3D0",
+    background: "rgba(16,185,129,.14)",
+    border: "1px solid rgba(52,211,153,.22)",
+    borderRadius: "999px",
+    padding: "4px 10px",
+  },
+  proPriceRow: { display: "flex", alignItems: "stretch", gap: "12px", marginTop: "10px" },
+  proPriceBlock: { flex: 1, minWidth: 0 },
+  proPriceDivider: { width: "1px", background: "rgba(255,255,255,.10)" },
+  proPriceLabel: { fontSize: "11px", color: "#94A3B8", fontWeight: 700 },
+  proPriceValue: { marginTop: "2px", fontSize: "14px", fontWeight: 900, color: "#F8FAFC" },
+  proSaveTag: { marginTop: "4px", fontSize: "11px", fontWeight: 800, color: "#FDE68A" },
+  proFeatureList: { margin: "12px 0 0", padding: "0 0 0 18px", color: "#E2E8F0" },
+  proFeatureItem: { margin: "6px 0", fontSize: "13px", lineHeight: 1.4 },
+  freeLimitsNote: { marginTop: "10px", fontSize: "12px", color: "#94A3B8", lineHeight: 1.45 },
+  proCtaBtn: {
+    width: "100%",
+    marginTop: "12px",
+    border: "none",
+    borderRadius: "14px",
+    padding: "12px 14px",
+    fontSize: "14px",
+    fontWeight: 900,
+    cursor: "pointer",
+    color: "#0F172A",
+    background: "linear-gradient(135deg, #FDE68A, #A78BFA)",
+    boxShadow: "0 10px 26px rgba(167,139,250,.22)",
+  },
+  proModalBackdrop: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(2,6,23,.72)",
+    backdropFilter: "blur(4px)",
+    zIndex: 120,
+    display: "flex",
+    alignItems: "flex-end",
+    justifyContent: "center",
+    animation: "fadeIn 0.2s ease",
+  },
+  proModal: {
+    width: "100%",
+    maxWidth: "460px",
+    borderRadius: "24px 24px 0 0",
+    padding: "14px 18px 24px",
+    paddingBottom: "max(24px, env(safe-area-inset-bottom, 0px))",
+    background: "linear-gradient(180deg, #1E293B 0%, #0F172A 100%)",
+    border: "1px solid rgba(255,255,255,.12)",
+    boxShadow: "0 -16px 48px rgba(0,0,0,.5)",
+    animation: "slideUp 0.28s cubic-bezier(0.22, 1, 0.36, 1)",
+  },
+  proModalTitle: { fontSize: "18px", fontWeight: 900, marginBottom: "8px" },
+  proModalBody: { whiteSpace: "pre-line", fontSize: "13px", color: "#CBD5E1", lineHeight: 1.5 },
+  proModalActions: { display: "flex", flexDirection: "column", gap: "10px", marginTop: "14px" },
+  proModalPrimary: {
+    width: "100%",
+    border: "none",
+    borderRadius: "14px",
+    padding: "12px 14px",
+    fontSize: "14px",
+    fontWeight: 900,
+    cursor: "pointer",
+    color: "#0F172A",
+    background: "linear-gradient(135deg, #FDE68A, #A78BFA)",
+  },
+  proModalSecondary: {
+    width: "100%",
+    border: "1px solid rgba(255,255,255,.12)",
+    borderRadius: "14px",
+    padding: "12px 14px",
+    fontSize: "14px",
+    fontWeight: 700,
+    cursor: "pointer",
+    color: "#CBD5E1",
+    background: "rgba(255,255,255,.06)",
+  },
+  onboardingBackdrop: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(2,6,23,.80)",
+    backdropFilter: "blur(6px)",
+    zIndex: 140,
+    display: "flex",
+    alignItems: "flex-end",
+    justifyContent: "center",
+    animation: "fadeIn 0.2s ease",
+  },
+  onboardingModal: {
+    width: "100%",
+    maxWidth: "460px",
+    borderRadius: "26px 26px 0 0",
+    padding: "14px 18px 24px",
+    paddingBottom: "max(24px, env(safe-area-inset-bottom, 0px))",
+    background: "linear-gradient(180deg, rgba(30,41,59,.98) 0%, rgba(15,23,42,.98) 100%)",
+    border: "1px solid rgba(255,255,255,.12)",
+    boxShadow: "0 -18px 56px rgba(0,0,0,.6)",
+    animation: "slideUp 0.28s cubic-bezier(0.22, 1, 0.36, 1)",
+  },
+  onboardingTopRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "12px",
+    marginBottom: "12px",
+  },
+  onboardingBrand: {
+    fontSize: "12px",
+    fontWeight: 900,
+    letterSpacing: "0.10em",
+    color: "#93C5FD",
+    textTransform: "uppercase",
+  },
+  onboardingSkipBtn: {
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.06)",
+    color: "#CBD5E1",
+    borderRadius: "999px",
+    padding: "8px 12px",
+    fontWeight: 800,
+    fontSize: "12px",
+    cursor: "pointer",
+  },
+  onboardingCard: {
+    borderRadius: "18px",
+    padding: "16px 16px 18px",
+    background:
+      "radial-gradient(circle at top left, rgba(99,102,241,.35) 0%, transparent 55%), linear-gradient(165deg, rgba(255,255,255,.08) 0%, rgba(255,255,255,.04) 100%)",
+    border: "1px solid rgba(255,255,255,.10)",
+  },
+  onboardingIcon: {
+    width: "54px",
+    height: "54px",
+    borderRadius: "18px",
+    display: "grid",
+    placeItems: "center",
+    fontSize: "26px",
+    background: "rgba(255,255,255,.06)",
+    border: "1px solid rgba(255,255,255,.10)",
+    marginBottom: "10px",
+  },
+  onboardingStepKicker: {
+    fontSize: "11px",
+    fontWeight: 800,
+    color: "#94A3B8",
+    letterSpacing: "0.08em",
+    textTransform: "uppercase",
+  },
+  onboardingTitle: {
+    marginTop: "6px",
+    fontSize: "18px",
+    fontWeight: 900,
+    letterSpacing: "-0.02em",
+  },
+  onboardingBody: {
+    marginTop: "8px",
+    fontSize: "13px",
+    lineHeight: 1.55,
+    color: "#CBD5E1",
+  },
+  onboardingDots: {
+    display: "flex",
+    justifyContent: "center",
+    gap: "8px",
+    marginTop: "14px",
+    marginBottom: "12px",
+  },
+  onboardingDot: {
+    width: "7px",
+    height: "7px",
+    borderRadius: "999px",
+    background: "rgba(148,163,184,.35)",
+  },
+  onboardingDotActive: {
+    width: "18px",
+    background: "linear-gradient(90deg, #60A5FA, #A78BFA)",
+  },
+  onboardingActions: {
+    display: "flex",
+    gap: "10px",
+  },
+  onboardingPrimary: {
+    flex: 1,
+    border: "none",
+    borderRadius: "14px",
+    padding: "12px 14px",
+    fontSize: "14px",
+    fontWeight: 900,
+    cursor: "pointer",
+    color: "#0F172A",
+    background: "linear-gradient(135deg, #60A5FA, #A78BFA)",
+  },
+  onboardingSecondary: {
+    flex: 1,
+    border: "1px solid rgba(255,255,255,.14)",
+    borderRadius: "14px",
+    padding: "12px 14px",
+    fontSize: "14px",
+    fontWeight: 800,
+    cursor: "pointer",
+    color: "#CBD5E1",
+    background: "rgba(255,255,255,.06)",
+  },
+  splashWrap: {
+    position: "fixed",
+    inset: 0,
+    zIndex: 200,
+    display: "grid",
+    placeItems: "center",
+    padding: "24px",
+    background:
+      "radial-gradient(circle at 20% 10%, rgba(99,102,241,.38) 0%, transparent 40%), radial-gradient(circle at 80% 30%, rgba(34,211,238,.22) 0%, transparent 45%), linear-gradient(180deg, #020617 0%, #0B1220 100%)",
+  },
+  splashCard: {
+    width: "min(420px, 92vw)",
+    borderRadius: "24px",
+    padding: "22px 18px 20px",
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(15,23,42,.62)",
+    backdropFilter: "blur(18px)",
+    boxShadow: "0 18px 60px rgba(0,0,0,.55)",
+    textAlign: "center",
+  },
+  splashIconWrap: {
+    width: "78px",
+    height: "78px",
+    borderRadius: "26px",
+    margin: "0 auto 14px",
+    display: "grid",
+    placeItems: "center",
+    position: "relative",
+    background: "linear-gradient(135deg, rgba(96,165,250,.22), rgba(167,139,250,.20))",
+    border: "1px solid rgba(147,197,253,.22)",
+  },
+  splashIcon: { fontSize: "34px", position: "relative", zIndex: 1 },
+  splashPulse: {
+    position: "absolute",
+    inset: 10,
+    borderRadius: "20px",
+    background: "rgba(96,165,250,.10)",
+    filter: "blur(10px)",
+  },
+  splashTitle: { fontSize: "20px", fontWeight: 900, letterSpacing: "-0.02em" },
+  splashSubtitle: { marginTop: "6px", fontSize: "13px", color: "#94A3B8", fontWeight: 700 },
+  splashLoader: {
+    marginTop: "14px",
+    display: "flex",
+    justifyContent: "center",
+    gap: "6px",
+    height: "12px",
+  },
+  splashMeta: { marginTop: "10px", fontSize: "12px", color: "#64748B", fontWeight: 600 },
 };
