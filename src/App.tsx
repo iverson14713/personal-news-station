@@ -2069,6 +2069,58 @@ function CollapsibleText({
   );
 }
 
+const HIGHLIGHTS_PREVIEW_COUNT = 2;
+const HIGHLIGHTS_COLLAPSED_MAX_PX = 300;
+
+function CollapsibleHighlightsSection({ highlights }: { highlights: AiHighlight[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasMore = highlights.length > HIGHLIGHTS_PREVIEW_COUNT;
+  const visible = expanded
+    ? highlights
+    : highlights.slice(0, HIGHLIGHTS_PREVIEW_COUNT);
+
+  return (
+    <div style={styles.aiHighlightsSection}>
+      <div style={styles.aiHighlightsSectionHead}>
+        <span style={styles.aiSubheadingMuted}>今日重點</span>
+        <span style={styles.aiHighlightsCount}>共 {highlights.length} 則</span>
+      </div>
+
+      <div
+        className={
+          expanded ? "ai-highlights-panel-expanded" : "ai-highlights-panel-collapsed"
+        }
+        style={{
+          ...styles.aiHighlightsPanel,
+          ...(hasMore && !expanded
+            ? { maxHeight: `${HIGHLIGHTS_COLLAPSED_MAX_PX}px` }
+            : {}),
+        }}
+      >
+        <ul style={styles.aiHighlightList}>
+          {visible.map((h, idx) => (
+            <CollapsibleHighlightItem key={idx} highlight={h} />
+          ))}
+        </ul>
+        {hasMore && !expanded ? <div style={styles.aiHighlightsFade} aria-hidden /> : null}
+      </div>
+
+      {hasMore ? (
+        <button
+          type="button"
+          className="ai-highlights-section-toggle"
+          onClick={() => setExpanded((v) => !v)}
+          style={styles.aiHighlightsSectionToggle}
+        >
+          {expanded
+            ? "▲ 收合重點新聞"
+            : `▼ 展開更多重點新聞（還有 ${highlights.length - HIGHLIGHTS_PREVIEW_COUNT} 則）`}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function AiSummaryPanel({
   aiLoading,
   aiError,
@@ -2130,35 +2182,27 @@ function AiSummaryPanel({
               </div>
             ) : null}
             {aiHighlights.length > 0 ? (
-              <div style={styles.aiHighlightsSection}>
-                <div style={styles.aiSubheading}>今日重點</div>
-                <ul style={styles.aiHighlightList}>
-                  {aiHighlights.map((h, idx) => (
-                    <CollapsibleHighlightItem key={idx} highlight={h} />
-                  ))}
-                </ul>
-              </div>
+              <CollapsibleHighlightsSection highlights={aiHighlights} />
             ) : null}
             {aiScript.trim() ? (
-              <div style={styles.aiScriptSection}>
+              <div style={styles.aiScriptSectionPrimary}>
                 <div style={styles.aiScriptSectionHead}>
-                  <div style={styles.aiSubheading}>AI 主播稿</div>
+                  <div style={styles.aiScriptTitleRow}>
+                    <span style={styles.aiScriptTitle}>AI 主播稿</span>
+                    <span style={styles.aiScriptPrimaryBadge}>主要內容</span>
+                  </div>
                   <ScriptFontSizeControl
                     value={scriptFontSize}
                     onChange={onScriptFontSizeChange}
                   />
                 </div>
-                <CollapsibleText
-                  text={aiScript.trim()}
-                  style={{ ...styles.aiSummaryBody, fontSize: `${scriptFontPx}px` }}
-                />
                 <div style={styles.aiScriptActions}>
                   <button
                     type="button"
                     onClick={onPlayScript}
                     style={styles.aiScriptPlayBtn}
                   >
-                    {playbackActive ? "▶ 前往播放頁" : "播放 AI 新聞稿"}
+                    {playbackActive ? "▶ 前往播放頁" : "▶ 播放 AI 新聞稿"}
                   </button>
                   {playbackActive ? (
                     <button
@@ -2177,6 +2221,10 @@ function AiSummaryPanel({
                     複製
                   </button>
                 </div>
+                <CollapsibleText
+                  text={aiScript.trim()}
+                  style={{ ...styles.aiSummaryBody, fontSize: `${scriptFontPx}px` }}
+                />
               </div>
             ) : null}
           </>
@@ -2980,7 +3028,85 @@ const styles: Record<string, CSSProperties> = {
     marginBottom: "10px",
   },
   aiHighlightsSection: {
-    marginBottom: "14px",
+    marginBottom: "12px",
+  },
+  aiHighlightsSectionHead: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "8px",
+    marginBottom: "8px",
+  },
+  aiSubheadingMuted: {
+    fontSize: "11px",
+    fontWeight: 800,
+    color: "#64748B",
+    letterSpacing: "0.06em",
+    textTransform: "uppercase",
+  },
+  aiHighlightsCount: {
+    fontSize: "11px",
+    fontWeight: 700,
+    color: "#64748B",
+  },
+  aiHighlightsPanel: {
+    position: "relative",
+    overflow: "hidden",
+    borderRadius: "14px",
+    transition: "max-height 0.35s cubic-bezier(0.22, 1, 0.36, 1)",
+  },
+  aiHighlightsFade: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: "72px",
+    background: "linear-gradient(180deg, transparent, rgba(15,23,42,.95))",
+    pointerEvents: "none",
+  },
+  aiHighlightsSectionToggle: {
+    width: "100%",
+    marginTop: "8px",
+    padding: "10px 12px",
+    border: "1px solid rgba(255,255,255,.1)",
+    borderRadius: "12px",
+    background: "rgba(255,255,255,.05)",
+    color: "#5EEAD4",
+    fontSize: "13px",
+    fontWeight: 700,
+    cursor: "pointer",
+    WebkitTapHighlightColor: "transparent",
+  },
+  aiScriptSectionPrimary: {
+    marginTop: "2px",
+    marginBottom: "4px",
+    padding: "14px 14px 16px",
+    borderRadius: "18px",
+    background:
+      "linear-gradient(165deg, rgba(30,58,138,.35) 0%, rgba(15,23,42,.75) 100%)",
+    border: "1px solid rgba(96,165,250,.35)",
+    boxShadow: "0 8px 28px rgba(37,99,235,.18), inset 0 1px 0 rgba(255,255,255,.08)",
+  },
+  aiScriptTitleRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    flexWrap: "wrap",
+  },
+  aiScriptTitle: {
+    fontSize: "15px",
+    fontWeight: 900,
+    color: "#F8FAFC",
+    letterSpacing: "-0.02em",
+  },
+  aiScriptPrimaryBadge: {
+    fontSize: "10px",
+    fontWeight: 800,
+    color: "#BFDBFE",
+    background: "rgba(59,130,246,.3)",
+    border: "1px solid rgba(147,197,253,.4)",
+    borderRadius: "999px",
+    padding: "3px 8px",
   },
   aiSubheading: {
     fontSize: "12px",
@@ -3039,16 +3165,13 @@ const styles: Record<string, CSSProperties> = {
     whiteSpace: "pre-wrap",
     wordBreak: "break-word",
   },
-  aiScriptSection: {
-    marginTop: "4px",
-  },
   aiScriptSectionHead: {
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
     gap: "10px",
     flexWrap: "wrap",
-    marginBottom: "8px",
+    marginBottom: "10px",
   },
   scriptFontRow: {
     display: "flex",
@@ -3094,7 +3217,8 @@ const styles: Record<string, CSSProperties> = {
     display: "flex",
     flexWrap: "wrap",
     gap: "8px",
-    marginTop: "12px",
+    marginTop: 0,
+    marginBottom: "12px",
   },
   aiScriptPlayBtn: {
     background: "linear-gradient(135deg, #2563EB, #4F46E5)",
