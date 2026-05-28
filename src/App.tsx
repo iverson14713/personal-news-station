@@ -701,6 +701,7 @@ export default function App() {
   const lastTtsErrorAtRef = useRef(0);
   const ttsStartWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ttsStartTokenRef = useRef(0);
+  const isManualStopRef = useRef(false);
 
   const selectedNews = news.filter((n) => n.selected);
   const favoriteNews = news.filter((n) => n.favorite);
@@ -1218,8 +1219,23 @@ export default function App() {
         if (speechRef.current.chunkIndex !== index) return;
         speakChunkAt(index + 1);
       };
-      utterance.onerror = () => {
+      utterance.onerror = (ev) => {
         if (speechRef.current.chunkIndex !== index) return;
+        if (isManualStopRef.current) return;
+        const err =
+          typeof (ev as unknown as { error?: unknown }).error === "string"
+            ? String((ev as unknown as { error?: string }).error)
+            : "";
+        const errNorm = err.trim().toLowerCase();
+        if (
+          errNorm === "interrupted" ||
+          errNorm === "canceled" ||
+          errNorm === "cancelled" ||
+          errNorm === "cancel" ||
+          (errNorm.includes("synthesis-failed") && isManualStopRef.current)
+        ) {
+          return;
+        }
         clearProgressTimer();
         setIsSpeaking(false);
         setIsPaused(false);
@@ -1234,6 +1250,8 @@ export default function App() {
         if (!("speechSynthesis" in window)) {
           throw new Error("Speech synthesis not supported");
         }
+        // 若能順利呼叫 speak，視為已重新啟動成功
+        isManualStopRef.current = false;
         window.speechSynthesis.speak(utterance);
       } catch {
         clearProgressTimer();
@@ -1254,6 +1272,7 @@ export default function App() {
   );
 
   const stopPlayback = useCallback(() => {
+    isManualStopRef.current = true;
     window.speechSynthesis.cancel();
     clearProgressTimer();
     if (ttsStartWatchdogRef.current != null) {
@@ -1295,6 +1314,7 @@ export default function App() {
       return;
     }
 
+    isManualStopRef.current = false;
     window.speechSynthesis.cancel();
     clearProgressTimer();
     if (ttsStartWatchdogRef.current != null) {
@@ -1388,6 +1408,7 @@ export default function App() {
       0
     );
     const idx = s.chunkIndex;
+    isManualStopRef.current = true;
     window.speechSynthesis.cancel();
     setIsPaused(false);
     speakChunkAt(idx);
@@ -2258,7 +2279,20 @@ ${newsText}
 
               <select
                 value={voiceName}
-                onChange={(e) => setVoiceName(e.target.value)}
+                onChange={(e) => {
+                  isManualStopRef.current = true;
+                  setVoiceName(e.target.value);
+                  if (isSpeaking || isPaused) {
+                    const idx = speechRef.current.chunkIndex;
+                    try {
+                      window.speechSynthesis.cancel();
+                    } catch {
+                      /* ignore */
+                    }
+                    setIsPaused(false);
+                    speakChunkAt(idx);
+                  }
+                }}
                 style={styles.select}
               >
                 {voices.map((voice) => (
