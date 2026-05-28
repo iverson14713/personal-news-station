@@ -2234,6 +2234,21 @@ ${newsText}
                   </div>
                 </div>
               </div>
+              <button
+                type="button"
+                onClick={() => {
+                  try {
+                    localStorage.removeItem("pns_ai_daily_quota_v1");
+                  } catch {
+                    /* ignore */
+                  }
+                  setAiQuota({ date: todayYmdLocal(), used: 0 });
+                  alert("已重置今日 AI 次數");
+                }}
+                style={styles.dangerFullButton}
+              >
+                重置 AI 次數
+              </button>
             </section>
 
             <section style={styles.controlPanel}>
