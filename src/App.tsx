@@ -45,6 +45,17 @@ type AiHistoryEntry = {
   newsTitles: string[];
 };
 
+type AiFavoriteEntry = {
+  id: string;
+  createdAt: number;
+  duration: AiDuration;
+  highlights: AiHighlight[];
+  script: string;
+  newsTitles: string[];
+  selectedTopics?: string[];
+  keyword?: string;
+};
+
 type VideoItem = {
   id: string;
   title: string;
@@ -95,6 +106,7 @@ const AI_SUMMARY_CACHE_KEY = "pns_ai_summary_v1";
 const AI_SUMMARY_CACHE_MS = 30 * 60 * 1000;
 const AI_HISTORY_KEY = "pns_ai_history_v1";
 const AI_HISTORY_MAX = 20;
+const AI_FAVORITES_KEY = "pns_ai_favorites_v1";
 const PLAYBACK_SPEED_KEY = "pns_playback_speed_v1";
 const SPEED_MIN = 0.8;
 const SPEED_MAX = 1.1;
@@ -395,6 +407,35 @@ function writeAiHistory(entries: AiHistoryEntry[]) {
   }
 }
 
+function readAiFavorites(): AiFavoriteEntry[] {
+  try {
+    const raw = localStorage.getItem(AI_FAVORITES_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw) as unknown;
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .filter(
+        (x): x is AiFavoriteEntry =>
+          !!x &&
+          typeof x === "object" &&
+          typeof (x as AiFavoriteEntry).id === "string" &&
+          typeof (x as AiFavoriteEntry).script === "string" &&
+          typeof (x as AiFavoriteEntry).createdAt === "number"
+      )
+      .slice(0, 100);
+  } catch {
+    return [];
+  }
+}
+
+function writeAiFavorites(entries: AiFavoriteEntry[]) {
+  try {
+    localStorage.setItem(AI_FAVORITES_KEY, JSON.stringify(entries.slice(0, 100)));
+  } catch {
+    /* ignore */
+  }
+}
+
 function formatAiHistoryWhen(savedAt: number) {
   try {
     return new Date(savedAt).toLocaleString("zh-TW", {
@@ -612,6 +653,10 @@ export default function App() {
   const [aiScript, setAiScript] = useState("");
   const [aiHighlights, setAiHighlights] = useState<AiHighlight[]>([]);
   const [aiJsonFallback, setAiJsonFallback] = useState(false);
+  const [aiLastSavedAt, setAiLastSavedAt] = useState<number | null>(null);
+  const [aiLastDuration, setAiLastDuration] = useState<AiDuration | null>(null);
+  const [aiLastNewsTitles, setAiLastNewsTitles] = useState<string[]>([]);
+  const [aiLastFp, setAiLastFp] = useState<string | null>(null);
   const [aiDuration, setAiDuration] = useState<AiDuration>(1);
   const [selectedScriptDuration, setSelectedScriptDuration] = useState<
     AiDuration | null
@@ -633,6 +678,7 @@ export default function App() {
   const [splashOpen, setSplashOpen] = useState(() => !readSplashSeenSession());
   const [aiHistory, setAiHistory] = useState<AiHistoryEntry[]>(() => readAiHistory());
   const [activeAiHistoryId, setActiveAiHistoryId] = useState<string | null>(null);
+  const [aiFavorites, setAiFavorites] = useState<AiFavoriteEntry[]>(() => readAiFavorites());
   const [aiQuota, setAiQuota] = useState(() => {
     const q = readAiDailyQuota();
     // 同步回寫一次，確保 key 存在、日期一致
@@ -1554,6 +1600,7 @@ ${newsText}
           script?: string;
           highlights?: AiHighlight[];
           jsonFallback?: boolean;
+          newsTitles?: string[];
         };
         if (
           o.fp === fp &&
@@ -1569,6 +1616,14 @@ ${newsText}
           setSelectedScriptDuration(
             o.duration === 3 || o.duration === 5 ? o.duration : 1
           );
+          setAiLastSavedAt(o.savedAt);
+          setAiLastDuration(o.duration === 3 || o.duration === 5 ? o.duration : duration);
+          setAiLastNewsTitles(
+            Array.isArray(o.newsTitles) && o.newsTitles.every((t) => typeof t === "string")
+              ? (o.newsTitles as string[])
+              : picked.map((n) => n.title)
+          );
+          setAiLastFp(fp);
           return;
         }
       }
@@ -1637,6 +1692,7 @@ ${newsText}
             highlights,
             script,
             jsonFallback: Boolean(data.jsonFallback),
+            newsTitles: picked.map((n) => n.title),
           })
         );
       } catch {
@@ -1654,6 +1710,10 @@ ${newsText}
         newsTitles: picked.map((n) => n.title),
       };
       appendAiHistoryEntry(historyEntry);
+      setAiLastSavedAt(savedAt);
+      setAiLastDuration(historyEntry.duration);
+      setAiLastNewsTitles(historyEntry.newsTitles);
+      setAiLastFp(fp);
 
       // 僅在成功產生後才扣次數（API 失敗 / 沒選新聞 / 回傳空字串都不扣）
       setAiQuota((prev) => {
@@ -1674,6 +1734,79 @@ ${newsText}
   const copyAiScript = async () => {
     await copyAiScriptText(aiScript);
   };
+
+  const currentAiFavoriteId = useMemo(() => {
+    if (!aiLastFp) return null;
+    const createdAt = typeof aiLastSavedAt === "number" ? aiLastSavedAt : null;
+    if (!createdAt) return null;
+    return `${createdAt}-${aiLastFp.slice(0, 48)}`;
+  }, [aiLastFp, aiLastSavedAt]);
+
+  const currentAiIsFavorited = useMemo(() => {
+    if (!currentAiFavoriteId) return false;
+    return aiFavorites.some((f) => f.id === currentAiFavoriteId);
+  }, [aiFavorites, currentAiFavoriteId]);
+
+  const toggleAiFavorite = useCallback(() => {
+    const script = aiScript.trim();
+    if (!script) {
+      alert("尚無 AI 主播稿可收藏");
+      return;
+    }
+    if (!aiLastFp || typeof aiLastSavedAt !== "number") {
+      alert("此份 AI 主播稿尚未完成保存，請稍後再試。");
+      return;
+    }
+    const id = `${aiLastSavedAt}-${aiLastFp.slice(0, 48)}`;
+    setAiFavorites((prev) => {
+      const exists = prev.some((x) => x.id === id);
+      const next = exists
+        ? prev.filter((x) => x.id !== id)
+        : [
+            {
+              id,
+              createdAt: aiLastSavedAt,
+              duration: aiLastDuration ?? (selectedScriptDuration ?? 1),
+              highlights: aiHighlights,
+              script,
+              newsTitles: aiLastNewsTitles,
+              selectedTopics,
+              keyword: customKeyword.trim() || undefined,
+            },
+            ...prev,
+          ];
+      writeAiFavorites(next);
+      return next;
+    });
+  }, [
+    aiScript,
+    aiLastFp,
+    aiLastSavedAt,
+    aiLastDuration,
+    selectedScriptDuration,
+    aiHighlights,
+    aiLastNewsTitles,
+    selectedTopics,
+    customKeyword,
+  ]);
+
+  const loadAiFavorite = useCallback(
+    (fav: AiFavoriteEntry, autoplay: boolean) => {
+      setAiScript(fav.script);
+      setAiHighlights(fav.highlights ?? []);
+      setAiJsonFallback(false);
+      setSelectedScriptDuration(fav.duration);
+      setAiDuration(fav.duration);
+      setAiError(null);
+      setAiLastSavedAt(fav.createdAt);
+      setAiLastDuration(fav.duration);
+      setAiLastNewsTitles(Array.isArray(fav.newsTitles) ? fav.newsTitles : []);
+      setAiLastFp(fav.id.split("-").slice(1).join("-") || fav.id);
+      setTab("player");
+      if (autoplay) startPlayback(fav.script);
+    },
+    [startPlayback]
+  );
 
   const pageTitle =
     tab === "home"
@@ -1804,6 +1937,8 @@ ${newsText}
               aiQuotaRemaining={aiQuotaRemaining}
               aiDailyLimit={aiDailyLimit}
               onOpenProModal={() => {}}
+              aiFavorited={currentAiIsFavorited}
+              onToggleAiFavorite={toggleAiFavorite}
             />
 
             <NewsList
@@ -1867,6 +2002,8 @@ ${newsText}
               aiQuotaRemaining={aiQuotaRemaining}
               aiDailyLimit={aiDailyLimit}
               onOpenProModal={() => {}}
+              aiFavorited={currentAiIsFavorited}
+              onToggleAiFavorite={toggleAiFavorite}
             />
 
             <NewsList
@@ -1988,6 +2125,20 @@ ${newsText}
               selectAll={selectAll}
               clearAll={clearAll}
               copyGptPrompt={copyGptPrompt}
+            />
+
+            <AiFavoritesSection
+              favorites={aiFavorites}
+              onOpen={(fav) => loadAiFavorite(fav, true)}
+              onPlay={(fav) => loadAiFavorite(fav, true)}
+              onCopy={(fav) => void copyAiScriptText(fav.script)}
+              onToggle={(id) => {
+                setAiFavorites((prev) => {
+                  const next = prev.filter((x) => x.id !== id);
+                  writeAiFavorites(next);
+                  return next;
+                });
+              }}
             />
 
             <NewsList
@@ -3081,6 +3232,8 @@ function AiSummaryPanel({
   aiQuotaRemaining,
   aiDailyLimit,
   onOpenProModal,
+  aiFavorited,
+  onToggleAiFavorite,
 }: {
   aiLoading: boolean;
   aiError: string | null;
@@ -3101,6 +3254,8 @@ function AiSummaryPanel({
   aiQuotaRemaining: number;
   aiDailyLimit: number;
   onOpenProModal: () => void;
+  aiFavorited: boolean;
+  onToggleAiFavorite: () => void;
 }) {
   const scriptFontPx = SCRIPT_FONT_PX[scriptFontSize];
   const playbackActive = isSpeaking || isPaused;
@@ -3166,6 +3321,13 @@ function AiSummaryPanel({
                       ■ 停止
                     </button>
                   ) : null}
+                  <button
+                    type="button"
+                    onClick={onToggleAiFavorite}
+                    style={styles.aiScriptFavBtn}
+                  >
+                    {aiFavorited ? "★ 已收藏" : "☆ 收藏 AI 稿"}
+                  </button>
                   <button
                     type="button"
                     onClick={onCopyScript}
@@ -3348,6 +3510,71 @@ function ActionButtons({
         GPT 精華
       </button>
     </div>
+  );
+}
+
+function AiFavoritesSection({
+  favorites,
+  onOpen,
+  onPlay,
+  onCopy,
+  onToggle,
+}: {
+  favorites: AiFavoriteEntry[];
+  onOpen: (fav: AiFavoriteEntry) => void;
+  onPlay: (fav: AiFavoriteEntry) => void;
+  onCopy: (fav: AiFavoriteEntry) => void;
+  onToggle: (id: string) => void;
+}) {
+  return (
+    <section style={styles.aiFavPanel}>
+      <div style={styles.aiFavHead}>
+        <div>
+          <div style={styles.aiFavTitle}>AI 新聞稿收藏</div>
+          <div style={styles.aiFavSub}>可重新載入、播放與複製</div>
+        </div>
+      </div>
+
+      {favorites.length === 0 ? (
+        <div style={styles.aiFavEmpty}>尚未收藏 AI 新聞稿。</div>
+      ) : (
+        <div style={styles.aiFavList}>
+          {favorites.map((fav) => {
+            const previewTitles = (fav.newsTitles ?? []).slice(0, 2);
+            return (
+              <article key={fav.id} style={styles.aiFavCard}>
+                <button type="button" onClick={() => onOpen(fav)} style={styles.aiFavMainBtn}>
+                  <div style={styles.aiFavMetaRow}>
+                    <span style={styles.aiFavWhen}>{formatAiHistoryWhen(fav.createdAt)}</span>
+                    <span style={styles.aiFavBadge}>{fav.duration} 分鐘</span>
+                  </div>
+                  {previewTitles.length > 0 ? (
+                    <div style={styles.aiFavPreview}>{previewTitles.join(" / ")}</div>
+                  ) : (
+                    <div style={styles.aiFavPreviewMuted}>（無新聞標題）</div>
+                  )}
+                </button>
+                <div style={styles.aiFavActions}>
+                  <button type="button" onClick={() => onPlay(fav)} style={styles.aiFavPlayBtn}>
+                    播放
+                  </button>
+                  <button type="button" onClick={() => onCopy(fav)} style={styles.aiFavCopyBtn}>
+                    複製
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onToggle(fav.id)}
+                    style={styles.aiFavRemoveBtn}
+                  >
+                    取消收藏
+                  </button>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -4719,6 +4946,16 @@ const styles: Record<string, CSSProperties> = {
     fontSize: "12px",
     cursor: "pointer",
   },
+  aiScriptFavBtn: {
+    background: "rgba(255,255,255,.08)",
+    color: "#E2E8F0",
+    border: "1px solid rgba(255,255,255,.14)",
+    borderRadius: "12px",
+    padding: "9px 14px",
+    fontWeight: 800,
+    fontSize: "12px",
+    cursor: "pointer",
+  },
   aiHintMuted: {
     fontSize: "12px",
     lineHeight: 1.5,
@@ -4735,6 +4972,91 @@ const styles: Record<string, CSSProperties> = {
   },
   sectionTitle: { margin: 0, fontSize: "20px", fontWeight: 900 },
   countText: { color: "#94A3B8", fontSize: "13px" },
+  aiFavPanel: {
+    background: "rgba(255,255,255,.06)",
+    border: "1px solid rgba(255,255,255,.10)",
+    borderRadius: "18px",
+    padding: "14px",
+    marginTop: "14px",
+    marginBottom: "14px",
+  },
+  aiFavHead: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: "12px",
+    marginBottom: "10px",
+  },
+  aiFavTitle: { fontSize: "16px", fontWeight: 900, color: "#E2E8F0" },
+  aiFavSub: { fontSize: "12px", color: "#94A3B8", marginTop: "2px" },
+  aiFavEmpty: { fontSize: "13px", color: "#94A3B8", padding: "6px 2px" },
+  aiFavList: { display: "grid", gap: "10px" },
+  aiFavCard: {
+    background: "rgba(2,6,23,.45)",
+    border: "1px solid rgba(255,255,255,.10)",
+    borderRadius: "16px",
+    overflow: "hidden",
+  },
+  aiFavMainBtn: {
+    width: "100%",
+    textAlign: "left",
+    background: "transparent",
+    border: "none",
+    padding: "12px",
+    cursor: "pointer",
+    color: "inherit",
+  },
+  aiFavMetaRow: { display: "flex", justifyContent: "space-between", gap: "10px" },
+  aiFavWhen: { fontSize: "12px", color: "#94A3B8", fontWeight: 700 },
+  aiFavBadge: {
+    fontSize: "12px",
+    color: "#CCFBF1",
+    fontWeight: 900,
+    background: "rgba(45,212,191,.14)",
+    border: "1px solid rgba(45,212,191,.32)",
+    borderRadius: "999px",
+    padding: "2px 8px",
+    whiteSpace: "nowrap",
+  },
+  aiFavPreview: { marginTop: "8px", fontSize: "14px", color: "#E2E8F0", fontWeight: 800 },
+  aiFavPreviewMuted: { marginTop: "8px", fontSize: "13px", color: "#94A3B8", fontWeight: 700 },
+  aiFavActions: {
+    display: "flex",
+    gap: "8px",
+    padding: "10px 12px 12px",
+    borderTop: "1px solid rgba(255,255,255,.08)",
+    flexWrap: "wrap",
+  },
+  aiFavPlayBtn: {
+    background: "linear-gradient(135deg, #2563EB, #4F46E5)",
+    color: "white",
+    border: "none",
+    borderRadius: "12px",
+    padding: "8px 12px",
+    fontWeight: 900,
+    fontSize: "12px",
+    cursor: "pointer",
+  },
+  aiFavCopyBtn: {
+    background: "rgba(255,255,255,.10)",
+    color: "#E2E8F0",
+    border: "1px solid rgba(255,255,255,.14)",
+    borderRadius: "12px",
+    padding: "8px 12px",
+    fontWeight: 800,
+    fontSize: "12px",
+    cursor: "pointer",
+  },
+  aiFavRemoveBtn: {
+    background: "rgba(220,38,38,.10)",
+    color: "#FCA5A5",
+    border: "1px solid rgba(220,38,38,.28)",
+    borderRadius: "12px",
+    padding: "8px 12px",
+    fontWeight: 900,
+    fontSize: "12px",
+    cursor: "pointer",
+  },
   loading: {
     color: "#CBD5E1",
     background: "rgba(255,255,255,.08)",
