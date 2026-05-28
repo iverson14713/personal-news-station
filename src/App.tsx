@@ -1758,16 +1758,6 @@ ${newsText}
               onOpenProModal={() => {}}
             />
 
-            <AiHistorySection
-              entries={aiHistory}
-              activeId={activeAiHistoryId}
-              onSelect={loadAiHistoryEntry}
-              onPlay={playAiHistoryEntry}
-              onCopy={(entry) => void copyAiScriptText(entry.script)}
-              onDelete={removeAiHistoryEntry}
-              onClearAll={clearAllAiHistory}
-            />
-
             <NewsList
               title="即將播放"
               news={selectedNews}
@@ -1780,13 +1770,6 @@ ${newsText}
                   ? currentChunkIndex
                   : -1
               }
-            />
-
-            <AdSenseSlot
-              clientId={adSenseClientId}
-              slotId={ADSENSE_PLAYER_BANNER_SLOT_ID}
-              format="horizontal"
-              placeholderVariant="banner"
             />
           </>
         )}
@@ -1894,16 +1877,6 @@ ${newsText}
               selectAll={selectAll}
               clearAll={clearAll}
               copyGptPrompt={copyGptPrompt}
-            />
-
-            <AiHistorySection
-              entries={aiHistory}
-              activeId={activeAiHistoryId}
-              onSelect={loadAiHistoryEntry}
-              onPlay={playAiHistoryEntry}
-              onCopy={(entry) => void copyAiScriptText(entry.script)}
-              onDelete={removeAiHistoryEntry}
-              onClearAll={clearAllAiHistory}
             />
 
             <NewsList
@@ -3104,15 +3077,6 @@ function AiSummaryPanel({
           </div>
         )}
 
-        {planTier === "free" ? (
-          <ProUpgradeCard
-            planTier={planTier}
-            onOpen={() => {
-              onOpenProModal();
-            }}
-          />
-        ) : null}
-
         {!aiLoading && selectedNewsCount > 0 ? (
           <button
             type="button"
@@ -3178,7 +3142,7 @@ function AiDurationSheet({
               <span style={styles.aiSheetOptionMain}>
                 {d} 分鐘{" "}
                 {planTier !== "pro" && d === 5 ? (
-                  <span style={styles.proLockTag}>即將開放</span>
+                  <span style={styles.proLockTag}>5 分鐘即將開放</span>
                 ) : null}
               </span>
               <span style={styles.aiSheetOptionSub}>
