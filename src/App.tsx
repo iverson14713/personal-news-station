@@ -704,6 +704,8 @@ export default function App() {
   const ttsStartTokenRef = useRef(0);
   const isManualStopRef = useRef(false);
   const ttsRetryRef = useRef<{ index: number; count: number }>({ index: -1, count: 0 });
+  const ttsActivityAtRef = useRef(0);
+  const ttsStallWatchdogRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const selectedNews = news.filter((n) => n.selected);
   const favoriteNews = news.filter((n) => n.favorite);
@@ -1202,6 +1204,7 @@ export default function App() {
 
       s.chunkIndex = index;
       s.chunkStartedAt = Date.now();
+      ttsActivityAtRef.current = Date.now();
       s.elapsedBeforeChunkMs = chunks
         .slice(0, index)
         .reduce((sum, c) => sum + estimateChunkDurationMs(c, s.rate), 0);
@@ -1216,6 +1219,10 @@ export default function App() {
       utterance.rate = s.rate;
       const selectedVoice = voices.find((v) => v.name === voiceName);
       if (selectedVoice) utterance.voice = selectedVoice;
+      utterance.onstart = () => {
+        if (speechRef.current.chunkIndex !== index) return;
+        ttsActivityAtRef.current = Date.now();
+      };
 
       utterance.onend = () => {
         if (speechRef.current.chunkIndex !== index) return;
@@ -1232,6 +1239,7 @@ export default function App() {
       utterance.onerror = (ev) => {
         if (speechRef.current.chunkIndex !== index) return;
         if (isManualStopRef.current) return;
+        ttsActivityAtRef.current = Date.now();
         const err =
           typeof (ev as unknown as { error?: unknown }).error === "string"
             ? String((ev as unknown as { error?: string }).error)
@@ -1267,6 +1275,7 @@ export default function App() {
         }
         // 若能順利呼叫 speak，視為已重新啟動成功
         isManualStopRef.current = false;
+        ttsActivityAtRef.current = Date.now();
         window.speechSynthesis.speak(utterance);
       } catch {
         clearProgressTimer();
@@ -1290,6 +1299,10 @@ export default function App() {
     isManualStopRef.current = true;
     window.speechSynthesis.cancel();
     clearProgressTimer();
+    if (ttsStallWatchdogRef.current != null) {
+      window.clearInterval(ttsStallWatchdogRef.current);
+      ttsStallWatchdogRef.current = null;
+    }
     if (ttsStartWatchdogRef.current != null) {
       window.clearTimeout(ttsStartWatchdogRef.current);
       ttsStartWatchdogRef.current = null;
@@ -1332,6 +1345,10 @@ export default function App() {
     isManualStopRef.current = false;
     window.speechSynthesis.cancel();
     clearProgressTimer();
+    if (ttsStallWatchdogRef.current != null) {
+      window.clearInterval(ttsStallWatchdogRef.current);
+      ttsStallWatchdogRef.current = null;
+    }
     if (ttsStartWatchdogRef.current != null) {
       window.clearTimeout(ttsStartWatchdogRef.current);
       ttsStartWatchdogRef.current = null;
@@ -1368,6 +1385,30 @@ export default function App() {
     setPlaybackProgress(0);
     setRemainingMs(totalEstimatedMs);
     speakChunkAt(0);
+
+    // iOS 有時會「無聲卡住」且不觸發 onend/onerror，加入 watchdog 自動推進下一段
+    ttsActivityAtRef.current = Date.now();
+    ttsStallWatchdogRef.current = window.setInterval(() => {
+      if (isManualStopRef.current) return;
+      const synth = window.speechSynthesis;
+      if (!synth) return;
+      if (window.speechSynthesis.paused) return;
+      if (synth.speaking || synth.pending) {
+        ttsActivityAtRef.current = Date.now();
+        return;
+      }
+      const since = Date.now() - ttsActivityAtRef.current;
+      if (since < 650) return;
+      const s = speechRef.current;
+      const idx = s.chunkIndex;
+      if (!s.chunks.length) return;
+      if (idx >= 0 && idx < s.chunks.length - 1) {
+        // 推進到下一段，避免卡死無聲
+        speakChunkAt(idx + 1);
+      } else {
+        stopPlayback();
+      }
+    }, 220);
 
     // iOS Safari 有時第一次 speak 不會啟動也不觸發 onerror，做 800ms watchdog 提示
     const token = ++ttsStartTokenRef.current;
