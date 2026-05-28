@@ -1926,22 +1926,16 @@ ${newsText}
             </section>
 
             <section style={styles.controlPanel}>
-              <div style={styles.controlTitle}>AI 分析（OpenAI）</div>
-              <div style={styles.settingHint}>
-                首頁勾選新聞後，點「AI 分析」並選擇 1／3／5
-                分鐘，即可產生重點與主播稿。由伺服端{" "}
-                <code style={{ color: "#93C5FD" }}>OPENAI_API_KEY</code>{" "}
-                呼叫；分析結果會保存在本機，重新開啟仍可瀏覽最近紀錄。
-              </div>
+              <div style={styles.controlTitle}>AI 使用額度</div>
               <div style={styles.planQuotaRow}>
                 <div style={styles.planQuotaLeft}>
-                  <div style={styles.planQuotaTitle}>今日 AI 額度</div>
+                  <div style={styles.planQuotaTitle}>今日剩餘</div>
                   <div style={styles.planQuotaValue}>
                     剩餘 {aiQuotaRemaining} / {aiDailyLimit} 次
                   </div>
                 </div>
                 <div style={styles.planQuotaRight}>
-                  <div style={styles.planChipRow} role="group" aria-label="方案切換（Demo）">
+                  <div style={styles.planChipRow} role="group" aria-label="方案（Demo）">
                     <button
                       type="button"
                       onClick={() => setPlanTier("free")}
@@ -1963,43 +1957,11 @@ ${newsText}
                       Pro（Demo）
                     </button>
                   </div>
-                  <div style={styles.planQuotaNote}>此為本機 localStorage 模擬，尚未接付款。</div>
+                  <div style={styles.planQuotaNote}>
+                    {planTier === "pro" ? "Pro 方案" : "Free 方案"}
+                  </div>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={copyGptPrompt}
-                style={{ ...styles.gptButton, marginTop: "12px", width: "100%" }}
-              >
-                複製 GPT 精華 Prompt（備用）
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  writeOnboardingSeen(false);
-                  setOnboardingStep(0);
-                  setOnboardingOpen(true);
-                }}
-                style={{ ...styles.toolbarBtnNeutral, width: "100%", marginTop: "10px" }}
-              >
-                重新觀看新手教學
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  if (
-                    window.confirm(
-                      "確定清除本機 AI 分析快取與歷史紀錄？此動作無法復原。"
-                    )
-                  ) {
-                    clearAiCache();
-                    alert("已清除 AI 快取");
-                  }
-                }}
-                style={styles.dangerFullButton}
-              >
-                清除 AI 快取
-              </button>
             </section>
 
             <section style={styles.controlPanel}>
@@ -2036,6 +1998,21 @@ ${newsText}
               <div style={styles.settingHint}>目前收藏 {favoriteNews.length} 則新聞。</div>
               <button onClick={clearFavorites} style={styles.dangerFullButton}>
                 清除全部收藏
+              </button>
+            </section>
+
+            <section style={styles.controlPanel}>
+              <div style={styles.controlTitle}>幫助 / 關於</div>
+              <button
+                type="button"
+                onClick={() => {
+                  writeOnboardingSeen(false);
+                  setOnboardingStep(0);
+                  setOnboardingOpen(true);
+                }}
+                style={{ ...styles.toolbarBtnNeutral, width: "100%", marginTop: "10px" }}
+              >
+                重新觀看新手教學
               </button>
             </section>
 
