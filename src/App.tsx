@@ -1223,7 +1223,11 @@ export default function App() {
         if (ttsRetryRef.current.index === index) {
           ttsRetryRef.current = { index: -1, count: 0 };
         }
-        speakChunkAt(index + 1);
+        // iOS 連續 speak 有時會掉音，加入極短延遲但不讓使用者感覺分段
+        window.setTimeout(() => {
+          if (speechRef.current.chunkIndex !== index) return;
+          speakChunkAt(index + 1);
+        }, 40);
       };
       utterance.onerror = (ev) => {
         if (speechRef.current.chunkIndex !== index) return;
@@ -1233,15 +1237,12 @@ export default function App() {
             ? String((ev as unknown as { error?: string }).error)
             : "";
         const errNorm = err.trim().toLowerCase();
-        if (
+        // iOS 常見：非手動也可能收到 interrupted/canceled。不能直接忽略，否則會卡住無聲。
+        const isSoftAbort =
           errNorm === "interrupted" ||
           errNorm === "canceled" ||
           errNorm === "cancelled" ||
-          errNorm === "cancel" ||
-          (errNorm.includes("synthesis-failed") && isManualStopRef.current)
-        ) {
-          return;
-        }
+          errNorm === "cancel";
         // 單段自動重試一次；仍失敗則跳下一段（不中斷整篇體驗，也不顯示分段提示）
         const r = ttsRetryRef.current;
         const count = r.index === index ? r.count : 0;
