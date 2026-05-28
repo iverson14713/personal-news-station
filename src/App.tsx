@@ -88,7 +88,7 @@ function cleanTitle(title: string) {
 const AI_SUMMARY_CACHE_KEY = "pns_ai_summary_v1";
 const AI_SUMMARY_CACHE_MS = 30 * 60 * 1000;
 const AI_HISTORY_KEY = "pns_ai_history_v1";
-const AI_HISTORY_MAX = 8;
+const AI_HISTORY_MAX = 20;
 const PLAYBACK_SPEED_KEY = "pns_playback_speed_v1";
 const SPEED_MIN = 0.8;
 const SPEED_MAX = 1.1;
@@ -329,9 +329,17 @@ function writeAiHistory(entries: AiHistoryEntry[]) {
   }
 }
 
-function appendAiHistoryEntry(entry: AiHistoryEntry) {
-  const prev = readAiHistory().filter((e) => e.id !== entry.id);
-  writeAiHistory([entry, ...prev].slice(0, AI_HISTORY_MAX));
+function formatAiHistoryWhen(savedAt: number) {
+  try {
+    return new Date(savedAt).toLocaleString("zh-TW", {
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return "";
+  }
 }
 
 function formatVideoPublished(iso: string) {
@@ -563,6 +571,8 @@ export default function App() {
   const [onboardingOpen, setOnboardingOpen] = useState(() => !readOnboardingSeen());
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [splashOpen, setSplashOpen] = useState(() => !readSplashSeenSession());
+  const [aiHistory, setAiHistory] = useState<AiHistoryEntry[]>(() => readAiHistory());
+  const [activeAiHistoryId, setActiveAiHistoryId] = useState<string | null>(null);
   const [aiQuota, setAiQuota] = useState(() => {
     const q = readAiDailyQuota();
     // 同步回寫一次，確保 key 存在、日期一致
@@ -662,6 +672,7 @@ export default function App() {
     setAiJsonFallback(Boolean(latest.jsonFallback));
     setSelectedScriptDuration(latest.duration);
     setAiDuration(latest.duration);
+    setActiveAiHistoryId(latest.id);
   }, []);
 
   const persistPlaybackSpeed = useCallback((rate: number) => {
@@ -1110,16 +1121,20 @@ export default function App() {
     progressTimerRef.current = setInterval(tickPlaybackProgress, 180);
   }, [isPaused, tickPlaybackProgress]);
 
-  const startPlayback = useCallback(() => {
-    const hasAi = aiScript.trim().length > 0;
+  const startPlayback = useCallback((scriptOverride?: string) => {
+    const scriptText = (scriptOverride ?? aiScript).trim();
+    const hasAi = scriptText.length > 0;
     if (!hasAi && selectedNews.length === 0) {
       alert("請先選擇要播放的新聞，或先產生 AI 新聞稿");
       return;
     }
 
+    window.speechSynthesis.cancel();
+    clearProgressTimer();
+
     const mode: PlaybackMode = hasAi ? "ai" : "news";
     const chunks = hasAi
-      ? splitSpeechChunks(aiScript.trim())
+      ? splitSpeechChunks(scriptText)
       : selectedNews.map((n, i) => `第 ${i + 1} 則新聞，${n.title}`);
 
     const rate = speed;
@@ -1187,7 +1202,81 @@ export default function App() {
     setAiJsonFallback(false);
     setAiError(null);
     setSelectedScriptDuration(null);
+    setAiHistory([]);
+    setActiveAiHistoryId(null);
   };
+
+  const appendAiHistoryEntry = useCallback((entry: AiHistoryEntry) => {
+    setAiHistory((prev) => {
+      const next = [entry, ...prev.filter((e) => e.id !== entry.id)].slice(
+        0,
+        AI_HISTORY_MAX
+      );
+      writeAiHistory(next);
+      return next;
+    });
+    setActiveAiHistoryId(entry.id);
+  }, []);
+
+  const removeAiHistoryEntry = useCallback((id: string) => {
+    setAiHistory((prev) => {
+      const next = prev.filter((e) => e.id !== id);
+      writeAiHistory(next);
+      return next;
+    });
+    setActiveAiHistoryId((cur) => (cur === id ? null : cur));
+  }, []);
+
+  const clearAllAiHistory = useCallback(() => {
+    if (
+      !window.confirm("確定清空全部 AI 歷史紀錄？此動作無法復原。")
+    ) {
+      return;
+    }
+    writeAiHistory([]);
+    setAiHistory([]);
+    setActiveAiHistoryId(null);
+  }, []);
+
+  const loadAiHistoryEntry = useCallback((entry: AiHistoryEntry) => {
+    setAiScript(entry.script);
+    setAiHighlights(entry.highlights ?? []);
+    setAiJsonFallback(Boolean(entry.jsonFallback));
+    setSelectedScriptDuration(entry.duration);
+    setAiDuration(entry.duration);
+    setAiError(null);
+    setActiveAiHistoryId(entry.id);
+    setTab("player");
+  }, []);
+
+  const copyAiScriptText = async (text: string) => {
+    const t = text.trim();
+    if (!t) {
+      alert("尚無 AI 新聞稿可複製");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(t);
+      alert("已複製 AI 新聞稿");
+    } catch {
+      alert("無法寫入剪貼簿，請檢查瀏覽器權限");
+    }
+  };
+
+  const playAiHistoryEntry = useCallback(
+    (entry: AiHistoryEntry) => {
+      setAiScript(entry.script);
+      setAiHighlights(entry.highlights ?? []);
+      setAiJsonFallback(Boolean(entry.jsonFallback));
+      setSelectedScriptDuration(entry.duration);
+      setAiDuration(entry.duration);
+      setAiError(null);
+      setActiveAiHistoryId(entry.id);
+      setTab("player");
+      startPlayback(entry.script);
+    },
+    [startPlayback]
+  );
 
   const openAiAnalysis = () => {
     if (selectedNews.length === 0) {
@@ -1400,7 +1489,7 @@ ${newsText}
         /* ignore */
       }
 
-      appendAiHistoryEntry({
+      const historyEntry: AiHistoryEntry = {
         id: `${savedAt}-${fp.slice(0, 48)}`,
         savedAt,
         duration:
@@ -1409,7 +1498,8 @@ ${newsText}
         highlights,
         jsonFallback: Boolean(data.jsonFallback),
         newsTitles: picked.map((n) => n.title),
-      });
+      };
+      appendAiHistoryEntry(historyEntry);
 
       // 僅在成功產生後才扣次數（API 失敗 / 沒選新聞 / 回傳空字串都不扣）
       setAiQuota((prev) => {
@@ -1428,17 +1518,7 @@ ${newsText}
   };
 
   const copyAiScript = async () => {
-    const t = aiScript.trim();
-    if (!t) {
-      alert("尚無 AI 新聞稿可複製");
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(t);
-      alert("已複製 AI 新聞稿");
-    } catch {
-      alert("無法寫入剪貼簿，請檢查瀏覽器權限");
-    }
+    await copyAiScriptText(aiScript);
   };
 
   const pageTitle =
@@ -1626,6 +1706,16 @@ ${newsText}
               onOpenProModal={() => setProModalOpen(true)}
             />
 
+            <AiHistorySection
+              entries={aiHistory}
+              activeId={activeAiHistoryId}
+              onSelect={loadAiHistoryEntry}
+              onPlay={playAiHistoryEntry}
+              onCopy={(entry) => void copyAiScriptText(entry.script)}
+              onDelete={removeAiHistoryEntry}
+              onClearAll={clearAllAiHistory}
+            />
+
             <NewsList
               title="即將播放"
               news={selectedNews}
@@ -1745,6 +1835,16 @@ ${newsText}
               selectAll={selectAll}
               clearAll={clearAll}
               copyGptPrompt={copyGptPrompt}
+            />
+
+            <AiHistorySection
+              entries={aiHistory}
+              activeId={activeAiHistoryId}
+              onSelect={loadAiHistoryEntry}
+              onPlay={playAiHistoryEntry}
+              onCopy={(entry) => void copyAiScriptText(entry.script)}
+              onDelete={removeAiHistoryEntry}
+              onClearAll={clearAllAiHistory}
             />
 
             <NewsList
@@ -2429,6 +2529,119 @@ function ProUpgradeCard({
         升級 Pro
       </button>
     </div>
+  );
+}
+
+function AiHistorySection({
+  entries,
+  activeId,
+  onSelect,
+  onPlay,
+  onCopy,
+  onDelete,
+  onClearAll,
+}: {
+  entries: AiHistoryEntry[];
+  activeId: string | null;
+  onSelect: (entry: AiHistoryEntry) => void;
+  onPlay: (entry: AiHistoryEntry) => void;
+  onCopy: (entry: AiHistoryEntry) => void;
+  onDelete: (id: string) => void;
+  onClearAll: () => void;
+}) {
+  return (
+    <section style={styles.aiHistoryPanel}>
+      <div style={styles.aiHistoryHead}>
+        <div>
+          <div style={styles.aiHistoryTitle}>AI 歷史</div>
+          <div style={styles.aiHistorySub}>
+            最近 {AI_HISTORY_MAX} 筆 · 點擊載入主播稿
+          </div>
+        </div>
+        {entries.length > 0 ? (
+          <button type="button" onClick={onClearAll} style={styles.aiHistoryClearBtn}>
+            清空全部
+          </button>
+        ) : null}
+      </div>
+
+      {entries.length === 0 ? (
+        <div style={styles.aiHistoryEmpty}>
+          尚無 AI 分析紀錄。在首頁勾選新聞並完成 AI 分析後，會自動保存在此。
+        </div>
+      ) : (
+        <div style={styles.aiHistoryList}>
+          {entries.map((entry) => {
+            const active = entry.id === activeId;
+            const previewTitles = (entry.newsTitles ?? []).slice(0, 2);
+            return (
+              <article
+                key={entry.id}
+                style={{
+                  ...styles.aiHistoryCard,
+                  ...(active ? styles.aiHistoryCardActive : {}),
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={() => onSelect(entry)}
+                  style={styles.aiHistoryCardMain}
+                >
+                  <div style={styles.aiHistoryMetaRow}>
+                    <span style={styles.aiHistoryWhen}>
+                      {formatAiHistoryWhen(entry.savedAt)}
+                    </span>
+                    <span style={styles.aiHistoryDurationBadge}>
+                      {entry.duration} 分鐘
+                    </span>
+                  </div>
+                  {previewTitles.length > 0 ? (
+                    <ul style={styles.aiHistoryTitles}>
+                      {previewTitles.map((title, i) => (
+                        <li key={`${entry.id}-t-${i}`} style={styles.aiHistoryTitleItem}>
+                          {title}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div style={styles.aiHistoryNoTitles}>（無新聞標題紀錄）</div>
+                  )}
+                </button>
+
+                <div style={styles.aiHistoryActions}>
+                  <button
+                    type="button"
+                    onClick={() => onPlay(entry)}
+                    style={styles.aiHistoryPlayBtn}
+                  >
+                    播放
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onCopy(entry)}
+                    style={styles.aiHistoryCopyBtn}
+                  >
+                    複製
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (window.confirm("確定刪除此筆 AI 歷史？")) {
+                        onDelete(entry.id);
+                      }
+                    }}
+                    style={styles.aiHistoryDeleteBtn}
+                    aria-label="刪除此筆"
+                  >
+                    刪除
+                  </button>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -3420,6 +3633,151 @@ const styles: Record<string, CSSProperties> = {
     fontSize: "14px",
   },
   topicChipActive: { background: "white", color: "#0F172A" },
+  aiHistoryPanel: {
+    marginTop: "4px",
+    marginBottom: "14px",
+    padding: "14px",
+    borderRadius: "18px",
+    background: "rgba(255,255,255,.04)",
+    border: "1px solid rgba(255,255,255,.10)",
+  },
+  aiHistoryHead: {
+    display: "flex",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: "12px",
+    marginBottom: "12px",
+  },
+  aiHistoryTitle: {
+    fontSize: "16px",
+    fontWeight: 900,
+    color: "#F8FAFC",
+  },
+  aiHistorySub: {
+    marginTop: "4px",
+    fontSize: "12px",
+    color: "#64748B",
+    lineHeight: 1.4,
+  },
+  aiHistoryClearBtn: {
+    flexShrink: 0,
+    border: "1px solid rgba(248,113,113,.35)",
+    background: "rgba(127,29,29,.25)",
+    color: "#FCA5A5",
+    borderRadius: "10px",
+    padding: "6px 10px",
+    fontSize: "12px",
+    fontWeight: 800,
+    cursor: "pointer",
+  },
+  aiHistoryEmpty: {
+    fontSize: "13px",
+    lineHeight: 1.55,
+    color: "#94A3B8",
+    padding: "12px",
+    borderRadius: "12px",
+    background: "rgba(15,23,42,.45)",
+    border: "1px dashed rgba(148,163,184,.25)",
+  },
+  aiHistoryList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "10px",
+  },
+  aiHistoryCard: {
+    borderRadius: "14px",
+    background: "rgba(15,23,42,.55)",
+    border: "1px solid rgba(255,255,255,.08)",
+    overflow: "hidden",
+  },
+  aiHistoryCardActive: {
+    borderColor: "rgba(96,165,250,.45)",
+    boxShadow: "0 0 0 1px rgba(96,165,250,.18)",
+  },
+  aiHistoryCardMain: {
+    width: "100%",
+    border: "none",
+    background: "transparent",
+    color: "inherit",
+    textAlign: "left",
+    padding: "12px 12px 8px",
+    cursor: "pointer",
+  },
+  aiHistoryMetaRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "8px",
+    marginBottom: "8px",
+  },
+  aiHistoryWhen: {
+    fontSize: "13px",
+    fontWeight: 800,
+    color: "#E2E8F0",
+  },
+  aiHistoryDurationBadge: {
+    fontSize: "11px",
+    fontWeight: 900,
+    color: "#BFDBFE",
+    background: "rgba(37,99,235,.22)",
+    border: "1px solid rgba(96,165,250,.28)",
+    borderRadius: "999px",
+    padding: "3px 8px",
+    flexShrink: 0,
+  },
+  aiHistoryTitles: {
+    margin: 0,
+    paddingLeft: "16px",
+    display: "flex",
+    flexDirection: "column",
+    gap: "4px",
+  },
+  aiHistoryTitleItem: {
+    fontSize: "13px",
+    lineHeight: 1.45,
+    color: "#CBD5E1",
+  },
+  aiHistoryNoTitles: {
+    fontSize: "12px",
+    color: "#64748B",
+  },
+  aiHistoryActions: {
+    display: "flex",
+    gap: "8px",
+    padding: "0 10px 10px",
+  },
+  aiHistoryPlayBtn: {
+    flex: 1,
+    border: "none",
+    borderRadius: "10px",
+    padding: "8px 10px",
+    fontSize: "13px",
+    fontWeight: 800,
+    cursor: "pointer",
+    color: "#0F172A",
+    background: "linear-gradient(135deg, #60A5FA, #A78BFA)",
+  },
+  aiHistoryCopyBtn: {
+    flex: 1,
+    border: "1px solid rgba(255,255,255,.12)",
+    borderRadius: "10px",
+    padding: "8px 10px",
+    fontSize: "13px",
+    fontWeight: 800,
+    cursor: "pointer",
+    color: "#E2E8F0",
+    background: "rgba(255,255,255,.06)",
+  },
+  aiHistoryDeleteBtn: {
+    border: "1px solid rgba(248,113,113,.28)",
+    borderRadius: "10px",
+    padding: "8px 12px",
+    fontSize: "13px",
+    fontWeight: 800,
+    cursor: "pointer",
+    color: "#FCA5A5",
+    background: "rgba(127,29,29,.2)",
+  },
   controlPanel: {
     marginTop: "18px",
     background: "rgba(15,23,42,.82)",
