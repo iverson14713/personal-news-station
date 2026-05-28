@@ -1928,7 +1928,7 @@ ${newsText}
               onScriptFontSizeChange={setScriptFontSize}
               isSpeaking={isSpeaking}
               isPaused={isPaused}
-              onPlayScript={startPlayback}
+              onPlayScript={(script) => startPlayback(script)}
               onStopScript={stopPlayback}
               onCopyScript={() => void copyAiScript()}
               onOpenAnalysis={openAiAnalysis}
@@ -1993,7 +1993,7 @@ ${newsText}
               onScriptFontSizeChange={setScriptFontSize}
               isSpeaking={isSpeaking}
               isPaused={isPaused}
-              onPlayScript={startPlayback}
+              onPlayScript={(script) => startPlayback(script)}
               onStopScript={stopPlayback}
               onCopyScript={() => void copyAiScript()}
               onOpenAnalysis={openAiAnalysis}
@@ -3260,7 +3260,7 @@ function AiSummaryPanel({
   onScriptFontSizeChange: (v: ScriptFontSize) => void;
   isSpeaking: boolean;
   isPaused: boolean;
-  onPlayScript: () => void;
+  onPlayScript: (script: string) => void;
   onStopScript: () => void;
   onCopyScript: () => void;
   onOpenAnalysis: () => void;
@@ -3322,10 +3322,18 @@ function AiSummaryPanel({
                 <div style={styles.aiScriptActions}>
                   <button
                     type="button"
-                    onClick={onPlayScript}
+                    onClick={() => {
+                      const s = aiScript.trim();
+                      if (!s) {
+                        alert("尚無 AI 主播稿可播放");
+                        return;
+                      }
+                      onPlayScript(s);
+                    }}
                     style={styles.aiScriptPlayBtn}
+                    disabled={playbackActive}
                   >
-                    {playbackActive ? "▶ 前往播放頁" : "▶ 播放 AI 新聞稿"}
+                    {playbackActive ? "播放中" : "▶ 播放"}
                   </button>
                   {playbackActive ? (
                     <button
