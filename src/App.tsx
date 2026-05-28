@@ -653,6 +653,8 @@ export default function App() {
   });
   const progressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastTtsErrorAtRef = useRef(0);
+  const ttsStartWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ttsStartTokenRef = useRef(0);
 
   const selectedNews = news.filter((n) => n.selected);
   const favoriteNews = news.filter((n) => n.favorite);
@@ -1208,6 +1210,11 @@ export default function App() {
   const stopPlayback = useCallback(() => {
     window.speechSynthesis.cancel();
     clearProgressTimer();
+    if (ttsStartWatchdogRef.current != null) {
+      window.clearTimeout(ttsStartWatchdogRef.current);
+      ttsStartWatchdogRef.current = null;
+    }
+    ttsStartTokenRef.current += 1;
     setIsSpeaking(false);
     setIsPaused(false);
     setCurrentChunkIndex(-1);
@@ -1244,6 +1251,10 @@ export default function App() {
 
     window.speechSynthesis.cancel();
     clearProgressTimer();
+    if (ttsStartWatchdogRef.current != null) {
+      window.clearTimeout(ttsStartWatchdogRef.current);
+      ttsStartWatchdogRef.current = null;
+    }
 
     const mode: PlaybackMode = hasAi ? "ai" : "news";
     const chunks = hasAi
@@ -1270,9 +1281,40 @@ export default function App() {
     setPlaybackMode(mode);
     setTotalChunks(chunks.length);
     setTab("player");
+    // 先顯示「準備播放」狀態，避免使用者覺得沒反應
+    setIsSpeaking(true);
+    setIsPaused(false);
     setPlaybackProgress(0);
     setRemainingMs(totalEstimatedMs);
     speakChunkAt(0);
+
+    // iOS Safari 有時第一次 speak 不會啟動也不觸發 onerror，做 800ms watchdog 提示
+    const token = ++ttsStartTokenRef.current;
+    ttsStartWatchdogRef.current = window.setTimeout(() => {
+      if (token !== ttsStartTokenRef.current) return;
+      const synth = window.speechSynthesis;
+      if (!synth) return;
+      if (!synth.speaking && !synth.pending) {
+        // 清掉可能卡住的狀態，讓第二次點擊能重新 speak
+        try {
+          synth.cancel();
+        } catch {
+          /* ignore */
+        }
+        clearProgressTimer();
+        setIsSpeaking(false);
+        setIsPaused(false);
+        setPlaybackMode(null);
+        setTotalChunks(0);
+        setCurrentChunkIndex(-1);
+        setPlaybackProgress(0);
+        const now = Date.now();
+        if (now - lastTtsErrorAtRef.current > 2500) {
+          lastTtsErrorAtRef.current = now;
+          alert("語音尚未啟動，請再點一次播放或確認瀏覽器語音設定。");
+        }
+      }
+    }, 800);
   }, [aiScript, selectedNews, speed, speakChunkAt]);
 
   const togglePlayPause = useCallback(() => {
