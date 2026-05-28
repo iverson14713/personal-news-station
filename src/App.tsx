@@ -118,6 +118,52 @@ const ONBOARDING_SEEN_KEY = "pns_onboarding_seen_v1";
 const SPLASH_SEEN_SESSION_KEY = "pns_splash_seen_session_v1";
 const SPLASH_DURATION_MS = 1500;
 
+const SELECTED_TOPICS_KEY = "pns_selected_topics_v1";
+const CUSTOM_KEYWORD_KEY = "pns_custom_keyword_v1";
+
+const DEFAULT_TOPICS = ["NBA", "MLB", "大谷翔平", "Curry", "BTC"];
+
+function readSelectedTopics(): string[] {
+  try {
+    const raw = localStorage.getItem(SELECTED_TOPICS_KEY);
+    if (!raw) return DEFAULT_TOPICS;
+    const arr = JSON.parse(raw) as unknown;
+    if (!Array.isArray(arr)) return DEFAULT_TOPICS;
+    const cleaned = arr
+      .filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+      .map((s) => s.trim());
+    // 避免空陣列造成首頁無內容
+    return cleaned.length > 0 ? cleaned : DEFAULT_TOPICS;
+  } catch {
+    return DEFAULT_TOPICS;
+  }
+}
+
+function writeSelectedTopics(topics: string[]) {
+  try {
+    localStorage.setItem(SELECTED_TOPICS_KEY, JSON.stringify(topics));
+  } catch {
+    /* ignore */
+  }
+}
+
+function readCustomKeyword(): string {
+  try {
+    const raw = localStorage.getItem(CUSTOM_KEYWORD_KEY);
+    return typeof raw === "string" ? raw : "";
+  } catch {
+    return "";
+  }
+}
+
+function writeCustomKeyword(v: string) {
+  try {
+    localStorage.setItem(CUSTOM_KEYWORD_KEY, v);
+  } catch {
+    /* ignore */
+  }
+}
+
 function readAdSenseClientId(): string {
   try {
     const v = (import.meta as unknown as { env?: Record<string, unknown> })?.env?.[
@@ -547,14 +593,8 @@ async function parseVideosApiResponse(res: Response): Promise<
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("home");
-  const [selectedTopics, setSelectedTopics] = useState<string[]>([
-    "NBA",
-    "MLB",
-    "大谷翔平",
-    "Curry",
-    "BTC",
-  ]);
-  const [customKeyword, setCustomKeyword] = useState("");
+  const [selectedTopics, setSelectedTopics] = useState<string[]>(readSelectedTopics);
+  const [customKeyword, setCustomKeyword] = useState(readCustomKeyword);
   const [news, setNews] = useState<NewsItem[]>([]);
   const [videos, setVideos] = useState<VideoItem[]>([]);
   const [favoriteLinks, setFavoriteLinks] = useState<string[]>([]);
@@ -612,6 +652,7 @@ export default function App() {
     elapsedBeforeChunkMs: 0,
   });
   const progressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastTtsErrorAtRef = useRef(0);
 
   const selectedNews = news.filter((n) => n.selected);
   const favoriteNews = news.filter((n) => n.favorite);
@@ -698,6 +739,14 @@ export default function App() {
       /* ignore */
     }
   }, [scriptFontSize]);
+
+  useEffect(() => {
+    writeSelectedTopics(selectedTopics);
+  }, [selectedTopics]);
+
+  useEffect(() => {
+    writeCustomKeyword(customKeyword);
+  }, [customKeyword]);
 
   useEffect(() => {
     return () => {
@@ -1031,7 +1080,7 @@ export default function App() {
   };
 
   const resetDefaultTopics = () => {
-    setSelectedTopics(["NBA", "MLB", "大谷翔平", "Curry", "BTC"]);
+    setSelectedTopics(DEFAULT_TOPICS);
   };
 
   const toggleNews = (id: string) => {
@@ -1126,9 +1175,29 @@ export default function App() {
         clearProgressTimer();
         setIsSpeaking(false);
         setIsPaused(false);
+        const now = Date.now();
+        if (now - lastTtsErrorAtRef.current > 2500) {
+          lastTtsErrorAtRef.current = now;
+          alert("無法啟動語音朗讀。請確認裝置音量、靜音模式與瀏覽器語音權限。");
+        }
       };
 
-      window.speechSynthesis.speak(utterance);
+      try {
+        if (!("speechSynthesis" in window)) {
+          throw new Error("Speech synthesis not supported");
+        }
+        window.speechSynthesis.speak(utterance);
+      } catch {
+        clearProgressTimer();
+        setIsSpeaking(false);
+        setIsPaused(false);
+        const now = Date.now();
+        if (now - lastTtsErrorAtRef.current > 2500) {
+          lastTtsErrorAtRef.current = now;
+          alert("此瀏覽器不支援語音朗讀，或目前無法啟動朗讀。");
+        }
+        return;
+      }
       clearProgressTimer();
       progressTimerRef.current = setInterval(tickPlaybackProgress, 180);
       tickPlaybackProgress();

@@ -1,0 +1,9 @@
+# AI個人新聞台 - ads.txt
+#
+# 1) 到 Google AdSense 後台取得 ads.txt 內容（通常會包含你的 pub id）
+# 2) 將後台提供的內容貼到此檔案（保留一行一個記錄）
+# 3) 部署後確認可從 /ads.txt 讀取
+#
+# 範例（請替換成你的 pub id）：
+# google.com, pub-XXXXXXXXXXXXXXXX, DIRECT, f08c47fec0942fa0
+
