@@ -312,6 +312,36 @@ function estimateChunkDurationMs(text: string, rate: number): number {
   return Math.max(650, Math.round((text.length * 92) / rate));
 }
 
+function findResumeIndex(text: string, approxIndex: number): number {
+  const t = String(text || "");
+  if (!t) return 0;
+  const i = Math.max(0, Math.min(t.length, Math.floor(approxIndex)));
+  // 從目前位置往後找最近的安全切點（標點/換行），避免從句子中間開始
+  const forward = t.slice(i, Math.min(t.length, i + 80));
+  const m = forward.match(/[。！？!?；;，,\n]/);
+  if (m && m.index != null) {
+    return Math.min(t.length, i + m.index + 1);
+  }
+  // fallback：往前找
+  const back = t.slice(Math.max(0, i - 80), i);
+  const backIdx = Math.max(
+    back.lastIndexOf("。"),
+    back.lastIndexOf("！"),
+    back.lastIndexOf("？"),
+    back.lastIndexOf("!"),
+    back.lastIndexOf("?"),
+    back.lastIndexOf("；"),
+    back.lastIndexOf(";"),
+    back.lastIndexOf("，"),
+    back.lastIndexOf(","),
+    back.lastIndexOf("\n")
+  );
+  if (backIdx >= 0) {
+    return Math.max(0, i - 80 + backIdx + 1);
+  }
+  return i;
+}
+
 function formatRemainingTime(ms: number): string {
   const sec = Math.max(0, Math.ceil(ms / 1000));
   const m = Math.floor(sec / 60);
@@ -689,6 +719,10 @@ export default function App() {
 
   const topicSelectionKeyRef = useRef<string | null>(null);
   const currentUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const currentSpeakTextRef = useRef<string>("");
+  const speakStartedAtRef = useRef<number>(0);
+  const lastBoundaryCharIndexRef = useRef<number>(0);
+  const lastBoundaryAtRef = useRef<number>(0);
   const progressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastTtsErrorAtRef = useRef(0);
   const isManualStopRef = useRef(false);
@@ -1237,6 +1271,22 @@ export default function App() {
     u.rate = speed;
     if (selectedVoice) u.voice = selectedVoice;
     currentUtteranceRef.current = u;
+    currentSpeakTextRef.current = textToSpeak;
+    speakStartedAtRef.current = Date.now();
+    lastBoundaryCharIndexRef.current = 0;
+    lastBoundaryAtRef.current = Date.now();
+
+    u.onboundary = (ev) => {
+      if (currentUtteranceRef.current !== u) return;
+      const idx =
+        typeof (ev as unknown as { charIndex?: unknown }).charIndex === "number"
+          ? Number((ev as unknown as { charIndex: number }).charIndex)
+          : NaN;
+      if (!Number.isNaN(idx) && idx >= 0) {
+        lastBoundaryCharIndexRef.current = idx;
+        lastBoundaryAtRef.current = Date.now();
+      }
+    };
 
     u.onend = () => {
       if (currentUtteranceRef.current !== u) return;
@@ -1282,7 +1332,87 @@ export default function App() {
     const next = persistPlaybackSpeed(newSpeed);
     if (!isSpeaking && !isPaused) return;
 
-    // 播放中調速不重播：只影響下次播放
+    // 播放中調速：從目前位置附近續播（cancel 屬正常行為，不顯示錯誤）
+    const currentText = currentSpeakTextRef.current;
+    if (!currentText.trim()) return;
+
+    // 若 onboundary 有回報就用；否則用時間估算
+    const boundaryIdx = lastBoundaryCharIndexRef.current;
+    let approxIdx = boundaryIdx;
+    if (!approxIdx || approxIdx <= 0) {
+      const elapsedMs = Math.max(0, Date.now() - speakStartedAtRef.current);
+      const estCharsPerMs = 1 / Math.max(1, estimateChunkDurationMs("一".repeat(100), speed) / 100);
+      approxIdx = Math.floor(elapsedMs * estCharsPerMs);
+    }
+
+    const resumeAt = findResumeIndex(currentText, approxIdx);
+    const remain = currentText.slice(resumeAt).trim();
+    if (!remain) {
+      stopPlayback();
+      return;
+    }
+
+    const selectedVoice = voices.find((v) => v.name === voiceName);
+    const u = new SpeechSynthesisUtterance(remain);
+    u.lang = "zh-TW";
+    u.rate = next;
+    if (selectedVoice) u.voice = selectedVoice;
+
+    // 進度 ref 更新，避免後續再次調速仍從頭
+    currentUtteranceRef.current = u;
+    currentSpeakTextRef.current = remain;
+    speakStartedAtRef.current = Date.now();
+    lastBoundaryCharIndexRef.current = 0;
+    lastBoundaryAtRef.current = Date.now();
+
+    u.onboundary = (ev) => {
+      if (currentUtteranceRef.current !== u) return;
+      const idx =
+        typeof (ev as unknown as { charIndex?: unknown }).charIndex === "number"
+          ? Number((ev as unknown as { charIndex: number }).charIndex)
+          : NaN;
+      if (!Number.isNaN(idx) && idx >= 0) {
+        lastBoundaryCharIndexRef.current = idx;
+        lastBoundaryAtRef.current = Date.now();
+      }
+    };
+    u.onend = () => {
+      if (currentUtteranceRef.current !== u) return;
+      setIsSpeaking(false);
+      setIsPaused(false);
+      setPlaybackMode(null);
+      currentUtteranceRef.current = null;
+      currentSpeakTextRef.current = "";
+    };
+    u.onerror = () => {
+      if (currentUtteranceRef.current !== u) return;
+      if (isManualStopRef.current) return;
+      setIsSpeaking(false);
+      setIsPaused(false);
+      currentUtteranceRef.current = null;
+      currentSpeakTextRef.current = "";
+      const now = Date.now();
+      if (now - lastTtsErrorAtRef.current > 2500) {
+        lastTtsErrorAtRef.current = now;
+        alert("無法啟動語音朗讀。請確認裝置音量、靜音模式與瀏覽器語音權限。");
+      }
+    };
+
+    // 調速的 cancel 是正常行為，避免誤報
+    isManualStopRef.current = true;
+    try {
+      window.speechSynthesis.cancel();
+    } catch {
+      /* ignore */
+    }
+    isManualStopRef.current = false;
+    setIsPaused(false);
+    setIsSpeaking(true);
+    try {
+      window.speechSynthesis.speak(u);
+    } catch {
+      u.onerror?.(new Event("error"));
+    }
   };
 
   const clearAiCache = () => {
