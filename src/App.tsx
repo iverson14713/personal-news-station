@@ -1338,6 +1338,8 @@ export default function App() {
     const token = ++ttsStartTokenRef.current;
     ttsStartWatchdogRef.current = window.setTimeout(() => {
       if (token !== ttsStartTokenRef.current) return;
+      // 只監測「第一段是否成功啟動」：避免在段落切換的瞬間誤判導致中途停止
+      if (speechRef.current.chunkIndex !== 0) return;
       const synth = window.speechSynthesis;
       if (!synth) return;
       if (!synth.speaking && !synth.pending) {
