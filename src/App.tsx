@@ -566,7 +566,8 @@ export default function App() {
   const [totalChunks, setTotalChunks] = useState(0);
   const [scriptFontSize, setScriptFontSize] = useState<ScriptFontSize>(readScriptFontSize);
   const [planTier, setPlanTier] = useState<PlanTier>(readPlanTier);
-  const [proModalOpen, setProModalOpen] = useState(false);
+  const [paywallOpen, setPaywallOpen] = useState(false);
+  const [paywallPlan, setPaywallPlan] = useState<"monthly" | "yearly">("yearly");
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState(() => !readOnboardingSeen());
   const [onboardingStep, setOnboardingStep] = useState(0);
@@ -1293,9 +1294,7 @@ export default function App() {
     }
     const remaining = Math.max(0, AI_DAILY_LIMIT[planTier] - q.used);
     if (remaining <= 0) {
-      alert(
-        `今日 AI 分析次數已用完（0 / ${AI_DAILY_LIMIT[planTier]}）。\n\n提示：可在「設定」頁切換到 Pro（Demo）以增加每日額度。`
-      );
+      setPaywallOpen(true);
       return;
     }
     setAiDurationSheetOpen(true);
@@ -1304,7 +1303,7 @@ export default function App() {
   const runAiAnalysisWithDuration = (duration: AiDuration) => {
     if (planTier !== "pro" && duration !== 1) {
       setAiDurationSheetOpen(false);
-      setProModalOpen(true);
+      setPaywallOpen(true);
       return;
     }
     setAiDuration(duration);
@@ -1385,6 +1384,7 @@ ${newsText}
     const remaining = Math.max(0, AI_DAILY_LIMIT[planTier] - normalized.used);
     if (remaining <= 0) {
       setAiError(`今日 AI 分析次數已用完（0 / ${AI_DAILY_LIMIT[planTier]}）。`);
+      setPaywallOpen(true);
       return;
     }
     setAiError(null);
@@ -1649,7 +1649,7 @@ ${newsText}
               planTier={planTier}
               aiQuotaRemaining={aiQuotaRemaining}
               aiDailyLimit={aiDailyLimit}
-              onOpenProModal={() => setProModalOpen(true)}
+              onOpenProModal={() => setPaywallOpen(true)}
             />
 
             <NewsList
@@ -1712,7 +1712,7 @@ ${newsText}
               planTier={planTier}
               aiQuotaRemaining={aiQuotaRemaining}
               aiDailyLimit={aiDailyLimit}
-              onOpenProModal={() => setProModalOpen(true)}
+              onOpenProModal={() => setPaywallOpen(true)}
             />
 
             <AiHistorySection
@@ -2077,18 +2077,20 @@ ${newsText}
             onClose={() => setAiDurationSheetOpen(false)}
             onSelect={runAiAnalysisWithDuration}
             planTier={planTier}
-            onOpenProModal={() => setProModalOpen(true)}
+            onOpenProModal={() => setPaywallOpen(true)}
           />
         ) : null}
 
         {splashOpen ? <SplashScreen /> : null}
 
-        {proModalOpen ? (
-          <ProUpgradeModal
-            onClose={() => setProModalOpen(false)}
-            onSwitchToProDemo={() => {
+        {paywallOpen ? (
+          <ProPaywall
+            selectedPlan={paywallPlan}
+            onPlanChange={setPaywallPlan}
+            onClose={() => setPaywallOpen(false)}
+            onUpgrade={() => {
               setPlanTier("pro");
-              setProModalOpen(false);
+              setPaywallOpen(false);
             }}
           />
         ) : null}
@@ -2556,6 +2558,101 @@ function ProUpgradeCard({
   );
 }
 
+function ProPaywall({
+  selectedPlan,
+  onPlanChange,
+  onClose,
+  onUpgrade,
+}: {
+  selectedPlan: "monthly" | "yearly";
+  onPlanChange: (v: "monthly" | "yearly") => void;
+  onClose: () => void;
+  onUpgrade: () => void;
+}) {
+  return (
+    <div style={styles.paywallBackdrop} role="presentation">
+      <div style={styles.paywallWrap} role="dialog" aria-modal="true" aria-label="Pro 升級頁">
+        <div style={styles.paywallTopBar}>
+          <button type="button" onClick={onClose} style={styles.paywallLaterTop}>
+            稍後再說
+          </button>
+        </div>
+
+        <div style={styles.paywallScroll}>
+          <header style={styles.paywallHero}>
+            <div style={styles.paywallBrand}>AI個人新聞台 Pro</div>
+            <div style={styles.paywallSlogan}>每天 5 分鐘，快速掌握世界重點</div>
+          </header>
+
+          <section style={styles.paywallFeatureGrid} aria-label="功能亮點">
+            {[
+              { title: "每日 30 次 AI 分析", desc: "隨時更新重點，不怕用完。" },
+              { title: "3 / 5 分鐘 AI 主播稿", desc: "更完整、更像真正新聞台。" },
+              { title: "AI 歷史紀錄", desc: "回放、複製、整理你的日常重點。" },
+              { title: "更多收藏", desc: "更長的收藏清單（即將開放）。" },
+              { title: "未來每日自動簡報", desc: "每天固定時間推播你的摘要（規劃中）。" },
+            ].map((f) => (
+              <div key={f.title} style={styles.paywallFeatureCard}>
+                <div style={styles.paywallFeatureTitle}>{f.title}</div>
+                <div style={styles.paywallFeatureDesc}>{f.desc}</div>
+              </div>
+            ))}
+          </section>
+
+          <section style={styles.paywallPlanSection} aria-label="方案">
+            <div style={styles.paywallPlanHeader}>
+              <div style={styles.paywallPlanTitle}>選擇方案</div>
+              <div style={styles.paywallPlanHint}>目前為 Demo 模式，按「立即升級」會切換 Pro Demo</div>
+            </div>
+
+            <div style={styles.paywallPlanList}>
+              <button
+                type="button"
+                onClick={() => onPlanChange("monthly")}
+                style={{
+                  ...styles.paywallPlanCard,
+                  ...(selectedPlan === "monthly" ? styles.paywallPlanCardActive : {}),
+                }}
+              >
+                <div style={styles.paywallPlanRow}>
+                  <div style={styles.paywallPlanName}>月費</div>
+                  <div style={styles.paywallPlanPrice}>{PRO_PRICING.monthly.label}</div>
+                </div>
+                <div style={styles.paywallPlanSub}>適合先體驗</div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => onPlanChange("yearly")}
+                style={{
+                  ...styles.paywallPlanCard,
+                  ...(selectedPlan === "yearly" ? styles.paywallPlanCardActive : {}),
+                }}
+              >
+                <div style={styles.paywallPlanPopular}>最受歡迎</div>
+                <div style={styles.paywallPlanRow}>
+                  <div style={styles.paywallPlanName}>年費</div>
+                  <div style={styles.paywallPlanPrice}>{PRO_PRICING.yearly.label}</div>
+                </div>
+                <div style={styles.paywallPlanSub}>約省 15% · 長期最划算</div>
+              </button>
+            </div>
+          </section>
+        </div>
+
+        <div style={styles.paywallBottomBar}>
+          <button type="button" onClick={onUpgrade} style={styles.paywallPrimaryCta}>
+            立即升級
+          </button>
+          <button type="button" onClick={onClose} style={styles.paywallSecondaryCta}>
+            稍後再說
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AiHistorySection({
   entries,
   activeId,
@@ -2750,39 +2847,6 @@ function AuthComingSoonModal({ onClose }: { onClose: () => void }) {
   );
 }
 
-function ProUpgradeModal({
-  onClose,
-  onSwitchToProDemo,
-}: {
-  onClose: () => void;
-  onSwitchToProDemo: () => void;
-}) {
-  return (
-    <div style={styles.proModalBackdrop} onClick={onClose} role="presentation">
-      <div
-        style={styles.proModal}
-        onClick={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-        aria-label="Pro 訂閱"
-      >
-        <div style={styles.proModalTitle}>Pro 訂閱即將開放</div>
-        <div style={styles.proModalBody}>
-          目前為 Demo 模式，尚未接付款。\n\n你可以先切換到 Pro Demo 以體驗完整功能與每日 30 次額度。
-        </div>
-        <div style={styles.proModalActions}>
-          <button type="button" onClick={onSwitchToProDemo} style={styles.proModalPrimary}>
-            切換成 Pro Demo
-          </button>
-          <button type="button" onClick={onClose} style={styles.proModalSecondary}>
-            取消
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function OnboardingModal({
   step,
   onPrev,
@@ -2799,22 +2863,22 @@ function OnboardingModal({
   const steps = [
     {
       title: "選主題",
-      body: "選 NBA、MLB、幣圈、台股、國際等你關心的主題，首頁會自動整理最新新聞。",
+      body: "先挑你關心的主題，首頁就會自動整理。",
       icon: "🎯",
     },
     {
       title: "勾新聞",
-      body: "從新聞列表勾選你想聽的內容，打造今天的個人新聞清單。",
+      body: "勾選今天想聽的內容，快速組合清單。",
       icon: "✅",
     },
     {
-      title: "AI 產生主播稿",
-      body: "一鍵產生 1／3／5 分鐘 AI 新聞稿（Free 可用 1 分鐘；3／5 分鐘需 Pro）。",
+      title: "AI 主播稿",
+      body: "一鍵產生 1／3／5 分鐘重點與主播稿。",
       icon: "✨",
     },
     {
       title: "播放收聽",
-      body: "像個人新聞台一樣播放、調整語速、收藏喜歡的新聞，隨時回來繼續聽。",
+      body: "播放、調整語速、收藏喜歡的新聞。",
       icon: "🎙️",
     },
   ] as const;
@@ -5149,88 +5213,227 @@ const styles: Record<string, CSSProperties> = {
     borderRadius: "999px",
     padding: "4px 10px",
   },
-  proModalBackdrop: {
+  paywallBackdrop: {
     position: "fixed",
     inset: 0,
-    background: "rgba(2,6,23,.72)",
-    backdropFilter: "blur(4px)",
-    zIndex: 120,
+    background: "linear-gradient(180deg, rgba(2,6,23,.92), rgba(2,6,23,.85))",
+    zIndex: 180,
     display: "flex",
-    alignItems: "flex-end",
     justifyContent: "center",
-    animation: "fadeIn 0.2s ease",
   },
-  proModal: {
-    width: "100%",
-    maxWidth: "460px",
-    borderRadius: "24px 24px 0 0",
-    padding: "14px 18px 24px",
-    paddingBottom: "max(24px, env(safe-area-inset-bottom, 0px))",
-    background: "linear-gradient(180deg, #1E293B 0%, #0F172A 100%)",
-    border: "1px solid rgba(255,255,255,.12)",
-    boxShadow: "0 -16px 48px rgba(0,0,0,.5)",
-    animation: "slideUp 0.28s cubic-bezier(0.22, 1, 0.36, 1)",
+  paywallWrap: {
+    width: "min(520px, 100%)",
+    minHeight: "100dvh",
+    display: "flex",
+    flexDirection: "column",
+    background:
+      "radial-gradient(circle at 20% 0%, rgba(99,102,241,.25), transparent 45%), radial-gradient(circle at 80% 10%, rgba(34,211,238,.18), transparent 40%), linear-gradient(180deg, #020617 0%, #0B1223 55%, #020617 100%)",
+    borderLeft: "1px solid rgba(255,255,255,.08)",
+    borderRight: "1px solid rgba(255,255,255,.08)",
   },
-  proModalTitle: { fontSize: "18px", fontWeight: 900, marginBottom: "8px" },
-  proModalBody: { whiteSpace: "pre-line", fontSize: "13px", color: "#CBD5E1", lineHeight: 1.5 },
-  proModalActions: { display: "flex", flexDirection: "column", gap: "10px", marginTop: "14px" },
-  proModalPrimary: {
-    width: "100%",
-    border: "none",
-    borderRadius: "14px",
-    padding: "12px 14px",
-    fontSize: "14px",
+  paywallTopBar: {
+    padding: "max(14px, env(safe-area-inset-top, 0px)) 16px 10px",
+    display: "flex",
+    justifyContent: "flex-end",
+  },
+  paywallLaterTop: {
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.06)",
+    color: "#E2E8F0",
+    borderRadius: "999px",
+    padding: "8px 12px",
+    fontSize: "12px",
     fontWeight: 900,
     cursor: "pointer",
-    color: "#0F172A",
-    background: "linear-gradient(135deg, #FDE68A, #A78BFA)",
   },
-  proModalSecondary: {
-    width: "100%",
-    border: "1px solid rgba(255,255,255,.12)",
-    borderRadius: "14px",
-    padding: "12px 14px",
+  paywallScroll: {
+    flex: 1,
+    overflowY: "auto",
+    padding: "0 16px 16px",
+  },
+  paywallHero: {
+    padding: "8px 6px 14px",
+    marginBottom: "10px",
+  },
+  paywallBrand: {
+    fontSize: "22px",
+    fontWeight: 1000,
+    letterSpacing: "-0.02em",
+    color: "#F8FAFC",
+  },
+  paywallSlogan: {
+    marginTop: "8px",
     fontSize: "14px",
-    fontWeight: 700,
-    cursor: "pointer",
+    lineHeight: 1.45,
     color: "#CBD5E1",
+  },
+  paywallFeatureGrid: {
+    display: "grid",
+    gridTemplateColumns: "1fr",
+    gap: "10px",
+    marginBottom: "14px",
+  },
+  paywallFeatureCard: {
+    padding: "14px",
+    borderRadius: "16px",
+    background: "rgba(255,255,255,.05)",
+    border: "1px solid rgba(255,255,255,.10)",
+  },
+  paywallFeatureTitle: {
+    fontSize: "14px",
+    fontWeight: 950,
+    color: "#F8FAFC",
+    marginBottom: "6px",
+  },
+  paywallFeatureDesc: {
+    fontSize: "13px",
+    lineHeight: 1.5,
+    color: "#94A3B8",
+  },
+  paywallPlanSection: {
+    padding: "14px",
+    borderRadius: "18px",
+    background: "rgba(15,23,42,.55)",
+    border: "1px solid rgba(255,255,255,.10)",
+  },
+  paywallPlanHeader: {
+    marginBottom: "10px",
+  },
+  paywallPlanTitle: {
+    fontSize: "15px",
+    fontWeight: 950,
+    color: "#F8FAFC",
+  },
+  paywallPlanHint: {
+    marginTop: "6px",
+    fontSize: "12px",
+    lineHeight: 1.45,
+    color: "#64748B",
+  },
+  paywallPlanList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "10px",
+  },
+  paywallPlanCard: {
+    position: "relative",
+    width: "100%",
+    textAlign: "left",
+    borderRadius: "16px",
+    padding: "12px 12px",
     background: "rgba(255,255,255,.06)",
+    border: "1px solid rgba(255,255,255,.12)",
+    color: "inherit",
+    cursor: "pointer",
+  },
+  paywallPlanCardActive: {
+    borderColor: "rgba(96,165,250,.55)",
+    boxShadow: "0 0 0 1px rgba(96,165,250,.18)",
+    background: "rgba(37,99,235,.14)",
+  },
+  paywallPlanPopular: {
+    position: "absolute",
+    top: "-10px",
+    right: "10px",
+    fontSize: "10px",
+    fontWeight: 950,
+    letterSpacing: "0.08em",
+    textTransform: "uppercase",
+    color: "#0B1223",
+    background: "linear-gradient(135deg, #FDE68A, #FDBA74)",
+    borderRadius: "999px",
+    padding: "5px 10px",
+  },
+  paywallPlanRow: {
+    display: "flex",
+    alignItems: "baseline",
+    justifyContent: "space-between",
+    gap: "12px",
+  },
+  paywallPlanName: {
+    fontSize: "14px",
+    fontWeight: 950,
+    color: "#F8FAFC",
+  },
+  paywallPlanPrice: {
+    fontSize: "14px",
+    fontWeight: 950,
+    color: "#E2E8F0",
+  },
+  paywallPlanSub: {
+    marginTop: "6px",
+    fontSize: "12px",
+    color: "#94A3B8",
+    fontWeight: 700,
+  },
+  paywallBottomBar: {
+    padding: "12px 16px max(16px, env(safe-area-inset-bottom, 0px))",
+    borderTop: "1px solid rgba(255,255,255,.08)",
+    background: "rgba(2,6,23,.72)",
+    backdropFilter: "blur(14px)",
+    display: "flex",
+    flexDirection: "column",
+    gap: "10px",
+  },
+  paywallPrimaryCta: {
+    width: "100%",
+    border: "none",
+    borderRadius: "16px",
+    padding: "14px 14px",
+    fontSize: "15px",
+    fontWeight: 1000,
+    cursor: "pointer",
+    color: "#0F172A",
+    background: "linear-gradient(135deg, #60A5FA, #A78BFA)",
+    boxShadow: "0 10px 30px rgba(99,102,241,.18)",
+  },
+  paywallSecondaryCta: {
+    width: "100%",
+    borderRadius: "16px",
+    padding: "13px 14px",
+    fontSize: "14px",
+    fontWeight: 950,
+    cursor: "pointer",
+    color: "#E2E8F0",
+    background: "rgba(255,255,255,.06)",
+    border: "1px solid rgba(255,255,255,.14)",
   },
   onboardingBackdrop: {
     position: "fixed",
     inset: 0,
-    background: "rgba(2,6,23,.80)",
-    backdropFilter: "blur(6px)",
+    background:
+      "radial-gradient(circle at 20% 0%, rgba(99,102,241,.25), transparent 45%), radial-gradient(circle at 80% 10%, rgba(34,211,238,.16), transparent 40%), rgba(2,6,23,.92)",
+    backdropFilter: "blur(10px)",
     zIndex: 140,
     display: "flex",
-    alignItems: "flex-end",
+    alignItems: "center",
     justifyContent: "center",
     animation: "fadeIn 0.2s ease",
   },
   onboardingModal: {
-    width: "100%",
-    maxWidth: "460px",
-    borderRadius: "26px 26px 0 0",
-    padding: "14px 18px 24px",
-    paddingBottom: "max(24px, env(safe-area-inset-bottom, 0px))",
-    background: "linear-gradient(180deg, rgba(30,41,59,.98) 0%, rgba(15,23,42,.98) 100%)",
-    border: "1px solid rgba(255,255,255,.12)",
-    boxShadow: "0 -18px 56px rgba(0,0,0,.6)",
-    animation: "slideUp 0.28s cubic-bezier(0.22, 1, 0.36, 1)",
+    width: "min(520px, 100%)",
+    minHeight: "100dvh",
+    display: "flex",
+    flexDirection: "column",
+    padding:
+      "max(18px, env(safe-area-inset-top, 0px)) 18px max(18px, env(safe-area-inset-bottom, 0px))",
+    background:
+      "linear-gradient(180deg, rgba(2,6,23,.96) 0%, rgba(11,18,35,.96) 55%, rgba(2,6,23,.96) 100%)",
+    borderLeft: "1px solid rgba(255,255,255,.08)",
+    borderRight: "1px solid rgba(255,255,255,.08)",
   },
   onboardingTopRow: {
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
     gap: "12px",
-    marginBottom: "12px",
+    marginBottom: "14px",
   },
   onboardingBrand: {
-    fontSize: "12px",
-    fontWeight: 900,
-    letterSpacing: "0.10em",
-    color: "#93C5FD",
-    textTransform: "uppercase",
+    fontSize: "13px",
+    fontWeight: 950,
+    letterSpacing: "-0.01em",
+    color: "#E2E8F0",
   },
   onboardingSkipBtn: {
     border: "1px solid rgba(255,255,255,.14)",
@@ -5243,48 +5446,52 @@ const styles: Record<string, CSSProperties> = {
     cursor: "pointer",
   },
   onboardingCard: {
-    borderRadius: "18px",
-    padding: "16px 16px 18px",
+    flex: 1,
+    borderRadius: "26px",
+    padding: "26px 22px",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    justifyContent: "center",
     background:
-      "radial-gradient(circle at top left, rgba(99,102,241,.35) 0%, transparent 55%), linear-gradient(165deg, rgba(255,255,255,.08) 0%, rgba(255,255,255,.04) 100%)",
-    border: "1px solid rgba(255,255,255,.10)",
+      "radial-gradient(circle at 12% 10%, rgba(99,102,241,.40) 0%, transparent 50%), radial-gradient(circle at 88% 22%, rgba(34,211,238,.22) 0%, transparent 55%), linear-gradient(165deg, rgba(255,255,255,.08) 0%, rgba(255,255,255,.04) 100%)",
+    border: "1px solid rgba(255,255,255,.12)",
   },
   onboardingIcon: {
-    width: "54px",
-    height: "54px",
-    borderRadius: "18px",
+    width: "92px",
+    height: "92px",
+    borderRadius: "28px",
     display: "grid",
     placeItems: "center",
-    fontSize: "26px",
-    background: "rgba(255,255,255,.06)",
-    border: "1px solid rgba(255,255,255,.10)",
-    marginBottom: "10px",
+    fontSize: "44px",
+    background: "rgba(255,255,255,.08)",
+    border: "1px solid rgba(255,255,255,.12)",
+    marginBottom: "18px",
   },
   onboardingStepKicker: {
-    fontSize: "11px",
-    fontWeight: 800,
+    fontSize: "12px",
+    fontWeight: 850,
     color: "#94A3B8",
-    letterSpacing: "0.08em",
-    textTransform: "uppercase",
   },
   onboardingTitle: {
-    marginTop: "6px",
-    fontSize: "18px",
-    fontWeight: 900,
+    marginTop: "10px",
+    fontSize: "28px",
+    fontWeight: 1000,
     letterSpacing: "-0.02em",
   },
   onboardingBody: {
-    marginTop: "8px",
-    fontSize: "13px",
-    lineHeight: 1.55,
+    marginTop: "14px",
+    fontSize: "18px",
+    lineHeight: 1.65,
     color: "#CBD5E1",
+    maxWidth: "28ch",
   },
   onboardingDots: {
     display: "flex",
     justifyContent: "center",
     gap: "8px",
     marginTop: "14px",
-    marginBottom: "12px",
+    marginBottom: "14px",
   },
   onboardingDot: {
     width: "7px",
@@ -5303,10 +5510,11 @@ const styles: Record<string, CSSProperties> = {
   onboardingPrimary: {
     flex: 1,
     border: "none",
-    borderRadius: "14px",
-    padding: "12px 14px",
-    fontSize: "14px",
-    fontWeight: 900,
+    borderRadius: "16px",
+    height: "54px",
+    padding: "0 14px",
+    fontSize: "15px",
+    fontWeight: 950,
     cursor: "pointer",
     color: "#0F172A",
     background: "linear-gradient(135deg, #60A5FA, #A78BFA)",
@@ -5314,10 +5522,11 @@ const styles: Record<string, CSSProperties> = {
   onboardingSecondary: {
     flex: 1,
     border: "1px solid rgba(255,255,255,.14)",
-    borderRadius: "14px",
-    padding: "12px 14px",
-    fontSize: "14px",
-    fontWeight: 800,
+    borderRadius: "16px",
+    height: "54px",
+    padding: "0 14px",
+    fontSize: "15px",
+    fontWeight: 850,
     cursor: "pointer",
     color: "#CBD5E1",
     background: "rgba(255,255,255,.06)",
