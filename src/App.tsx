@@ -292,7 +292,8 @@ function writeAiDailyQuota(q: { date: string; used: number }) {
 
 function splitSpeechChunks(text: string): string[] {
   const raw = text
-    .split(/(?<=[。！？!?;；])\s*|\n+/)
+    // iOS TTS 穩定性：只在句號/逗號/分號/換行後切段，避免句子中斷
+    .split(/(?<=[。！？!?;；，,])\s*|\n+/)
     .map((s) => s.trim())
     .filter(Boolean);
   if (raw.length === 0) return text.trim() ? [text.trim()] : [];
@@ -702,6 +703,7 @@ export default function App() {
   const ttsStartWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ttsStartTokenRef = useRef(0);
   const isManualStopRef = useRef(false);
+  const ttsRetryRef = useRef<{ index: number; count: number }>({ index: -1, count: 0 });
 
   const selectedNews = news.filter((n) => n.selected);
   const favoriteNews = news.filter((n) => n.favorite);
@@ -1217,6 +1219,10 @@ export default function App() {
 
       utterance.onend = () => {
         if (speechRef.current.chunkIndex !== index) return;
+        // 成功播完此段，重試計數清空
+        if (ttsRetryRef.current.index === index) {
+          ttsRetryRef.current = { index: -1, count: 0 };
+        }
         speakChunkAt(index + 1);
       };
       utterance.onerror = (ev) => {
@@ -1236,14 +1242,22 @@ export default function App() {
         ) {
           return;
         }
-        clearProgressTimer();
-        setIsSpeaking(false);
-        setIsPaused(false);
-        const now = Date.now();
-        if (now - lastTtsErrorAtRef.current > 2500) {
-          lastTtsErrorAtRef.current = now;
-          alert("無法啟動語音朗讀。請確認裝置音量、靜音模式與瀏覽器語音權限。");
+        // 單段自動重試一次；仍失敗則跳下一段（不中斷整篇體驗，也不顯示分段提示）
+        const r = ttsRetryRef.current;
+        const count = r.index === index ? r.count : 0;
+        if (count < 1) {
+          ttsRetryRef.current = { index, count: count + 1 };
+          window.setTimeout(() => {
+            if (speechRef.current.chunkIndex !== index) return;
+            speakChunkAt(index);
+          }, 60);
+          return;
         }
+        ttsRetryRef.current = { index: -1, count: 0 };
+        window.setTimeout(() => {
+          if (speechRef.current.chunkIndex !== index) return;
+          speakChunkAt(index + 1);
+        }, 60);
       };
 
       try {
@@ -2565,11 +2579,6 @@ function PlayerDeck({
             <span style={styles.playerSpeedTag}>{speed.toFixed(2)}x</span>
             {active && remainingMs > 0 ? (
               <span style={styles.playerRemaining}>{formatRemainingTime(remainingMs)}</span>
-            ) : null}
-            {totalChunks > 0 && currentChunkIndex >= 0 ? (
-              <span style={styles.playerChunkMeta}>
-                {currentChunkIndex + 1} / {totalChunks}
-              </span>
             ) : null}
           </div>
         </div>
