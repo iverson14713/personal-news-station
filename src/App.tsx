@@ -4,6 +4,12 @@ import { Headphones, Home, Settings, Star } from "lucide-react";
 
 type Tab = "home" | "player" | "video" | "favorites" | "settings";
 
+declare global {
+  interface Window {
+    adsbygoogle?: unknown[];
+  }
+}
+
 /**
  * 設為 `true` 可再次顯示底部「影音」Tab 與影音分頁。
  * `loadVideos`、`/api/videos` 與相關 state 均保留，僅隱藏 UI。
@@ -111,6 +117,20 @@ const PRO_PRICING = {
 const ONBOARDING_SEEN_KEY = "pns_onboarding_seen_v1";
 const SPLASH_SEEN_SESSION_KEY = "pns_splash_seen_session_v1";
 const SPLASH_DURATION_MS = 1500;
+
+function readAdSenseClientId(): string {
+  try {
+    const v = (import.meta as unknown as { env?: Record<string, unknown> })?.env?.[
+      "VITE_GOOGLE_ADSENSE_CLIENT_ID"
+    ];
+    return typeof v === "string" ? v.trim() : "";
+  } catch {
+    return "";
+  }
+}
+
+const ADSENSE_HOME_SLOT_ID = "0000000000";
+const ADSENSE_PLAYER_BANNER_SLOT_ID = "0000000000";
 
 function readOnboardingSeen(): boolean {
   try {
@@ -565,9 +585,8 @@ export default function App() {
   const [remainingMs, setRemainingMs] = useState(0);
   const [totalChunks, setTotalChunks] = useState(0);
   const [scriptFontSize, setScriptFontSize] = useState<ScriptFontSize>(readScriptFontSize);
-  const [planTier, setPlanTier] = useState<PlanTier>(readPlanTier);
-  const [paywallOpen, setPaywallOpen] = useState(false);
-  const [paywallPlan, setPaywallPlan] = useState<"monthly" | "yearly">("yearly");
+  // v1 商業模式：免登入 + 廣告 + AI 次數限制（先固定 Free）
+  const [planTier, setPlanTier] = useState<PlanTier>("free");
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState(() => !readOnboardingSeen());
   const [onboardingStep, setOnboardingStep] = useState(0);
@@ -600,9 +619,33 @@ export default function App() {
   const aiDailyLimit = AI_DAILY_LIMIT[planTier];
   const aiQuotaRemaining = Math.max(0, aiDailyLimit - aiQuota.used);
 
+  const adSenseClientId = useMemo(() => readAdSenseClientId(), []);
+
   useEffect(() => {
-    writePlanTier(planTier);
-  }, [planTier]);
+    if (!adSenseClientId) return;
+    const existing = document.querySelector(
+      `script[data-adsense-client="${adSenseClientId}"]`
+    ) as HTMLScriptElement | null;
+    if (existing) return;
+
+    const s = document.createElement("script");
+    s.async = true;
+    s.src = `https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${encodeURIComponent(
+      adSenseClientId
+    )}`;
+    s.crossOrigin = "anonymous";
+    s.setAttribute("data-adsense-client", adSenseClientId);
+    document.head.appendChild(s);
+  }, [adSenseClientId]);
+
+  useEffect(() => {
+    // 若舊版 localStorage 曾切到 Pro，v1 強制回到 Free（避免誤導與規則不一致）
+    if (readPlanTier() !== "free") {
+      writePlanTier("free");
+    }
+    if (planTier !== "free") setPlanTier("free");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (onboardingOpen) {
@@ -1294,18 +1337,19 @@ export default function App() {
     }
     const remaining = Math.max(0, AI_DAILY_LIMIT[planTier] - q.used);
     if (remaining <= 0) {
-      setPaywallOpen(true);
+      setAiError(`今日 AI 分析次數已用完（0 / ${AI_DAILY_LIMIT[planTier]}）。`);
       return;
     }
     setAiDurationSheetOpen(true);
   };
 
   const runAiAnalysisWithDuration = (duration: AiDuration) => {
-    if (planTier !== "pro" && duration !== 1) {
+    // Free：允許 1 / 3 分鐘；5 分鐘鎖定
+    if (planTier !== "pro" && duration === 5) {
       setAiDurationSheetOpen(false);
-      setPaywallOpen(true);
       return;
     }
+
     setAiDuration(duration);
     setAiDurationSheetOpen(false);
     void fetchAiSummary(duration);
@@ -1384,7 +1428,6 @@ ${newsText}
     const remaining = Math.max(0, AI_DAILY_LIMIT[planTier] - normalized.used);
     if (remaining <= 0) {
       setAiError(`今日 AI 分析次數已用完（0 / ${AI_DAILY_LIMIT[planTier]}）。`);
-      setPaywallOpen(true);
       return;
     }
     setAiError(null);
@@ -1649,7 +1692,7 @@ ${newsText}
               planTier={planTier}
               aiQuotaRemaining={aiQuotaRemaining}
               aiDailyLimit={aiDailyLimit}
-              onOpenProModal={() => setPaywallOpen(true)}
+              onOpenProModal={() => {}}
             />
 
             <NewsList
@@ -1712,7 +1755,7 @@ ${newsText}
               planTier={planTier}
               aiQuotaRemaining={aiQuotaRemaining}
               aiDailyLimit={aiDailyLimit}
-              onOpenProModal={() => setPaywallOpen(true)}
+              onOpenProModal={() => {}}
             />
 
             <AiHistorySection
@@ -1737,6 +1780,13 @@ ${newsText}
                   ? currentChunkIndex
                   : -1
               }
+            />
+
+            <AdSenseSlot
+              clientId={adSenseClientId}
+              slotId={ADSENSE_PLAYER_BANNER_SLOT_ID}
+              format="horizontal"
+              placeholderVariant="banner"
             />
           </>
         )}
@@ -1869,10 +1919,19 @@ ${newsText}
 
         {tab === "settings" && (
           <>
-            <AccountSyncSection
-              planTier={planTier}
-              onOpenAuthModal={() => setAuthModalOpen(true)}
-            />
+            <section style={styles.controlPanel}>
+              <div style={styles.controlTitle}>帳號同步</div>
+              <div style={styles.settingHint}>
+                帳號同步功能即將開放，目前資料會保存在本機。
+              </div>
+              <button
+                type="button"
+                onClick={() => setAuthModalOpen(true)}
+                style={styles.fullButton}
+              >
+                了解更多
+              </button>
+            </section>
 
             <section style={styles.controlPanel}>
               <div style={styles.controlTitle}>我的追蹤主題</div>
@@ -1931,34 +1990,12 @@ ${newsText}
                 <div style={styles.planQuotaLeft}>
                   <div style={styles.planQuotaTitle}>今日剩餘</div>
                   <div style={styles.planQuotaValue}>
-                    剩餘 {aiQuotaRemaining} / {aiDailyLimit} 次
+                    {aiQuotaRemaining} / {aiDailyLimit} 次
                   </div>
                 </div>
                 <div style={styles.planQuotaRight}>
-                  <div style={styles.planChipRow} role="group" aria-label="方案（Demo）">
-                    <button
-                      type="button"
-                      onClick={() => setPlanTier("free")}
-                      style={{
-                        ...styles.planChip,
-                        ...(planTier === "free" ? styles.planChipActive : {}),
-                      }}
-                    >
-                      Free
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setPlanTier("pro")}
-                      style={{
-                        ...styles.planChip,
-                        ...(planTier === "pro" ? styles.planChipActive : {}),
-                      }}
-                    >
-                      Pro（Demo）
-                    </button>
-                  </div>
                   <div style={styles.planQuotaNote}>
-                    {planTier === "pro" ? "Pro 方案" : "Free 方案"}
+                    Free 方案 · Pro 即將開放
                   </div>
                 </div>
               </div>
@@ -2054,23 +2091,11 @@ ${newsText}
             onClose={() => setAiDurationSheetOpen(false)}
             onSelect={runAiAnalysisWithDuration}
             planTier={planTier}
-            onOpenProModal={() => setPaywallOpen(true)}
+            onOpenProModal={() => {}}
           />
         ) : null}
 
         {splashOpen ? <SplashScreen /> : null}
-
-        {paywallOpen ? (
-          <ProPaywall
-            selectedPlan={paywallPlan}
-            onPlanChange={setPaywallPlan}
-            onClose={() => setPaywallOpen(false)}
-            onUpgrade={() => {
-              setPlanTier("pro");
-              setPaywallOpen(false);
-            }}
-          />
-        ) : null}
 
         {authModalOpen ? (
           <AuthComingSoonModal onClose={() => setAuthModalOpen(false)} />
@@ -2523,13 +2548,13 @@ function ProUpgradeCard({
   }
 
   return (
-    <div style={styles.proBanner} role="note" aria-label="升級 Pro">
+    <div style={styles.proBanner} role="note" aria-label="Pro 即將開放">
       <div style={styles.proBannerLeft}>
-        <div style={styles.proBannerTitle}>✨ 解鎖 3/5 分鐘 AI 主播稿</div>
-        <div style={styles.proBannerSub}>每日 30 次 AI 分析</div>
+        <div style={styles.proBannerTitle}>Pro 即將開放</div>
+        <div style={styles.proBannerSub}>3／5 分鐘主播稿與更多功能將在後續推出</div>
       </div>
       <button type="button" onClick={onOpen} style={styles.proBannerBtn}>
-        升級 Pro
+        了解
       </button>
     </div>
   );
@@ -2546,6 +2571,9 @@ function ProPaywall({
   onClose: () => void;
   onUpgrade: () => void;
 }) {
+  // v1：先不提供正式購買體驗；保留程式碼但不顯示 UI
+  if (true) return null;
+
   return (
     <div style={styles.paywallBackdrop} role="presentation">
       <div style={styles.paywallWrap} role="dialog" aria-modal="true" aria-label="Pro 升級頁">
@@ -3137,35 +3165,28 @@ function AiDurationSheet({
             <button
               key={d}
               type="button"
-              disabled={loading}
+              disabled={loading || (planTier !== "pro" && d === 5)}
               className="ai-duration-option"
               onClick={() => {
-                if (planTier !== "pro" && d !== 1) {
-                  onOpenProModal();
-                  return;
-                }
                 onSelect(d);
               }}
               style={{
                 ...styles.aiSheetOptionBtn,
-                ...(planTier !== "pro" && d !== 1 ? styles.aiSheetOptionLocked : {}),
-                ...(planTier !== "pro" && d !== 1
-                  ? { cursor: "pointer", opacity: 0.92 }
-                  : {}),
+                ...(planTier !== "pro" && d === 5 ? styles.aiSheetOptionLocked : {}),
               }}
             >
               <span style={styles.aiSheetOptionMain}>
                 {d} 分鐘{" "}
-                {planTier !== "pro" && d !== 1 ? (
-                  <span style={styles.proLockTag}>🔒 Pro</span>
+                {planTier !== "pro" && d === 5 ? (
+                  <span style={styles.proLockTag}>即將開放</span>
                 ) : null}
               </span>
               <span style={styles.aiSheetOptionSub}>
                 {d === 1
-                  ? "快報 · 依重要度詳略"
+                  ? "快報 · 無廣告"
                   : d === 3
-                    ? "平衡 · 自動分配篇幅"
-                    : "深度 · 少則可延伸背景"}
+                    ? "平衡 · 無插頁廣告"
+                    : "深度 · 即將開放"}
               </span>
             </button>
           ))}
@@ -3251,6 +3272,60 @@ function ActionButtons({
       <button onClick={copyGptPrompt} style={styles.gptButton}>
         GPT 精華
       </button>
+    </div>
+  );
+}
+
+function AdSenseSlot({
+  clientId,
+  slotId,
+  format,
+  placeholderVariant,
+}: {
+  clientId: string;
+  slotId: string;
+  format: "auto" | "horizontal" | "rectangle";
+  placeholderVariant: "native" | "banner";
+}) {
+  useEffect(() => {
+    if (!clientId) return;
+    try {
+      window.adsbygoogle = window.adsbygoogle || [];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window.adsbygoogle as any[]).push({});
+    } catch {
+      /* ignore */
+    }
+  }, [clientId, slotId]);
+
+  if (!clientId) {
+    return placeholderVariant === "banner" ? (
+      <div style={styles.adBanner} role="note" aria-label="Advertisement">
+        <div style={styles.adTag}>Advertisement</div>
+        <div style={styles.adBannerText}>贊助內容 · Banner</div>
+      </div>
+    ) : (
+      <div style={styles.adNative} role="note" aria-label="Advertisement">
+        <div style={styles.adTag}>Advertisement</div>
+        <div style={styles.adTitle}>贊助內容</div>
+        <div style={styles.adBody}>此位置將展示原生廣告，不影響閱讀與播放。</div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      style={placeholderVariant === "banner" ? styles.adBannerFrame : styles.adNativeFrame}
+      aria-label="Advertisement"
+    >
+      <ins
+        className="adsbygoogle"
+        style={{ display: "block", width: "100%" }}
+        data-ad-client={clientId}
+        data-ad-slot={slotId}
+        data-ad-format={format}
+        data-full-width-responsive="true"
+      />
     </div>
   );
 }
@@ -3351,55 +3426,73 @@ function NewsList({
       )}
 
       <div style={denseCards ? styles.newsListDense : styles.newsList}>
-        {news.map((item, index) => (
-          <article
-            key={item.id}
-            onClick={() => toggleNews(item.id)}
-            style={{
-              ...styles.newsCard,
-              ...(denseCards ? styles.newsCardDense : {}),
-              ...(item.selected ? styles.newsCardActive : {}),
-              ...(playingIndex === index ? styles.newsCardPlaying : {}),
-            }}
-          >
-            <div style={styles.newsIndex}>
-              {String(index + 1).padStart(2, "0")}
-            </div>
+        {(() => {
+          const blocks: JSX.Element[] = [];
+          const showNativeAd = title === "新聞" && news.length >= 8;
+          const adIndex = showNativeAd ? Math.min(4, Math.floor(news.length / 2)) : -1;
 
-            <div style={{ flex: 1 }}>
-              <div style={styles.newsTitle}>
-                {item.selected ? "✅ " : ""}
-                {item.title}
-              </div>
+          news.forEach((item, index) => {
+            if (showNativeAd && index === adIndex) {
+              blocks.push(
+                <AdSenseSlot
+                  key="native-ad"
+                  clientId={readAdSenseClientId()}
+                  slotId={ADSENSE_HOME_SLOT_ID}
+                  format="auto"
+                  placeholderVariant="native"
+                />
+              );
+            }
+            blocks.push(
+              <article
+                key={item.id}
+                onClick={() => toggleNews(item.id)}
+                style={{
+                  ...styles.newsCard,
+                  ...(denseCards ? styles.newsCardDense : {}),
+                  ...(item.selected ? styles.newsCardActive : {}),
+                  ...(playingIndex === index ? styles.newsCardPlaying : {}),
+                }}
+              >
+                <div style={styles.newsIndex}>{String(index + 1).padStart(2, "0")}</div>
 
-              <div style={styles.newsMeta}>
-                <span>{item.source}</span>
+                <div style={{ flex: 1 }}>
+                  <div style={styles.newsTitle}>
+                    {item.selected ? "✅ " : ""}
+                    {item.title}
+                  </div>
 
-                <div style={{ display: "flex", gap: 10 }}>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      toggleFavorite(item);
-                    }}
-                    style={styles.favoriteButton}
-                  >
-                    {item.favorite ? "⭐" : "☆"}
-                  </button>
+                  <div style={styles.newsMeta}>
+                    <span>{item.source}</span>
 
-                  <a
-                    href={item.link}
-                    target="_blank"
-                    rel="noreferrer"
-                    onClick={(e) => e.stopPropagation()}
-                    style={styles.link}
-                  >
-                    原文
-                  </a>
+                    <div style={{ display: "flex", gap: 10 }}>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleFavorite(item);
+                        }}
+                        style={styles.favoriteButton}
+                      >
+                        {item.favorite ? "⭐" : "☆"}
+                      </button>
+
+                      <a
+                        href={item.link}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        style={styles.link}
+                      >
+                        原文
+                      </a>
+                    </div>
+                  </div>
                 </div>
-              </div>
-            </div>
-          </article>
-        ))}
+              </article>
+            );
+          });
+          return blocks;
+        })()}
       </div>
     </>
   );
@@ -3868,6 +3961,46 @@ const styles: Record<string, CSSProperties> = {
     background: "rgba(255,255,255,.06)",
     border: "1px solid rgba(255,255,255,.12)",
   },
+  adNative: {
+    borderRadius: "16px",
+    padding: "14px 14px 16px",
+    background: "rgba(255,255,255,.04)",
+    border: "1px solid rgba(255,255,255,.08)",
+  },
+  adBanner: {
+    marginTop: "12px",
+    borderRadius: "16px",
+    padding: "12px 14px",
+    background: "rgba(255,255,255,.04)",
+    border: "1px solid rgba(255,255,255,.08)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "10px",
+  },
+  adNativeFrame: {
+    borderRadius: "16px",
+    padding: "10px 10px",
+    background: "rgba(255,255,255,.02)",
+    border: "1px solid rgba(255,255,255,.06)",
+  },
+  adBannerFrame: {
+    marginTop: "12px",
+    borderRadius: "16px",
+    padding: "8px 10px",
+    background: "rgba(255,255,255,.02)",
+    border: "1px solid rgba(255,255,255,.06)",
+  },
+  adTag: {
+    fontSize: "10px",
+    fontWeight: 900,
+    letterSpacing: "0.10em",
+    textTransform: "uppercase",
+    color: "rgba(148,163,184,.75)",
+  },
+  adTitle: { marginTop: "8px", fontSize: "14px", fontWeight: 900, color: "#F8FAFC" },
+  adBody: { marginTop: "6px", fontSize: "13px", lineHeight: 1.45, color: "#94A3B8" },
+  adBannerText: { fontSize: "13px", fontWeight: 800, color: "#CBD5E1" },
   controlPanel: {
     marginTop: "18px",
     background: "rgba(15,23,42,.82)",
