@@ -109,7 +109,7 @@ const AI_HISTORY_MAX = 20;
 const AI_FAVORITES_KEY = "pns_ai_favorites_v1";
 const PLAYBACK_SPEED_KEY = "pns_playback_speed_v1";
 const SPEED_MIN = 0.8;
-const SPEED_MAX = 1.1;
+const SPEED_MAX = 1.2;
 const SPEED_STEP = 0.05;
 const SPEED_DEFAULT = 1;
 const SCRIPT_FONT_KEY = "pns_script_font_v1";
@@ -1407,11 +1407,8 @@ export default function App() {
       (sum, c) => sum + estimateChunkDurationMs(c, next),
       0
     );
-    const idx = s.chunkIndex;
-    isManualStopRef.current = true;
-    window.speechSynthesis.cancel();
-    setIsPaused(false);
-    speakChunkAt(idx);
+    // 調速不要中斷當前朗讀（iOS 上 cancel/re-speak 會觸發 onerror 且會重複念）
+    // 新語速會在下一段 utterance 建立時套用
   };
 
   const clearAiCache = () => {
