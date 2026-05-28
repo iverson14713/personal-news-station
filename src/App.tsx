@@ -1534,9 +1534,18 @@ ${newsText}
             ? "收藏新聞"
             : "個人設定";
 
+  const showFloatingPlayer = (isSpeaking || isPaused) && tab !== "player";
+
   return (
     <div style={styles.page}>
-      <div style={styles.phone}>
+      <div
+        style={{
+          ...styles.phone,
+          paddingBottom: showFloatingPlayer
+            ? "calc(132px + env(safe-area-inset-bottom, 0px))"
+            : styles.phone.paddingBottom,
+        }}
+      >
         {tab === "home" ? (
           <header style={styles.homeHeader}>
             <div style={{ minWidth: 0 }}>
@@ -2029,12 +2038,27 @@ ${newsText}
                 清除全部收藏
               </button>
             </section>
+
+            <section style={styles.controlPanel}>
+              <div style={styles.controlTitle}>法律與隱私</div>
+              <div style={styles.settingHint}>
+                上架審查與使用者權益相關說明。
+              </div>
+              <div style={styles.legalLinksRow}>
+                <a href="/privacy" style={styles.legalLink}>
+                  隱私權政策
+                </a>
+                <a href="/terms" style={styles.legalLink}>
+                  服務條款
+                </a>
+              </div>
+            </section>
           </>
         )}
 
         <BottomNav tab={tab} setTab={setTab} />
 
-        {(isSpeaking || isPaused) && tab !== "player" ? (
+        {showFloatingPlayer ? (
           <FloatingPlayerBar
             isPaused={isPaused}
             playbackProgress={playbackProgress}
@@ -3070,7 +3094,7 @@ function AiDurationSheet({
             <button
               key={d}
               type="button"
-              disabled={loading || (planTier !== "pro" && d !== 1)}
+              disabled={loading}
               className="ai-duration-option"
               onClick={() => {
                 if (planTier !== "pro" && d !== 1) {
@@ -3082,6 +3106,9 @@ function AiDurationSheet({
               style={{
                 ...styles.aiSheetOptionBtn,
                 ...(planTier !== "pro" && d !== 1 ? styles.aiSheetOptionLocked : {}),
+                ...(planTier !== "pro" && d !== 1
+                  ? { cursor: "pointer", opacity: 0.92 }
+                  : {}),
               }}
             >
               <span style={styles.aiSheetOptionMain}>
@@ -3777,6 +3804,26 @@ const styles: Record<string, CSSProperties> = {
     cursor: "pointer",
     color: "#FCA5A5",
     background: "rgba(127,29,29,.2)",
+  },
+  legalLinksRow: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "8px",
+    marginTop: "4px",
+  },
+  legalLink: {
+    display: "block",
+    width: "100%",
+    boxSizing: "border-box",
+    textAlign: "center",
+    textDecoration: "none",
+    borderRadius: "12px",
+    padding: "12px 14px",
+    fontSize: "14px",
+    fontWeight: 800,
+    color: "#E2E8F0",
+    background: "rgba(255,255,255,.06)",
+    border: "1px solid rgba(255,255,255,.12)",
   },
   controlPanel: {
     marginTop: "18px",
