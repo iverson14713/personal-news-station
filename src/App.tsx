@@ -2904,9 +2904,11 @@ function OnboardingModal({
         </div>
 
         <div style={styles.onboardingCard}>
-          <div style={styles.onboardingIcon}>{s.icon}</div>
+          <div style={styles.onboardingIcon} aria-hidden>
+            {s.icon}
+          </div>
           <div style={styles.onboardingStepKicker}>
-            Step {step + 1} / {total}
+            STEP {step + 1} / {total}
           </div>
           <div style={styles.onboardingTitle}>{s.title}</div>
           <div style={styles.onboardingBody}>{s.body}</div>
@@ -5419,8 +5421,6 @@ const styles: Record<string, CSSProperties> = {
       "max(18px, env(safe-area-inset-top, 0px)) 18px max(18px, env(safe-area-inset-bottom, 0px))",
     background:
       "linear-gradient(180deg, rgba(2,6,23,.96) 0%, rgba(11,18,35,.96) 55%, rgba(2,6,23,.96) 100%)",
-    borderLeft: "1px solid rgba(255,255,255,.08)",
-    borderRight: "1px solid rgba(255,255,255,.08)",
   },
   onboardingTopRow: {
     display: "flex",
@@ -5436,46 +5436,43 @@ const styles: Record<string, CSSProperties> = {
     color: "#E2E8F0",
   },
   onboardingSkipBtn: {
-    border: "1px solid rgba(255,255,255,.14)",
-    background: "rgba(255,255,255,.06)",
+    border: "none",
+    background: "transparent",
     color: "#CBD5E1",
     borderRadius: "999px",
-    padding: "8px 12px",
-    fontWeight: 800,
+    padding: "8px 10px",
+    fontWeight: 850,
     fontSize: "12px",
     cursor: "pointer",
   },
   onboardingCard: {
     flex: 1,
-    borderRadius: "26px",
-    padding: "26px 22px",
+    borderRadius: "24px",
+    padding: "34px 22px",
     display: "flex",
     flexDirection: "column",
     alignItems: "flex-start",
     justifyContent: "center",
     background:
-      "radial-gradient(circle at 12% 10%, rgba(99,102,241,.40) 0%, transparent 50%), radial-gradient(circle at 88% 22%, rgba(34,211,238,.22) 0%, transparent 55%), linear-gradient(165deg, rgba(255,255,255,.08) 0%, rgba(255,255,255,.04) 100%)",
-    border: "1px solid rgba(255,255,255,.12)",
+      "radial-gradient(circle at 12% 10%, rgba(99,102,241,.34) 0%, transparent 52%), radial-gradient(circle at 88% 22%, rgba(34,211,238,.18) 0%, transparent 58%)",
   },
   onboardingIcon: {
     width: "92px",
     height: "92px",
-    borderRadius: "28px",
     display: "grid",
     placeItems: "center",
     fontSize: "44px",
-    background: "rgba(255,255,255,.08)",
-    border: "1px solid rgba(255,255,255,.12)",
     marginBottom: "18px",
   },
   onboardingStepKicker: {
     fontSize: "12px",
-    fontWeight: 850,
-    color: "#94A3B8",
+    fontWeight: 950,
+    letterSpacing: "0.16em",
+    color: "rgba(148,163,184,.72)",
   },
   onboardingTitle: {
     marginTop: "10px",
-    fontSize: "28px",
+    fontSize: "32px",
     fontWeight: 1000,
     letterSpacing: "-0.02em",
   },
@@ -5484,7 +5481,7 @@ const styles: Record<string, CSSProperties> = {
     fontSize: "18px",
     lineHeight: 1.65,
     color: "#CBD5E1",
-    maxWidth: "28ch",
+    maxWidth: "30ch",
   },
   onboardingDots: {
     display: "flex",
@@ -5510,7 +5507,7 @@ const styles: Record<string, CSSProperties> = {
   onboardingPrimary: {
     flex: 1,
     border: "none",
-    borderRadius: "16px",
+    borderRadius: "999px",
     height: "54px",
     padding: "0 14px",
     fontSize: "15px",
@@ -5518,18 +5515,19 @@ const styles: Record<string, CSSProperties> = {
     cursor: "pointer",
     color: "#0F172A",
     background: "linear-gradient(135deg, #60A5FA, #A78BFA)",
+    boxShadow: "0 12px 28px rgba(99,102,241,.22)",
   },
   onboardingSecondary: {
     flex: 1,
-    border: "1px solid rgba(255,255,255,.14)",
-    borderRadius: "16px",
+    border: "none",
+    borderRadius: "999px",
     height: "54px",
     padding: "0 14px",
     fontSize: "15px",
     fontWeight: 850,
     cursor: "pointer",
     color: "#CBD5E1",
-    background: "rgba(255,255,255,.06)",
+    background: "rgba(255,255,255,.05)",
   },
   splashWrap: {
     position: "fixed",
