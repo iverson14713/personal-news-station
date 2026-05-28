@@ -688,24 +688,20 @@ export default function App() {
   });
 
   const topicSelectionKeyRef = useRef<string | null>(null);
-  const speechRef = useRef({
-    chunks: [] as string[],
-    chunkIndex: 0,
-    rate: SPEED_DEFAULT,
-    mode: null as PlaybackMode,
-    chunkStartedAt: 0,
-    chunkDurationMs: 0,
-    totalEstimatedMs: 0,
-    elapsedBeforeChunkMs: 0,
-  });
+  // Stable playback controller (avoid React re-render affecting TTS queue)
+  const currentUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const playbackQueueRef = useRef<string[]>([]);
+  const currentSegmentIndexRef = useRef(0);
+  const isSpeakingRef = useRef(false);
+  const isPausedRef = useRef(false);
+  const rateRef = useRef<number>(SPEED_DEFAULT);
+  const retryOnceRef = useRef<{ index: number; tried: boolean }>({ index: -1, tried: false });
+  const watchdogRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const progressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastTtsErrorAtRef = useRef(0);
   const ttsStartWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ttsStartTokenRef = useRef(0);
   const isManualStopRef = useRef(false);
-  const ttsRetryRef = useRef<{ index: number; count: number }>({ index: -1, count: 0 });
-  const ttsActivityAtRef = useRef(0);
-  const ttsStallWatchdogRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const selectedNews = news.filter((n) => n.selected);
   const favoriteNews = news.filter((n) => n.favorite);
@@ -1176,138 +1172,33 @@ export default function App() {
     }
   };
 
-  const tickPlaybackProgress = useCallback(() => {
-    const s = speechRef.current;
-    if (!s.chunks.length || s.totalEstimatedMs <= 0) return;
-    const inChunk = Date.now() - s.chunkStartedAt;
-    const elapsed = s.elapsedBeforeChunkMs + Math.min(inChunk, s.chunkDurationMs);
-    const progress = Math.min(1, elapsed / s.totalEstimatedMs);
-    setPlaybackProgress(progress);
-    setRemainingMs(Math.max(0, s.totalEstimatedMs - elapsed));
-  }, []);
-
-  const speakChunkAt = useCallback(
-    (index: number) => {
-      const s = speechRef.current;
-      const chunks = s.chunks;
-      if (index >= chunks.length) {
-        clearProgressTimer();
-        setIsSpeaking(false);
-        setIsPaused(false);
-        setCurrentChunkIndex(-1);
-        setPlaybackProgress(1);
-        setRemainingMs(0);
-        return;
-      }
-
-      window.speechSynthesis.cancel();
-
-      s.chunkIndex = index;
-      s.chunkStartedAt = Date.now();
-      ttsActivityAtRef.current = Date.now();
-      s.elapsedBeforeChunkMs = chunks
-        .slice(0, index)
-        .reduce((sum, c) => sum + estimateChunkDurationMs(c, s.rate), 0);
-      s.chunkDurationMs = estimateChunkDurationMs(chunks[index], s.rate);
-
-      setCurrentChunkIndex(index);
-      setIsSpeaking(true);
-      setIsPaused(false);
-
-      const utterance = new SpeechSynthesisUtterance(chunks[index]);
-      utterance.lang = "zh-TW";
-      utterance.rate = s.rate;
-      const selectedVoice = voices.find((v) => v.name === voiceName);
-      if (selectedVoice) utterance.voice = selectedVoice;
-      utterance.onstart = () => {
-        if (speechRef.current.chunkIndex !== index) return;
-        ttsActivityAtRef.current = Date.now();
-      };
-
-      utterance.onend = () => {
-        if (speechRef.current.chunkIndex !== index) return;
-        // 成功播完此段，重試計數清空
-        if (ttsRetryRef.current.index === index) {
-          ttsRetryRef.current = { index: -1, count: 0 };
-        }
-        // iOS 連續 speak 有時會掉音，加入極短延遲但不讓使用者感覺分段
-        window.setTimeout(() => {
-          if (speechRef.current.chunkIndex !== index) return;
-          speakChunkAt(index + 1);
-        }, 40);
-      };
-      utterance.onerror = (ev) => {
-        if (speechRef.current.chunkIndex !== index) return;
-        if (isManualStopRef.current) return;
-        ttsActivityAtRef.current = Date.now();
-        const err =
-          typeof (ev as unknown as { error?: unknown }).error === "string"
-            ? String((ev as unknown as { error?: string }).error)
-            : "";
-        const errNorm = err.trim().toLowerCase();
-        // iOS 常見：非手動也可能收到 interrupted/canceled。不能直接忽略，否則會卡住無聲。
-        const isSoftAbort =
-          errNorm === "interrupted" ||
-          errNorm === "canceled" ||
-          errNorm === "cancelled" ||
-          errNorm === "cancel";
-        // 單段自動重試一次；仍失敗則跳下一段（不中斷整篇體驗，也不顯示分段提示）
-        const r = ttsRetryRef.current;
-        const count = r.index === index ? r.count : 0;
-        if (count < 1) {
-          ttsRetryRef.current = { index, count: count + 1 };
-          window.setTimeout(() => {
-            if (speechRef.current.chunkIndex !== index) return;
-            speakChunkAt(index);
-          }, 60);
-          return;
-        }
-        ttsRetryRef.current = { index: -1, count: 0 };
-        window.setTimeout(() => {
-          if (speechRef.current.chunkIndex !== index) return;
-          speakChunkAt(index + 1);
-        }, 60);
-      };
-
-      try {
-        if (!("speechSynthesis" in window)) {
-          throw new Error("Speech synthesis not supported");
-        }
-        // 若能順利呼叫 speak，視為已重新啟動成功
-        isManualStopRef.current = false;
-        ttsActivityAtRef.current = Date.now();
-        window.speechSynthesis.speak(utterance);
-      } catch {
-        clearProgressTimer();
-        setIsSpeaking(false);
-        setIsPaused(false);
-        const now = Date.now();
-        if (now - lastTtsErrorAtRef.current > 2500) {
-          lastTtsErrorAtRef.current = now;
-          alert("此瀏覽器不支援語音朗讀，或目前無法啟動朗讀。");
-        }
-        return;
-      }
-      clearProgressTimer();
-      progressTimerRef.current = setInterval(tickPlaybackProgress, 180);
-      tickPlaybackProgress();
-    },
-    [voices, voiceName, tickPlaybackProgress]
-  );
-
   const stopPlayback = useCallback(() => {
     isManualStopRef.current = true;
-    window.speechSynthesis.cancel();
+    isSpeakingRef.current = false;
+    isPausedRef.current = false;
+    playbackQueueRef.current = [];
+    currentSegmentIndexRef.current = 0;
+    retryOnceRef.current = { index: -1, tried: false };
+    currentUtteranceRef.current = null;
+    rateRef.current = speed;
+
+    try {
+      window.speechSynthesis.cancel();
+    } catch {
+      /* ignore */
+    }
+
     clearProgressTimer();
-    if (ttsStallWatchdogRef.current != null) {
-      window.clearInterval(ttsStallWatchdogRef.current);
-      ttsStallWatchdogRef.current = null;
+    if (watchdogRef.current != null) {
+      window.clearInterval(watchdogRef.current);
+      watchdogRef.current = null;
     }
     if (ttsStartWatchdogRef.current != null) {
       window.clearTimeout(ttsStartWatchdogRef.current);
       ttsStartWatchdogRef.current = null;
     }
     ttsStartTokenRef.current += 1;
+
     setIsSpeaking(false);
     setIsPaused(false);
     setCurrentChunkIndex(-1);
@@ -1315,24 +1206,98 @@ export default function App() {
     setRemainingMs(0);
     setPlaybackMode(null);
     setTotalChunks(0);
-  }, []);
+  }, [speed]);
+
+  const playNextSegment = useCallback(() => {
+    const queue = playbackQueueRef.current;
+    const idx = currentSegmentIndexRef.current;
+    if (!queue.length || idx >= queue.length) {
+      stopPlayback();
+      return;
+    }
+
+    const seg = queue[idx]?.trim();
+    if (!seg) {
+      currentSegmentIndexRef.current += 1;
+      playNextSegment();
+      return;
+    }
+
+    const token = ++ttsStartTokenRef.current;
+    const selectedVoice = voices.find((v) => v.name === voiceName);
+
+    const u = new SpeechSynthesisUtterance(seg);
+    u.lang = "zh-TW";
+    u.rate = rateRef.current;
+    if (selectedVoice) u.voice = selectedVoice;
+    currentUtteranceRef.current = u;
+
+    u.onend = () => {
+      if (token !== ttsStartTokenRef.current) return;
+      retryOnceRef.current = { index: -1, tried: false };
+      currentSegmentIndexRef.current += 1;
+      window.setTimeout(playNextSegment, 40);
+    };
+
+    u.onerror = () => {
+      if (token !== ttsStartTokenRef.current) return;
+      if (isManualStopRef.current) return;
+
+      // retry once per segment; then skip to next
+      const r = retryOnceRef.current;
+      if (r.index !== idx) {
+        retryOnceRef.current = { index: idx, tried: false };
+      }
+      if (!retryOnceRef.current.tried) {
+        retryOnceRef.current = { index: idx, tried: true };
+        window.setTimeout(playNextSegment, 60);
+        return;
+      }
+      retryOnceRef.current = { index: -1, tried: false };
+      currentSegmentIndexRef.current += 1;
+      window.setTimeout(playNextSegment, 60);
+    };
+
+    // iOS: prevent queue getting stuck
+    try {
+      window.speechSynthesis.cancel();
+    } catch {
+      /* ignore */
+    }
+    window.setTimeout(() => {
+      if (token !== ttsStartTokenRef.current) return;
+      try {
+        isManualStopRef.current = false;
+        window.speechSynthesis.speak(u);
+      } catch {
+        // Treat as a failure and move on
+        currentSegmentIndexRef.current += 1;
+        window.setTimeout(playNextSegment, 60);
+      }
+    }, 30);
+  }, [stopPlayback, voices, voiceName]);
 
   const pausePlayback = useCallback(() => {
-    if (!isSpeaking || isPaused) return;
-    if (window.speechSynthesis.speaking && !window.speechSynthesis.paused) {
+    if (!isSpeakingRef.current || isPausedRef.current) return;
+    try {
       window.speechSynthesis.pause();
-      setIsPaused(true);
-      clearProgressTimer();
-      tickPlaybackProgress();
+    } catch {
+      /* ignore */
     }
-  }, [isSpeaking, isPaused, tickPlaybackProgress]);
+    isPausedRef.current = true;
+    setIsPaused(true);
+  }, []);
 
   const resumePlayback = useCallback(() => {
-    if (!isPaused) return;
-    window.speechSynthesis.resume();
+    if (!isPausedRef.current) return;
+    try {
+      window.speechSynthesis.resume();
+    } catch {
+      /* ignore */
+    }
+    isPausedRef.current = false;
     setIsPaused(false);
-    progressTimerRef.current = setInterval(tickPlaybackProgress, 180);
-  }, [isPaused, tickPlaybackProgress]);
+  }, []);
 
   const startPlayback = useCallback((scriptOverride?: string) => {
     const scriptText = (scriptOverride ?? aiScript).trim();
@@ -1343,79 +1308,59 @@ export default function App() {
     }
 
     isManualStopRef.current = false;
-    window.speechSynthesis.cancel();
-    clearProgressTimer();
-    if (ttsStallWatchdogRef.current != null) {
-      window.clearInterval(ttsStallWatchdogRef.current);
-      ttsStallWatchdogRef.current = null;
-    }
+    isSpeakingRef.current = true;
+    isPausedRef.current = false;
+    rateRef.current = speed;
+    retryOnceRef.current = { index: -1, tried: false };
+    currentSegmentIndexRef.current = 0;
     if (ttsStartWatchdogRef.current != null) {
       window.clearTimeout(ttsStartWatchdogRef.current);
       ttsStartWatchdogRef.current = null;
     }
+    if (watchdogRef.current != null) {
+      window.clearInterval(watchdogRef.current);
+      watchdogRef.current = null;
+    }
 
     const mode: PlaybackMode = hasAi ? "ai" : "news";
-    const chunks = hasAi
+    const queue = hasAi
       ? splitSpeechChunks(scriptText)
       : selectedNews.map((n, i) => `第 ${i + 1} 則新聞，${n.title}`);
-
-    const rate = speed;
-    const totalEstimatedMs = chunks.reduce(
-      (sum, c) => sum + estimateChunkDurationMs(c, rate),
-      0
-    );
-
-    speechRef.current = {
-      chunks,
-      chunkIndex: 0,
-      rate,
-      mode,
-      chunkStartedAt: 0,
-      chunkDurationMs: 0,
-      totalEstimatedMs,
-      elapsedBeforeChunkMs: 0,
-    };
+    playbackQueueRef.current = queue.filter((s) => s.trim().length > 0);
 
     setPlaybackMode(mode);
-    setTotalChunks(chunks.length);
+    setTotalChunks(playbackQueueRef.current.length);
     setTab("player");
     // 先顯示「準備播放」狀態，避免使用者覺得沒反應
     setIsSpeaking(true);
     setIsPaused(false);
     setPlaybackProgress(0);
-    setRemainingMs(totalEstimatedMs);
-    speakChunkAt(0);
+    setRemainingMs(0);
+    setCurrentChunkIndex(0);
 
-    // iOS 有時會「無聲卡住」且不觸發 onend/onerror，加入 watchdog 自動推進下一段
-    ttsActivityAtRef.current = Date.now();
-    ttsStallWatchdogRef.current = window.setInterval(() => {
-      if (isManualStopRef.current) return;
+    // watchdog: every 3s, if we think speaking but synth isn't, auto-advance
+    watchdogRef.current = window.setInterval(() => {
+      if (!isSpeakingRef.current) return;
+      if (isPausedRef.current) return;
       const synth = window.speechSynthesis;
       if (!synth) return;
-      if (window.speechSynthesis.paused) return;
-      if (synth.speaking || synth.pending) {
-        ttsActivityAtRef.current = Date.now();
-        return;
+      if (!synth.speaking && !synth.pending && !synth.paused) {
+        currentSegmentIndexRef.current = Math.min(
+          currentSegmentIndexRef.current + 1,
+          playbackQueueRef.current.length
+        );
+        playNextSegment();
       }
-      const since = Date.now() - ttsActivityAtRef.current;
-      if (since < 650) return;
-      const s = speechRef.current;
-      const idx = s.chunkIndex;
-      if (!s.chunks.length) return;
-      if (idx >= 0 && idx < s.chunks.length - 1) {
-        // 推進到下一段，避免卡死無聲
-        speakChunkAt(idx + 1);
-      } else {
-        stopPlayback();
-      }
-    }, 220);
+    }, 3000);
+
+    playNextSegment();
 
     // iOS Safari 有時第一次 speak 不會啟動也不觸發 onerror，做 800ms watchdog 提示
     const token = ++ttsStartTokenRef.current;
     ttsStartWatchdogRef.current = window.setTimeout(() => {
       if (token !== ttsStartTokenRef.current) return;
       // 只監測「第一段是否成功啟動」：避免在段落切換的瞬間誤判導致中途停止
-      if (speechRef.current.chunkIndex !== 0) return;
+      if (currentSegmentIndexRef.current !== 0) return;
       const synth = window.speechSynthesis;
       if (!synth) return;
       if (!synth.speaking && !synth.pending) {
@@ -1439,7 +1384,7 @@ export default function App() {
         }
       }
     }, 800);
-  }, [aiScript, selectedNews, speed, speakChunkAt]);
+  }, [aiScript, selectedNews, speed, playNextSegment]);
 
   const togglePlayPause = useCallback(() => {
     if (isPaused) {
@@ -1457,14 +1402,8 @@ export default function App() {
     const next = persistPlaybackSpeed(newSpeed);
     if (!isSpeaking && !isPaused) return;
 
-    const s = speechRef.current;
-    s.rate = next;
-    s.totalEstimatedMs = s.chunks.reduce(
-      (sum, c) => sum + estimateChunkDurationMs(c, next),
-      0
-    );
-    // 調速不要中斷當前朗讀（iOS 上 cancel/re-speak 會觸發 onerror 且會重複念）
-    // 新語速會在下一段 utterance 建立時套用
+    // 只更新 rateRef，下一句會自動使用新語速；不 cancel 不重播
+    rateRef.current = next;
   };
 
   const clearAiCache = () => {
@@ -2335,16 +2274,6 @@ ${newsText}
                 onChange={(e) => {
                   isManualStopRef.current = true;
                   setVoiceName(e.target.value);
-                  if (isSpeaking || isPaused) {
-                    const idx = speechRef.current.chunkIndex;
-                    try {
-                      window.speechSynthesis.cancel();
-                    } catch {
-                      /* ignore */
-                    }
-                    setIsPaused(false);
-                    speakChunkAt(idx);
-                  }
                 }}
                 style={styles.select}
               >
