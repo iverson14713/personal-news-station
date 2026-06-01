@@ -672,6 +672,7 @@ export default function App() {
   const [favoriteLinks, setFavoriteLinks] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [videoLoading, setVideoLoading] = useState(false);
+  const [newsBanner, setNewsBanner] = useState<string | null>(null);
   const [videoBanner, setVideoBanner] = useState<string | null>(null);
   const [videoBadge, setVideoBadge] = useState<string | null>(null);
   const [videoContentFlags, setVideoContentFlags] = useState<string[]>([]);
@@ -700,6 +701,7 @@ export default function App() {
   const [playbackMode, setPlaybackMode] = useState<PlaybackMode>(null);
   const [remainingMs, setRemainingMs] = useState(0);
   const [totalChunks, setTotalChunks] = useState(0);
+  const [brokenVideoThumbIds, setBrokenVideoThumbIds] = useState<Record<string, true>>({});
   const [scriptFontSize, setScriptFontSize] = useState<ScriptFontSize>(readScriptFontSize);
   // v1 商業模式：免登入 + 廣告 + AI 次數限制（先固定 Free）
   const [planTier, setPlanTier] = useState<PlanTier>("free");
@@ -737,10 +739,18 @@ export default function App() {
 
   useEffect(() => {
     if (!adSenseClientId) return;
-    const existing = document.querySelector(
+    const existingTagged = document.querySelector(
       `script[data-adsense-client="${adSenseClientId}"]`
     ) as HTMLScriptElement | null;
-    if (existing) return;
+    if (existingTagged) return;
+
+    // index.html may already include the AdSense script (without data attributes).
+    const existingBySrc = Array.from(
+      document.querySelectorAll('script[src*="pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"]')
+    ) as HTMLScriptElement[];
+    if (existingBySrc.some((s) => (s.src ?? "").includes(`client=${encodeURIComponent(adSenseClientId)}`))) {
+      return;
+    }
 
     const s = document.createElement("script");
     s.async = true;
@@ -878,6 +888,7 @@ export default function App() {
 
   const fetchNews = async () => {
     setLoading(true);
+    setNewsBanner(null);
 
     const custom = customKeyword.trim();
     const topicObjs = selectedTopicObjects;
@@ -984,7 +995,9 @@ export default function App() {
         })
       );
     } catch (error) {
-      alert("新聞讀取失敗，請稍後再試");
+      setNews([]);
+      setLastUpdated("");
+      setNewsBanner("暫時無法載入新聞，請檢查網路後再試一次。");
       console.error(error);
     }
 
@@ -1941,6 +1954,12 @@ ${newsText}
               </button>
             </div>
 
+            {newsBanner ? (
+              <div style={styles.videoInfoBanner} role="status">
+                {newsBanner}
+              </div>
+            ) : null}
+
             <AiSummaryPanel
               aiLoading={aiLoading}
               aiError={aiError}
@@ -1978,7 +1997,10 @@ ${newsText}
               loading={loading}
               toggleNews={toggleNews}
               toggleFavorite={toggleFavorite}
+              emptyText="目前沒有新聞。可先按「更新」或稍後再試。"
             />
+
+            <SiteFooter />
           </>
         )}
 
@@ -2004,6 +2026,13 @@ ${newsText}
               onStart={startPlayback}
               onOpenAnalysis={openAiAnalysis}
               aiLoading={aiLoading}
+            />
+
+            <AdSenseSlot
+              clientId={readAdSenseClientId()}
+              slotId={ADSENSE_PLAYER_BANNER_SLOT_ID}
+              format="horizontal"
+              placeholderVariant="banner"
             />
 
             <AiSummaryPanel
@@ -2102,6 +2131,7 @@ ${newsText}
             <div style={styles.videoGrid}>
               {videos.map((video) => {
                 const dateLine = formatVideoPublished(video.publishedAt);
+                const thumbBroken = Boolean(brokenVideoThumbIds[video.id]);
                 return (
                   <a
                     key={video.id}
@@ -2111,11 +2141,14 @@ ${newsText}
                     style={styles.videoTile}
                   >
                     <div style={styles.videoThumbWrap}>
-                      {video.thumbnail ? (
+                      {video.thumbnail && !thumbBroken ? (
                         <img
                           src={video.thumbnail}
                           alt=""
                           style={styles.videoThumbImg}
+                          onError={() =>
+                            setBrokenVideoThumbIds((prev) => ({ ...prev, [video.id]: true }))
+                          }
                         />
                       ) : (
                         <div style={styles.videoThumbPlaceholder}>▶</div>
@@ -3623,6 +3656,27 @@ function AiFavoritesSection({
   );
 }
 
+function SiteFooter() {
+  return (
+    <footer style={styles.siteFooter}>
+      <nav style={styles.siteFooterLinks} aria-label="網站資訊">
+        <a href="/about" style={styles.siteFooterLink}>
+          關於我們
+        </a>
+        <a href="/privacy" style={styles.siteFooterLink}>
+          隱私權政策
+        </a>
+        <a href="/terms" style={styles.siteFooterLink}>
+          服務條款
+        </a>
+        <a href="/contact" style={styles.siteFooterLink}>
+          聯絡我們
+        </a>
+      </nav>
+    </footer>
+  );
+}
+
 function AdSenseSlot({
   clientId,
   slotId,
@@ -3929,7 +3983,7 @@ const styles: Record<string, CSSProperties> = {
   },
   homeToolbarScroll: {
     display: "flex",
-    gap: "5px",
+    gap: "6px",
     overflowX: "auto",
     flexWrap: "nowrap",
     marginTop: "6px",
@@ -3940,8 +3994,8 @@ const styles: Record<string, CSSProperties> = {
     flexShrink: 0,
     border: "none",
     borderRadius: "999px",
-    padding: "7px 10px",
-    fontSize: "11px",
+    padding: "8px 12px",
+    fontSize: "12px",
     fontWeight: 800,
     cursor: "pointer",
     whiteSpace: "nowrap",
@@ -3960,8 +4014,8 @@ const styles: Record<string, CSSProperties> = {
     color: "white",
     border: "none",
     borderRadius: "999px",
-    padding: "7px 10px",
-    fontSize: "11px",
+    padding: "8px 12px",
+    fontSize: "12px",
     fontWeight: 800,
     cursor: "pointer",
     flexShrink: 0,
@@ -3972,8 +4026,8 @@ const styles: Record<string, CSSProperties> = {
     color: "white",
     border: "none",
     borderRadius: "999px",
-    padding: "7px 10px",
-    fontSize: "11px",
+    padding: "8px 12px",
+    fontSize: "12px",
     fontWeight: 800,
     cursor: "pointer",
     flexShrink: 0,
@@ -3984,8 +4038,8 @@ const styles: Record<string, CSSProperties> = {
     color: "#E2E8F0",
     border: "1px solid rgba(255,255,255,.12)",
     borderRadius: "999px",
-    padding: "7px 10px",
-    fontSize: "11px",
+    padding: "8px 12px",
+    fontSize: "12px",
     fontWeight: 700,
     cursor: "pointer",
     flexShrink: 0,
@@ -4082,8 +4136,8 @@ const styles: Record<string, CSSProperties> = {
     gap: "6px",
     marginTop: "4px",
     background: "rgba(255,255,255,.08)",
-    padding: "6px",
-    borderRadius: "14px",
+    padding: "5px",
+    borderRadius: "13px",
     border: "1px solid rgba(255,255,255,.08)",
   },
   searchInput: {
@@ -4092,15 +4146,15 @@ const styles: Record<string, CSSProperties> = {
     color: "white",
     border: "none",
     outline: "none",
-    fontSize: "14px",
-    padding: "8px",
+    fontSize: "13px",
+    padding: "7px 8px",
   },
   searchButton: {
     background: "#22C55E",
     color: "white",
     border: "none",
     borderRadius: "13px",
-    padding: "0 14px",
+    padding: "0 13px",
     fontWeight: 800,
     cursor: "pointer",
   },
@@ -4287,6 +4341,24 @@ const styles: Record<string, CSSProperties> = {
     cursor: "pointer",
     color: "#FCA5A5",
     background: "rgba(127,29,29,.2)",
+  },
+  siteFooter: {
+    marginTop: "14px",
+    paddingTop: "12px",
+    paddingBottom: "4px",
+    borderTop: "1px solid rgba(255,255,255,.08)",
+  },
+  siteFooterLinks: {
+    display: "flex",
+    flexWrap: "wrap",
+    justifyContent: "center",
+    gap: "10px 14px",
+  },
+  siteFooterLink: {
+    fontSize: "12px",
+    fontWeight: 600,
+    color: "#94A3B8",
+    textDecoration: "none",
   },
   legalLinksRow: {
     display: "flex",
@@ -4689,8 +4761,8 @@ const styles: Record<string, CSSProperties> = {
   aiSummaryCard: {
     background: "rgba(15,23,42,.88)",
     border: "1px solid rgba(255,255,255,.1)",
-    borderRadius: "18px",
-    padding: "14px 14px 16px",
+    borderRadius: "16px",
+    padding: "12px 12px 14px",
     minWidth: 0,
     boxSizing: "border-box",
   },
@@ -4699,7 +4771,7 @@ const styles: Record<string, CSSProperties> = {
     alignItems: "center",
     justifyContent: "space-between",
     gap: "8px",
-    marginBottom: "10px",
+    marginBottom: "8px",
   },
   aiSummaryKicker: {
     fontSize: "10px",
@@ -4718,7 +4790,7 @@ const styles: Record<string, CSSProperties> = {
     textOverflow: "ellipsis",
   },
   aiSummaryBody: {
-    fontSize: "14px",
+    fontSize: "13px",
     lineHeight: 1.55,
     color: "#E2E8F0",
     whiteSpace: "pre-wrap",
@@ -4732,7 +4804,7 @@ const styles: Record<string, CSSProperties> = {
   },
   aiSummaryLoading: {
     color: "#94A3B8",
-    fontSize: "14px",
+    fontSize: "13px",
     fontWeight: 700,
   },
   aiSummaryBadge: {
@@ -5239,7 +5311,7 @@ const styles: Record<string, CSSProperties> = {
     whiteSpace: "nowrap",
   },
   newsList: { display: "flex", flexDirection: "column", gap: "10px" },
-  newsListDense: { display: "flex", flexDirection: "column", gap: "7px" },
+  newsListDense: { display: "flex", flexDirection: "column", gap: "6px" },
   newsCard: {
     display: "flex",
     gap: "12px",
@@ -5251,8 +5323,8 @@ const styles: Record<string, CSSProperties> = {
     cursor: "pointer",
   },
   newsCardDense: {
-    padding: "9px 11px",
-    borderRadius: "14px",
+    padding: "8px 10px",
+    borderRadius: "13px",
   },
   newsCardActive: {
     background: "rgba(37,99,235,.26)",
@@ -5459,25 +5531,25 @@ const styles: Record<string, CSSProperties> = {
     flexShrink: 0,
   },
   newsIndex: {
-    width: "34px",
-    height: "34px",
-    borderRadius: "12px",
+    width: "32px",
+    height: "32px",
+    borderRadius: "11px",
     background: "rgba(255,255,255,.1)",
     display: "grid",
     placeItems: "center",
     color: "#93C5FD",
     fontWeight: 900,
-    fontSize: "12px",
+    fontSize: "11px",
     flexShrink: 0,
   },
-  newsTitle: { fontSize: "15px", fontWeight: 800, lineHeight: 1.45 },
+  newsTitle: { fontSize: "14px", fontWeight: 800, lineHeight: 1.4 },
   newsMeta: {
     display: "flex",
     justifyContent: "space-between",
     gap: "10px",
     color: "#94A3B8",
-    marginTop: "8px",
-    fontSize: "12px",
+    marginTop: "6px",
+    fontSize: "11px",
   },
   favoriteButton: {
     background: "transparent",
