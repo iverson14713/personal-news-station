@@ -10,8 +10,8 @@ import {
   isProActive,
   proSourceLabel,
   redeemPromoCode,
-  isProDebugToolsVisible,
   resetProTestState,
+  syncProDebugModeFromUrl,
   type ProStatus,
 } from "./pro";
 
@@ -698,6 +698,9 @@ export default function App() {
   const [scriptFontSize, setScriptFontSize] = useState<ScriptFontSize>(readScriptFontSize);
   // v1 商業模式：免登入 + 廣告 + AI 次數限制（先固定 Free）
   const [proStatus, setProStatus] = useState<ProStatus>(() => getProStatus());
+  const [showProDebugTools, setShowProDebugTools] = useState(() =>
+    syncProDebugModeFromUrl()
+  );
   const [proUpgradeModalOpen, setProUpgradeModalOpen] = useState(false);
   const [promoModalOpen, setPromoModalOpen] = useState(false);
   const [authModalOpen, setAuthModalOpen] = useState(false);
@@ -779,6 +782,10 @@ export default function App() {
   useEffect(() => {
     refreshProStatus();
   }, [refreshProStatus]);
+
+  useEffect(() => {
+    setShowProDebugTools(syncProDebugModeFromUrl());
+  }, [tab]);
 
   useEffect(() => {
     if (onboardingOpen) {
@@ -2237,8 +2244,11 @@ ${newsText}
 
         {tab === "settings" && (
           <>
-            <ProStatusCard proStatus={proStatus} aiDailyLimit={aiDailyLimit} />
-            <ResetProDebugButton />
+            <ProStatusCard
+              proStatus={proStatus}
+              aiDailyLimit={aiDailyLimit}
+              showDebugTools={showProDebugTools}
+            />
 
             {!isPro ? (
               <ProUpgradeCard
@@ -2951,33 +2961,14 @@ function ProUpgradeCard({
   );
 }
 
-function ResetProDebugButton() {
-  if (!isProDebugToolsVisible()) return null;
-
-  const handleReset = () => {
-    const ok = window.confirm(
-      "確定要重置 Pro 測試狀態嗎？這只會清除本機 Pro 狀態，不會影響收藏與主題設定。"
-    );
-    if (!ok) return;
-    resetProTestState();
-    window.location.reload();
-  };
-
-  return (
-    <div style={styles.proDebugResetWrap}>
-      <button type="button" onClick={handleReset} style={styles.proDebugResetBtn}>
-        重置 Pro 測試狀態
-      </button>
-    </div>
-  );
-}
-
 function ProStatusCard({
   proStatus,
   aiDailyLimit,
+  showDebugTools,
 }: {
   proStatus: ProStatus;
   aiDailyLimit: number;
+  showDebugTools: boolean;
 }) {
   const active = isProActive(proStatus);
   const source = proSourceLabel(proStatus.proSource);
@@ -3018,6 +3009,31 @@ function ProStatusCard({
             升級 Pro 可移除廣告並解鎖 5 分鐘新聞稿
           </div>
         </>
+      )}
+
+      {showDebugTools ? (
+        <div style={styles.proDebugToolsBox}>
+          <div style={styles.proDebugToolsLabel}>測試工具</div>
+          <button
+            type="button"
+            onClick={() => {
+              const ok = window.confirm(
+                "確定要重置 Pro 測試狀態嗎？這只會清除本機 Pro 狀態，不會影響收藏與主題設定。"
+              );
+              if (!ok) return;
+              resetProTestState();
+              window.location.reload();
+            }}
+            style={styles.proDebugResetBtnProminent}
+          >
+            重置 Pro 測試狀態
+          </button>
+        </div>
+      ) : (
+        <p style={styles.proDebugHint}>
+          測試 Free／Pro 切換：請在網址加上 <strong>?debug=1</strong> 後重新整理（或於主控台執行
+          localStorage.setItem(&apos;pns_debug_mode&apos;,&apos;1&apos;)）
+        </p>
       )}
     </section>
   );
@@ -6192,21 +6208,37 @@ const styles: Record<string, CSSProperties> = {
     lineHeight: 1.55,
     marginBottom: "6px",
   },
-  proDebugResetWrap: {
-    marginTop: "-8px",
-    marginBottom: "12px",
-    paddingLeft: "2px",
+  proDebugToolsBox: {
+    marginTop: "14px",
+    paddingTop: "12px",
+    borderTop: "1px dashed rgba(251,191,36,.35)",
   },
-  proDebugResetBtn: {
-    border: "none",
-    background: "transparent",
-    padding: "4px 0",
-    fontSize: "12px",
-    fontWeight: 600,
-    color: "#94A3B8",
-    textDecoration: "underline",
+  proDebugToolsLabel: {
+    fontSize: "11px",
+    fontWeight: 800,
+    letterSpacing: "0.08em",
+    color: "#FCD34D",
+    marginBottom: "8px",
+    textTransform: "uppercase",
+  },
+  proDebugResetBtnProminent: {
+    width: "100%",
+    boxSizing: "border-box",
+    border: "1px solid rgba(251,191,36,.45)",
+    background: "rgba(251,191,36,.12)",
+    color: "#FDE68A",
+    borderRadius: "12px",
+    padding: "10px 14px",
+    fontSize: "13px",
+    fontWeight: 800,
     cursor: "pointer",
-    WebkitTapHighlightColor: "transparent",
+  },
+  proDebugHint: {
+    marginTop: "12px",
+    marginBottom: 0,
+    fontSize: "12px",
+    lineHeight: 1.5,
+    color: "#64748B",
   },
   proModalBackdrop: {
     position: "fixed",

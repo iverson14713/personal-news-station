@@ -179,6 +179,21 @@ export function proSourceLabel(source: ProSource): string | null {
   return null;
 }
 
+/** 若網址含 ?debug=1，寫入 localStorage 以便正式站持續顯示測試工具 */
+export function syncProDebugModeFromUrl(): boolean {
+  try {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("debug") === "1") {
+        localStorage.setItem(DEBUG_MODE_KEY, "1");
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return isProDebugToolsVisible();
+}
+
 /** 開發／測試工具是否可見 */
 export function isProDebugToolsVisible(): boolean {
   try {
