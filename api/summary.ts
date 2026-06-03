@@ -321,6 +321,19 @@ export default async function handler(req: any, res: any) {
     .join("\n\n");
 
   const outputKind = deepMode ? "深度解析 Pro 稿" : "一般整理主播稿";
+  const modeStrategyLine = deepMode
+    ? `- 深度解析：請深入分析 ${diveCount} 則最重要主題，其餘放「快速補充」`
+    : "- 一般整理：快速掌握今日重點，少評論、少延伸";
+  const scriptIntentLine = deepMode
+    ? "分析解讀"
+    : "今日重點整理";
+  const scriptTitleRule = deepMode
+    ? "深入主題須用四段標題"
+    : "禁止使用深度解析四段標題";
+  const durationFeel = deepMode ? " 深度解析" : " 一般整理";
+  const userWriteHint = deepMode
+    ? `請挑 ${diveCount} 則做深度四段分析，其餘放「快速補充」。不可只改寫摘要。`
+    : "請以新聞主播快報整理，不要寫成深度分析。";
 
   const system = `你是「AI 個人新聞台」的專業新聞編輯與主播稿撰寫助理。
 使用者只會提供新聞「標題」與「來源」，沒有全文；請依標題合理推斷主題並整理，不要捏造具體數據或未被標題暗示的事實。
@@ -330,7 +343,7 @@ export default async function handler(req: any, res: any) {
 - 產稿類型：${outputKind}
 - 模式：${alloc.modeLabel}
 - 使用者選取新聞：${n} 則
-${deepMode ? `- 深度解析：請深入分析 ${diveCount} 則最重要主題，其餘放「快速補充」` : `- 一般整理：快速掌握今日重點，少評論、少延伸"}
+${modeStrategyLine}
 
 【script 篇幅與寫作總則】
 ${alloc.scriptGuide}
@@ -351,13 +364,13 @@ ${financeDisclaimer}
 【共通規則】
 - highlights 必須恰好 ${n} 則，與輸入編號一一對應，不可合併或省略任一则。
 - level 僅能使用：「🔥重大」「⚠️注意」「ℹ️一般」。
-- script 必須讓聽眾聽得出「${deepMode ? "分析解讀" : "今日重點整理"}」；${deepMode ? "深入主題須用四段標題" : "禁止使用深度解析四段標題"}。
+- script 必須讓聽眾聽得出「${scriptIntentLine}」；${scriptTitleRule}。
 - 轉場範例：「首先帶您關注…」「接下來深入看…」「快速補充幾則…」「最後提醒…」
-- 字數/句數服務於「聽起來像 ${duration} 分鐘${deepMode ? " 深度解析" : " 一般整理"}」，勿為湊字數重複空話。`;
+- 字數/句數服務於「聽起來像 ${duration} 分鐘${durationFeel}」，勿為湊字數重複空話。`;
 
   const userMsg = `以下為使用者選取的 ${n} 則新聞（僅標題與來源）。
 請先判斷每則重要程度（🔥/⚠️/ℹ️），再依「${alloc.modeLabel}」撰寫。
-${deepMode ? `請挑 ${diveCount} 則做深度四段分析，其餘放「快速補充」。不可只改寫摘要。` : "請以新聞主播快報整理，不要寫成深度分析。"}
+${userWriteHint}
 輸出 JSON，highlights 必須 ${n} 則：
 
 ${listText}`;
