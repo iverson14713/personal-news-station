@@ -1,10 +1,5 @@
 const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
-const OPENAI_TIMEOUT_MS = 55_000;
-
-/** Vercel Serverless：延長執行時間，降低深度解析逾時 */
-export const config = {
-  maxDuration: 60,
-};
+const OPENAI_TIMEOUT_MS = 50000;
 
 type SummaryItem = { title: string; source: string };
 type AiDuration = 1 | 3 | 5;
@@ -256,13 +251,12 @@ function coerceHighlights(raw: unknown): HighlightOut[] {
   return out;
 }
 
-function jsonError(
+function sendJson(
   res: any,
-  error: string,
-  code?: string,
+  payload: Record<string, unknown>,
   status = 200
 ) {
-  return res.status(status).json({ ok: false, error, code });
+  return res.status(status).json(payload);
 }
 
 export default async function handler(req: any, res: any) {
@@ -271,27 +265,19 @@ export default async function handler(req: any, res: any) {
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  try {
-    return await handleSummaryRequest(req, res);
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : "伺服器錯誤";
-    return jsonError(res, msg, "SERVER");
-  }
-}
-
-async function handleSummaryRequest(req: any, res: any) {
   if (req.method === "OPTIONS") {
     return res.status(204).end();
   }
 
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
-    return res.status(405).json({ ok: false, error: "僅支援 POST" });
+    return sendJson(res, { ok: false, error: "僅支援 POST" }, 405);
   }
 
+  try {
   const apiKey = (process.env.OPENAI_API_KEY || "").trim();
   if (!apiKey) {
-    return res.status(200).json({
+    return sendJson(res, {
       ok: false,
       code: "NO_KEY",
       error: "尚未設定 AI API Key",
@@ -316,7 +302,7 @@ async function handleSummaryRequest(req: any, res: any) {
     : [];
 
   if (items.length === 0) {
-    return res.status(200).json({
+    return sendJson(res, {
       ok: false,
       error: "請至少選擇一則新聞（僅需標題與來源）",
     });
@@ -376,8 +362,9 @@ ${deepMode ? `請挑 ${diveCount} 則做深度四段分析，其餘放「快速�
 
 ${listText}`;
 
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
+  timeoutId = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
 
   try {
     const response = await fetch(OPENAI_URL, {
@@ -399,14 +386,24 @@ ${listText}`;
       }),
     });
 
-    const data = (await response.json()) as Record<string, unknown>;
+    const rawOpenAi = await response.text();
+    let data: Record<string, unknown> = {};
+    try {
+      data = JSON.parse(rawOpenAi) as Record<string, unknown>;
+    } catch {
+      return sendJson(res, {
+        ok: false,
+        code: "OPENAI",
+        error: "AI 服務回傳異常，請稍後再試",
+      });
+    }
 
     if (!response.ok) {
       const errObj = data?.error as Record<string, unknown> | undefined;
       const msg =
         (typeof errObj?.message === "string" && errObj.message) ||
         `OpenAI 請求失敗（HTTP ${response.status}）`;
-      return res.status(200).json({ ok: false, error: msg });
+      return sendJson(res, { ok: false, error: msg });
     }
 
     const choices = data?.choices as unknown[] | undefined;
@@ -416,7 +413,7 @@ ${listText}`;
       typeof message?.content === "string" ? message.content.trim() : "";
 
     if (!content) {
-      return res.status(200).json({
+      return sendJson(res, {
         ok: false,
         error: "AI 未回傳有效內容，請稍後再試",
       });
@@ -427,12 +424,12 @@ ${listText}`;
       const script = parsed.script.trim();
       const highlights = coerceHighlights(parsed.highlights);
       if (!script) {
-        return res.status(200).json({
+        return sendJson(res, {
           ok: false,
           error: "AI 回傳的 script 為空",
         });
       }
-      return res.status(200).json({
+      return sendJson(res, {
         ok: true,
         duration,
         deepMode,
@@ -442,7 +439,7 @@ ${listText}`;
       });
     }
 
-    return res.status(200).json({
+    return sendJson(res, {
       ok: true,
       duration,
       deepMode,
@@ -459,8 +456,16 @@ ${listText}`;
       : e instanceof Error
         ? e.message
         : "連線或解析失敗";
-    return jsonError(res, msg, aborted ? "TIMEOUT" : "OPENAI");
+    return sendJson(res, {
+      ok: false,
+      code: aborted ? "TIMEOUT" : "OPENAI",
+      error: msg,
+    });
   } finally {
-    clearTimeout(timeoutId);
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "伺服器錯誤";
+    return sendJson(res, { ok: false, code: "SERVER", error: msg });
   }
 }

@@ -125,6 +125,7 @@ const AI_SUMMARY_CACHE_KEY = "pns_ai_summary_v1";
 const AI_SUMMARY_CACHE_MS = 30 * 60 * 1000;
 const AI_HISTORY_KEY = "pns_ai_history_v1";
 const AI_HISTORY_MAX = 20;
+const AI_HISTORY_EXPANDED_KEY = "pns_settings_ai_history_expanded_v1";
 const AI_FAVORITES_KEY = "pns_ai_favorites_v1";
 const PLAYBACK_SPEED_KEY = "pns_playback_speed_v1";
 const SPEED_MIN = 0.8;
@@ -503,6 +504,22 @@ function readAiHistory(): AiHistoryEntry[] {
       .slice(0, AI_HISTORY_MAX);
   } catch {
     return [];
+  }
+}
+
+function readSettingsAiHistoryExpanded(): boolean {
+  try {
+    return localStorage.getItem(AI_HISTORY_EXPANDED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeSettingsAiHistoryExpanded(expanded: boolean) {
+  try {
+    localStorage.setItem(AI_HISTORY_EXPANDED_KEY, expanded ? "1" : "0");
+  } catch {
+    /* ignore */
   }
 }
 
@@ -2140,15 +2157,6 @@ ${newsText}
               </div>
             ) : null}
 
-            {!isPro ? (
-              <ProUpgradeCard
-                variant="compact"
-                proStatus={proStatus}
-                onUpgrade={openProUpgrade}
-                onRedeem={() => setPromoModalOpen(true)}
-              />
-            ) : null}
-
             <AiSummaryPanel
               aiLoading={aiLoading}
               aiError={aiError}
@@ -2507,9 +2515,10 @@ ${newsText}
               ) : null}
             </section>
 
-            <AiHistorySection
+            <SettingsCollapsibleAiHistorySection
               entries={visibleAiHistory}
               activeId={activeAiHistoryId}
+              historyDays={planLimits.historyDays}
               onSelect={loadAiHistoryEntry}
               onPlay={playAiHistoryEntry}
               onCopy={(entry) => void copyAiScriptText(entry.script)}
@@ -3575,9 +3584,10 @@ function ProPaywall({
   );
 }
 
-function AiHistorySection({
+function SettingsCollapsibleAiHistorySection({
   entries,
   activeId,
+  historyDays,
   onSelect,
   onPlay,
   onCopy,
@@ -3588,6 +3598,7 @@ function AiHistorySection({
 }: {
   entries: AiHistoryEntry[];
   activeId: string | null;
+  historyDays: number;
   onSelect: (entry: AiHistoryEntry) => void;
   onPlay: (entry: AiHistoryEntry) => void;
   onCopy: (entry: AiHistoryEntry) => void;
@@ -3596,103 +3607,142 @@ function AiHistorySection({
   historyHint?: string;
   hiddenOlderCount?: number;
 }) {
+  const [expanded, setExpanded] = useState(readSettingsAiHistoryExpanded);
+  const rangeLabel = `最近 ${historyDays} 天`;
+  const countSuffix = entries.length > 0 ? ` · ${entries.length} 筆` : "";
+
+  const toggleExpanded = () => {
+    setExpanded((prev) => {
+      const next = !prev;
+      writeSettingsAiHistoryExpanded(next);
+      return next;
+    });
+  };
+
   return (
-    <section style={styles.aiHistoryPanel}>
-      <div style={styles.aiHistoryHead}>
-        <div>
+    <section
+      style={{
+        ...styles.aiHistoryPanel,
+        ...(expanded ? {} : styles.aiHistoryPanelCollapsed),
+      }}
+    >
+      <button
+        type="button"
+        onClick={toggleExpanded}
+        style={styles.aiHistoryCollapseToggle}
+        aria-expanded={expanded}
+        aria-controls="settings-ai-history-body"
+      >
+        <div style={styles.aiHistoryCollapseToggleText}>
           <div style={styles.aiHistoryTitle}>AI 歷史</div>
-          <div style={styles.aiHistorySub}>
-            {historyHint ?? `最近 ${AI_HISTORY_MAX} 筆 · 點擊載入主播稿`}
+          <div style={styles.aiHistoryCollapseSub}>
+            {rangeLabel}
+            {countSuffix}
           </div>
-          {hiddenOlderCount > 0 ? (
-            <div style={styles.aiHistoryOlderNote}>
-              另有 {hiddenOlderCount} 筆較早紀錄仍保存在本機，升級 Pro 後可在此查看更長時間
-            </div>
-          ) : null}
         </div>
-        {entries.length > 0 ? (
-          <button type="button" onClick={onClearAll} style={styles.aiHistoryClearBtn}>
-            清空全部
-          </button>
-        ) : null}
-      </div>
+        <span style={styles.aiHistoryCollapseAction}>
+          {expanded ? "收合 ▲" : "展開 ▼"}
+        </span>
+      </button>
 
-      {entries.length === 0 ? (
-        <div style={styles.aiHistoryEmpty}>
-          尚無 AI 分析紀錄。在首頁勾選新聞並完成 AI 分析後，會自動保存在此。
-        </div>
-      ) : (
-        <div style={styles.aiHistoryList}>
-          {entries.map((entry) => {
-            const active = entry.id === activeId;
-            const previewTitles = (entry.newsTitles ?? []).slice(0, 2);
-            return (
-              <article
-                key={entry.id}
-                style={{
-                  ...styles.aiHistoryCard,
-                  ...(active ? styles.aiHistoryCardActive : {}),
-                }}
-              >
-                <button
-                  type="button"
-                  onClick={() => onSelect(entry)}
-                  style={styles.aiHistoryCardMain}
-                >
-                  <div style={styles.aiHistoryMetaRow}>
-                    <span style={styles.aiHistoryWhen}>
-                      {formatAiHistoryWhen(entry.savedAt)}
-                    </span>
-                    <span style={styles.aiHistoryDurationBadge}>
-                      {entry.duration} 分鐘
-                    </span>
-                  </div>
-                  {previewTitles.length > 0 ? (
-                    <ul style={styles.aiHistoryTitles}>
-                      {previewTitles.map((title, i) => (
-                        <li key={`${entry.id}-t-${i}`} style={styles.aiHistoryTitleItem}>
-                          {title}
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <div style={styles.aiHistoryNoTitles}>（無新聞標題紀錄）</div>
-                  )}
-                </button>
-
-                <div style={styles.aiHistoryActions}>
-                  <button
-                    type="button"
-                    onClick={() => onPlay(entry)}
-                    style={styles.aiHistoryPlayBtn}
-                  >
-                    播放
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onCopy(entry)}
-                    style={styles.aiHistoryCopyBtn}
-                  >
-                    複製
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (window.confirm("確定刪除此筆 AI 歷史？")) {
-                        onDelete(entry.id);
-                      }
-                    }}
-                    style={styles.aiHistoryDeleteBtn}
-                    aria-label="刪除此筆"
-                  >
-                    刪除
-                  </button>
+      {expanded ? (
+        <div id="settings-ai-history-body" style={styles.aiHistoryExpandedBody}>
+          <div style={styles.aiHistoryHead}>
+            <div>
+              <div style={styles.aiHistorySub}>
+                {historyHint ?? `${rangeLabel} · 點擊載入主播稿`}
+              </div>
+              {hiddenOlderCount > 0 ? (
+                <div style={styles.aiHistoryOlderNote}>
+                  另有 {hiddenOlderCount} 筆較早紀錄仍保存在本機，升級 Pro 後可在此查看更長時間
                 </div>
-              </article>
-            );
-          })}
+              ) : null}
+            </div>
+            {entries.length > 0 ? (
+              <button type="button" onClick={onClearAll} style={styles.aiHistoryClearBtn}>
+                清空全部
+              </button>
+            ) : null}
+          </div>
+
+          {entries.length === 0 ? (
+            <div style={styles.aiHistoryEmpty}>
+              尚無 AI 分析紀錄。在首頁勾選新聞並完成 AI 分析後，會自動保存在此。
+            </div>
+          ) : (
+            <div style={styles.aiHistoryList}>
+              {entries.map((entry) => {
+                const active = entry.id === activeId;
+                const previewTitles = (entry.newsTitles ?? []).slice(0, 2);
+                return (
+                  <article
+                    key={entry.id}
+                    style={{
+                      ...styles.aiHistoryCard,
+                      ...(active ? styles.aiHistoryCardActive : {}),
+                    }}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => onSelect(entry)}
+                      style={styles.aiHistoryCardMain}
+                    >
+                      <div style={styles.aiHistoryMetaRow}>
+                        <span style={styles.aiHistoryWhen}>
+                          {formatAiHistoryWhen(entry.savedAt)}
+                        </span>
+                        <span style={styles.aiHistoryDurationBadge}>
+                          {entry.duration} 分鐘
+                        </span>
+                      </div>
+                      {previewTitles.length > 0 ? (
+                        <ul style={styles.aiHistoryTitles}>
+                          {previewTitles.map((title, i) => (
+                            <li key={`${entry.id}-t-${i}`} style={styles.aiHistoryTitleItem}>
+                              {title}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div style={styles.aiHistoryNoTitles}>（無新聞標題紀錄）</div>
+                      )}
+                    </button>
+
+                    <div style={styles.aiHistoryActions}>
+                      <button
+                        type="button"
+                        onClick={() => onPlay(entry)}
+                        style={styles.aiHistoryPlayBtn}
+                      >
+                        播放
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onCopy(entry)}
+                        style={styles.aiHistoryCopyBtn}
+                      >
+                        複製
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (window.confirm("確定刪除此筆 AI 歷史？")) {
+                            onDelete(entry.id);
+                          }
+                        }}
+                        style={styles.aiHistoryDeleteBtn}
+                        aria-label="刪除此筆"
+                      >
+                        刪除
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
         </div>
-      )}
+      ) : null}
     </section>
   );
 }
@@ -4867,6 +4917,49 @@ const styles: Record<string, CSSProperties> = {
     borderRadius: "18px",
     background: "rgba(255,255,255,.04)",
     border: "1px solid rgba(255,255,255,.10)",
+  },
+  aiHistoryPanelCollapsed: {
+    padding: "10px 12px",
+    marginBottom: "10px",
+  },
+  aiHistoryCollapseToggle: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "12px",
+    width: "100%",
+    minHeight: "52px",
+    maxHeight: "72px",
+    padding: 0,
+    margin: 0,
+    border: "none",
+    background: "transparent",
+    color: "inherit",
+    cursor: "pointer",
+    textAlign: "left",
+  },
+  aiHistoryCollapseToggleText: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "2px",
+    minWidth: 0,
+    flex: 1,
+  },
+  aiHistoryCollapseSub: {
+    fontSize: "12px",
+    color: "#64748B",
+    lineHeight: 1.35,
+  },
+  aiHistoryCollapseAction: {
+    flexShrink: 0,
+    fontSize: "12px",
+    fontWeight: 800,
+    color: "#94A3B8",
+  },
+  aiHistoryExpandedBody: {
+    marginTop: "12px",
+    paddingTop: "12px",
+    borderTop: "1px solid rgba(255,255,255,.08)",
   },
   aiHistoryHead: {
     display: "flex",

@@ -1,7 +1,8 @@
 {
   "functions": {
     "api/summary.ts": {
-      "maxDuration": 60
+      "maxDuration": 60,
+      "memory": 1024
     }
   },
   "rewrites": [
