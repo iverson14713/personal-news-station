@@ -1,4 +1,10 @@
 const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
+const OPENAI_TIMEOUT_MS = 55_000;
+
+/** Vercel Serverless：延長執行時間，降低深度解析逾時 */
+export const config = {
+  maxDuration: 60,
+};
 
 type SummaryItem = { title: string; source: string };
 type AiDuration = 1 | 3 | 5;
@@ -101,7 +107,7 @@ function buildNormalAllocation(duration: AiDuration, n: number): Allocation {
   }
 
   return {
-    maxTokens: n >= 4 ? 2800 : 2600,
+    maxTokens: n >= 4 ? 2200 : 2000,
     temperature: 0.45,
     modeLabel: "5 分鐘｜一般整理｜完整廣播稿",
     scriptGuide: `【定位】較完整的今日新聞廣播稿（仍是一般整理，不是深度解析）。
@@ -159,7 +165,7 @@ ${antiRewrite}
 
   if (duration === 3) {
     return {
-      maxTokens: 2400,
+      maxTokens: 1800,
       temperature: 0.5,
       modeLabel: "3 分鐘｜深度解析 Pro",
       scriptGuide: `【定位】理解事件為什麼重要、可能影響與後續要觀察什麼。
@@ -176,7 +182,7 @@ ${antiRewrite}
   }
 
   return {
-    maxTokens: 3800,
+    maxTokens: 2600,
     temperature: 0.52,
     modeLabel: "5 分鐘｜深度解析 Pro｜完整深度",
     scriptGuide: `【定位】完整深度解析：背景、影響、後續觀察與不確定性。
@@ -250,12 +256,30 @@ function coerceHighlights(raw: unknown): HighlightOut[] {
   return out;
 }
 
+function jsonError(
+  res: any,
+  error: string,
+  code?: string,
+  status = 200
+) {
+  return res.status(status).json({ ok: false, error, code });
+}
+
 export default async function handler(req: any, res: any) {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
+  try {
+    return await handleSummaryRequest(req, res);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "伺服器錯誤";
+    return jsonError(res, msg, "SERVER");
+  }
+}
+
+async function handleSummaryRequest(req: any, res: any) {
   if (req.method === "OPTIONS") {
     return res.status(204).end();
   }
@@ -352,6 +376,9 @@ ${deepMode ? `請挑 ${diveCount} 則做深度四段分析，其餘放「快速�
 
 ${listText}`;
 
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
+
   try {
     const response = await fetch(OPENAI_URL, {
       method: "POST",
@@ -359,6 +386,7 @@ ${listText}`;
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
+      signal: controller.signal,
       body: JSON.stringify({
         model: "gpt-4.1-mini",
         temperature: alloc.temperature,
@@ -423,7 +451,16 @@ ${listText}`;
       jsonFallback: true,
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "連線或解析失敗";
-    return res.status(200).json({ ok: false, error: msg });
+    const aborted =
+      e instanceof Error &&
+      (e.name === "AbortError" || /aborted/i.test(e.message));
+    const msg = aborted
+      ? "AI 產生逾時，請改選較短時長或一般整理模式後再試"
+      : e instanceof Error
+        ? e.message
+        : "連線或解析失敗";
+    return jsonError(res, msg, aborted ? "TIMEOUT" : "OPENAI");
+  } finally {
+    clearTimeout(timeoutId);
   }
 }

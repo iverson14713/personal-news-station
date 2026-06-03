@@ -427,6 +427,48 @@ function aiSummaryCacheFingerprint(
   return `${duration}\0${deepMode ? "deep" : "normal"}\0${base}`;
 }
 
+type SummaryApiPayload = {
+  ok?: boolean;
+  script?: string;
+  highlights?: AiHighlight[];
+  jsonFallback?: boolean;
+  duration?: number;
+  error?: string;
+  code?: string;
+};
+
+async function readSummaryApiPayload(
+  res: Response
+): Promise<{ data: SummaryApiPayload | null; error: string | null }> {
+  const text = await res.text();
+  if (!text.trim()) {
+    return {
+      data: null,
+      error: res.ok
+        ? "伺服器未回傳內容"
+        : `AI 服務暫時無法使用（HTTP ${res.status}），請稍後再試`,
+    };
+  }
+  try {
+    return { data: JSON.parse(text) as SummaryApiPayload, error: null };
+  } catch {
+    if (
+      res.status >= 500 ||
+      /server error|FUNCTION_INVOCATION|timeout|timed out/i.test(text)
+    ) {
+      return {
+        data: null,
+        error:
+          "AI 伺服器忙碌或逾時，請稍後再試；可改選較短時長或「一般整理」模式",
+      };
+    }
+    return {
+      data: null,
+      error: `AI 服務回傳異常（HTTP ${res.status}），請稍後再試`,
+    };
+  }
+}
+
 function clampSpeed(n: number): number {
   const clamped = Math.min(SPEED_MAX, Math.max(SPEED_MIN, n));
   return Math.round(clamped / SPEED_STEP) * SPEED_STEP;
@@ -1820,21 +1862,20 @@ ${newsText}
           items: picked.map((n) => ({ title: n.title, source: n.source })),
         }),
       });
-      const data = (await res.json()) as {
-        ok?: boolean;
-        script?: string;
-        highlights?: AiHighlight[];
-        jsonFallback?: boolean;
-        duration?: number;
-        error?: string;
-        code?: string;
-      };
+      const { data, error: parseError } = await readSummaryApiPayload(res);
+      if (parseError || !data) {
+        setAiError(parseError || "AI 精華產生失敗");
+        await runGptFallbackClipboard();
+        return;
+      }
 
       if (!data.ok) {
         const msg =
           data.code === "NO_KEY"
             ? "尚未設定 AI API Key"
-            : data.error || "AI 精華產生失敗";
+            : data.code === "TIMEOUT"
+              ? "AI 產生逾時，請改選較短時長或一般整理模式後再試"
+              : data.error || "AI 精華產生失敗";
         setAiError(msg);
         if (data.code !== "NO_KEY") {
           await runGptFallbackClipboard();
