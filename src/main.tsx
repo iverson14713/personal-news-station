@@ -1,9 +1,18 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import AppStoreScreenshots from "./AppStoreScreenshots";
+
+function Root() {
+  const path = window.location.pathname;
+  if (path.startsWith("/app-store-screenshot")) {
+    return <AppStoreScreenshots />;
+  }
+  return <App />;
+}
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    <Root />
   </React.StrictMode>
 );

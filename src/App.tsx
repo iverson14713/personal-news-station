@@ -1,6 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { Headphones, Home, Settings, Star } from "lucide-react";
+import {
+  AI_DAILY_LIMIT_PRO,
+  canUseFiveMinuteScript,
+  formatProExpiresAt,
+  getAiDailyLimit,
+  getProStatus,
+  isProActive,
+  proSourceLabel,
+  redeemPromoCode,
+  type ProStatus,
+} from "./pro";
 
 type Tab = "home" | "player" | "video" | "favorites" | "settings";
 
@@ -113,17 +124,14 @@ const SPEED_MAX = 1.2;
 const SPEED_STEP = 0.05;
 const SPEED_DEFAULT = 1;
 const SCRIPT_FONT_KEY = "pns_script_font_v1";
-const PLAN_TIER_KEY = "pns_plan_tier_v1";
 const AI_DAILY_QUOTA_KEY = "pns_ai_daily_quota_v1";
 
 type ScriptFontSize = "sm" | "md" | "lg" | "xl";
 type PlaybackMode = "ai" | "news" | null;
-type PlanTier = "free" | "pro";
 
-const AI_DAILY_LIMIT: Record<PlanTier, number> = { free: 3, pro: 30 };
 const PRO_PRICING = {
   monthly: { price: 49, label: "NT$49 / 月" },
-  yearly: { price: 499, label: "NT$499 / 年", saveLabel: "約省 15%" },
+  yearly: { price: 390, label: "NT$390 / 年", saveLabel: "約省 34%" },
 } as const;
 
 const ONBOARDING_SEEN_KEY = "pns_onboarding_seen_v1";
@@ -245,23 +253,6 @@ function todayYmdLocal(): string {
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
-}
-
-function readPlanTier(): PlanTier {
-  try {
-    const v = localStorage.getItem(PLAN_TIER_KEY);
-    return v === "pro" ? "pro" : "free";
-  } catch {
-    return "free";
-  }
-}
-
-function writePlanTier(tier: PlanTier) {
-  try {
-    localStorage.setItem(PLAN_TIER_KEY, tier);
-  } catch {
-    /* ignore */
-  }
 }
 
 function readAiDailyQuota(): { date: string; used: number } {
@@ -704,7 +695,9 @@ export default function App() {
   const [brokenVideoThumbIds, setBrokenVideoThumbIds] = useState<Record<string, true>>({});
   const [scriptFontSize, setScriptFontSize] = useState<ScriptFontSize>(readScriptFontSize);
   // v1 商業模式：免登入 + 廣告 + AI 次數限制（先固定 Free）
-  const [planTier, setPlanTier] = useState<PlanTier>("free");
+  const [proStatus, setProStatus] = useState<ProStatus>(() => getProStatus());
+  const [proUpgradeModalOpen, setProUpgradeModalOpen] = useState(false);
+  const [promoModalOpen, setPromoModalOpen] = useState(false);
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState(() => !readOnboardingSeen());
   const [onboardingStep, setOnboardingStep] = useState(0);
@@ -732,8 +725,27 @@ export default function App() {
   const selectedNews = news.filter((n) => n.selected);
   const favoriteNews = news.filter((n) => n.favorite);
 
-  const aiDailyLimit = AI_DAILY_LIMIT[planTier];
+  const isPro = isProActive(proStatus);
+  const aiDailyLimit = getAiDailyLimit(proStatus);
   const aiQuotaRemaining = Math.max(0, aiDailyLimit - aiQuota.used);
+
+  const refreshProStatus = useCallback(() => {
+    setProStatus(getProStatus());
+  }, []);
+
+  const openProUpgrade = useCallback(() => {
+    setProUpgradeModalOpen(true);
+  }, []);
+
+  const setAiQuotaExhaustedMessage = useCallback(() => {
+    if (isProActive(proStatus)) {
+      setAiError("今日 AI 次數已用完，明天會自動重置");
+    } else {
+      setAiError(
+        "今日免費 AI 次數已用完\n升級 Pro 可獲得每日更多 AI 新聞稿次數，並解鎖 5 分鐘深度稿"
+      );
+    }
+  }, [proStatus]);
 
   const adSenseClientId = useMemo(() => readAdSenseClientId(), []);
 
@@ -763,13 +775,8 @@ export default function App() {
   }, [adSenseClientId]);
 
   useEffect(() => {
-    // 若舊版 localStorage 曾切到 Pro，v1 強制回到 Free（避免誤導與規則不一致）
-    if (readPlanTier() !== "free") {
-      writePlanTier("free");
-    }
-    if (planTier !== "free") setPlanTier("free");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    refreshProStatus();
+  }, [refreshProStatus]);
 
   useEffect(() => {
     if (onboardingOpen) {
@@ -1529,18 +1536,18 @@ export default function App() {
     } else {
       setAiQuota(q);
     }
-    const remaining = Math.max(0, AI_DAILY_LIMIT[planTier] - q.used);
+    const remaining = Math.max(0, getAiDailyLimit(proStatus) - q.used);
     if (remaining <= 0) {
-      setAiError(`今日 AI 分析次數已用完（0 / ${AI_DAILY_LIMIT[planTier]}）。`);
+      setAiQuotaExhaustedMessage();
       return;
     }
     setAiDurationSheetOpen(true);
   };
 
   const runAiAnalysisWithDuration = (duration: AiDuration) => {
-    // Free：允許 1 / 3 分鐘；5 分鐘鎖定
-    if (planTier !== "pro" && duration === 5) {
+    if (duration === 5 && !canUseFiveMinuteScript(proStatus)) {
       setAiDurationSheetOpen(false);
+      setProUpgradeModalOpen(true);
       return;
     }
 
@@ -1611,6 +1618,11 @@ ${newsText}
 
     const duration = durationOverride ?? aiDuration;
 
+    if (duration === 5 && !canUseFiveMinuteScript(proStatus)) {
+      setProUpgradeModalOpen(true);
+      return;
+    }
+
     // 每次呼叫前先檢查今日額度（用完就阻止，不呼叫 API）
     const q = readAiDailyQuota();
     const today = todayYmdLocal();
@@ -1619,9 +1631,9 @@ ${newsText}
       writeAiDailyQuota(normalized);
     }
     setAiQuota(normalized);
-    const remaining = Math.max(0, AI_DAILY_LIMIT[planTier] - normalized.used);
+    const remaining = Math.max(0, getAiDailyLimit(proStatus) - normalized.used);
     if (remaining <= 0) {
-      setAiError(`今日 AI 分析次數已用完（0 / ${AI_DAILY_LIMIT[planTier]}）。`);
+      setAiQuotaExhaustedMessage();
       return;
     }
     setAiError(null);
@@ -1960,6 +1972,15 @@ ${newsText}
               </div>
             ) : null}
 
+            {!isPro ? (
+              <ProUpgradeCard
+                variant="compact"
+                proStatus={proStatus}
+                onUpgrade={openProUpgrade}
+                onRedeem={() => setPromoModalOpen(true)}
+              />
+            ) : null}
+
             <AiSummaryPanel
               aiLoading={aiLoading}
               aiError={aiError}
@@ -1976,10 +1997,10 @@ ${newsText}
               onCopyScript={() => void copyAiScript()}
               onOpenAnalysis={openAiAnalysis}
               selectedNewsCount={selectedNews.length}
-              planTier={planTier}
+              isPro={isPro}
               aiQuotaRemaining={aiQuotaRemaining}
               aiDailyLimit={aiDailyLimit}
-              onOpenProModal={() => {}}
+              onOpenProModal={openProUpgrade}
               aiFavorited={currentAiIsFavorited}
               onToggleAiFavorite={toggleAiFavorite}
             />
@@ -1988,6 +2009,7 @@ ${newsText}
               title="新聞"
               compact
               denseCards
+              isPro={isPro}
               homeToolbar={{
                 selectAll,
                 clearAll,
@@ -2028,12 +2050,14 @@ ${newsText}
               aiLoading={aiLoading}
             />
 
-            <AdSenseSlot
-              clientId={readAdSenseClientId()}
-              slotId={ADSENSE_PLAYER_BANNER_SLOT_ID}
-              format="horizontal"
-              placeholderVariant="banner"
-            />
+            {!isPro ? (
+              <AdSenseSlot
+                clientId={readAdSenseClientId()}
+                slotId={ADSENSE_PLAYER_BANNER_SLOT_ID}
+                format="horizontal"
+                placeholderVariant="banner"
+              />
+            ) : null}
 
             <AiSummaryPanel
               aiLoading={aiLoading}
@@ -2051,10 +2075,10 @@ ${newsText}
               onCopyScript={() => void copyAiScript()}
               onOpenAnalysis={openAiAnalysis}
               selectedNewsCount={selectedNews.length}
-              planTier={planTier}
+              isPro={isPro}
               aiQuotaRemaining={aiQuotaRemaining}
               aiDailyLimit={aiDailyLimit}
-              onOpenProModal={() => {}}
+              onOpenProModal={openProUpgrade}
               aiFavorited={currentAiIsFavorited}
               onToggleAiFavorite={toggleAiFavorite}
             />
@@ -2211,6 +2235,17 @@ ${newsText}
 
         {tab === "settings" && (
           <>
+            <ProStatusCard proStatus={proStatus} aiDailyLimit={aiDailyLimit} />
+
+            {!isPro ? (
+              <ProUpgradeCard
+                variant="settings"
+                proStatus={proStatus}
+                onUpgrade={openProUpgrade}
+                onRedeem={() => setPromoModalOpen(true)}
+              />
+            ) : null}
+
             <section style={styles.controlPanel}>
               <div style={styles.controlTitle}>帳號同步</div>
               <div style={styles.settingHint}>
@@ -2287,7 +2322,7 @@ ${newsText}
                 </div>
                 <div style={styles.planQuotaRight}>
                   <div style={styles.planQuotaNote}>
-                    Free 方案 · Pro 即將開放
+                    {isPro ? "Pro 方案" : "Free 方案"}
                   </div>
                 </div>
               </div>
@@ -2400,8 +2435,30 @@ ${newsText}
             loading={aiLoading}
             onClose={() => setAiDurationSheetOpen(false)}
             onSelect={runAiAnalysisWithDuration}
-            planTier={planTier}
-            onOpenProModal={() => {}}
+            isPro={isPro}
+            onOpenProModal={openProUpgrade}
+          />
+        ) : null}
+
+        {proUpgradeModalOpen ? (
+          <ProUpgradeModal
+            onClose={() => setProUpgradeModalOpen(false)}
+            onRedeem={() => {
+              setProUpgradeModalOpen(false);
+              setPromoModalOpen(true);
+            }}
+            fiveMinuteFocus
+          />
+        ) : null}
+
+        {promoModalOpen ? (
+          <PromoRedeemModal
+            onClose={() => setPromoModalOpen(false)}
+            onRedeemed={(status, message) => {
+              setProStatus(status);
+              setPromoModalOpen(false);
+              alert(message);
+            }}
           />
         ) : null}
 
@@ -2833,34 +2890,213 @@ function CollapsibleHighlightsSection({ highlights }: { highlights: AiHighlight[
   );
 }
 
+const PRO_SELL_POINTS = [
+  "移除所有廣告",
+  "解鎖 5 分鐘深度 AI 新聞稿",
+  "每日更多 AI 產生次數",
+  "更乾淨的閱讀與播放體驗",
+  "未來支援每日簡報與重要新聞提醒",
+] as const;
+
 function ProUpgradeCard({
-  planTier,
-  onOpen,
+  variant,
+  proStatus,
+  onUpgrade,
+  onRedeem,
 }: {
-  planTier: PlanTier;
-  onOpen: () => void;
+  variant: "compact" | "settings";
+  proStatus: ProStatus;
+  onUpgrade: () => void;
+  onRedeem: () => void;
 }) {
-  if (planTier === "pro") {
-    return (
-      <div style={styles.proBannerPro} role="status">
-        <div style={styles.proBannerLeft}>
-          <div style={styles.proBannerTitle}>你已是 Pro</div>
-          <div style={styles.proBannerSub}>每日 30 次 AI 分析 · 解鎖 3/5 分鐘</div>
-        </div>
-        <span style={styles.proBadgeOk}>PRO</span>
+  if (isProActive(proStatus)) return null;
+
+  const compact = variant === "compact";
+  return (
+    <div
+      style={compact ? styles.proUpgradeCardCompact : styles.proUpgradeCardSettings}
+      role="note"
+      aria-label="升級 Pro"
+    >
+      <div style={styles.proUpgradeTitle}>升級 Pro，打造更完整的 AI 新聞台</div>
+      {!compact ? (
+        <ul style={styles.proUpgradeList}>
+          {PRO_SELL_POINTS.map((p) => (
+            <li key={p}>{p}</li>
+          ))}
+        </ul>
+      ) : (
+        <p style={styles.proUpgradeCompactSub}>
+          無廣告 · 5 分鐘深度稿 · 每日 {AI_DAILY_LIMIT_PRO} 次 AI
+        </p>
+      )}
+      <div style={styles.proUpgradePriceRow}>
+        <span>月費 {PRO_PRICING.monthly.label}</span>
+        <span style={styles.proUpgradePriceDot}>·</span>
+        <span>年費 {PRO_PRICING.yearly.label}</span>
       </div>
-    );
-  }
+      <div style={styles.proUpgradeBtnRow}>
+        <button type="button" onClick={onUpgrade} style={styles.proUpgradePrimaryBtn}>
+          升級 Pro
+        </button>
+        <button type="button" onClick={onRedeem} style={styles.proUpgradeSecondaryBtn}>
+          輸入兌換碼
+        </button>
+      </div>
+      <p style={styles.proUpgradeFootnote}>正式付款即將開放（App Store / Google Play）</p>
+    </div>
+  );
+}
+
+function ProStatusCard({
+  proStatus,
+  aiDailyLimit,
+}: {
+  proStatus: ProStatus;
+  aiDailyLimit: number;
+}) {
+  const active = isProActive(proStatus);
+  const source = proSourceLabel(proStatus.proSource);
 
   return (
-    <div style={styles.proBanner} role="note" aria-label="Pro 即將開放">
-      <div style={styles.proBannerLeft}>
-        <div style={styles.proBannerTitle}>Pro 即將開放</div>
-        <div style={styles.proBannerSub}>3／5 分鐘主播稿與更多功能將在後續推出</div>
+    <section style={styles.controlPanel}>
+      <div style={styles.controlTitle}>Pro 方案</div>
+      {active ? (
+        <>
+          <div style={styles.proStatusLine}>
+            <strong>目前方案：</strong>Pro
+          </div>
+          <div style={styles.proStatusLine}>
+            <strong>到期日：</strong>
+            {formatProExpiresAt(proStatus.proExpiresAt)}
+          </div>
+          <div style={styles.proStatusLine}>
+            <strong>每日 AI 次數：</strong>
+            {aiDailyLimit} 次
+          </div>
+          <div style={styles.proStatusLine}>已移除廣告</div>
+          {source ? (
+            <div style={styles.proStatusLine}>
+              <strong>來源：</strong>
+              {source}
+            </div>
+          ) : null}
+        </>
+      ) : (
+        <>
+          <div style={styles.proStatusLine}>
+            <strong>目前方案：</strong>Free
+          </div>
+          <div style={styles.proStatusLine}>
+            <strong>每日 AI 次數：</strong>3 次
+          </div>
+          <div style={styles.settingHint}>
+            升級 Pro 可移除廣告並解鎖 5 分鐘新聞稿
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+function ProUpgradeModal({
+  onClose,
+  onRedeem,
+  fiveMinuteFocus,
+}: {
+  onClose: () => void;
+  onRedeem: () => void;
+  fiveMinuteFocus?: boolean;
+}) {
+  return (
+    <div style={styles.proModalBackdrop} onClick={onClose} role="presentation">
+      <div
+        style={styles.proModalPanel}
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="升級 Pro"
+      >
+        {fiveMinuteFocus ? (
+          <div style={styles.proModalFocusBox}>
+            <div style={styles.proModalFocusTitle}>5 分鐘深度新聞稿為 Pro 專屬</div>
+            <p style={styles.proModalFocusBody}>
+              適合通勤、開車、運動時完整收聽今日重點
+            </p>
+          </div>
+        ) : null}
+        <ProUpgradeCard
+          variant="settings"
+          proStatus={{ isPro: false, proExpiresAt: null, proSource: null }}
+          onUpgrade={() => alert("Pro 訂閱即將開放，請稍後再試或使用兌換碼。")}
+          onRedeem={onRedeem}
+        />
+        <button type="button" onClick={onClose} style={styles.proModalCloseBtn}>
+          關閉
+        </button>
       </div>
-      <button type="button" onClick={onOpen} style={styles.proBannerBtn}>
-        了解
-      </button>
+    </div>
+  );
+}
+
+function PromoRedeemModal({
+  onClose,
+  onRedeemed,
+}: {
+  onClose: () => void;
+  onRedeemed: (status: ProStatus, message: string) => void;
+}) {
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    const trimmed = code.trim();
+    if (!trimmed) return;
+    setBusy(true);
+    try {
+      const result = await redeemPromoCode(trimmed);
+      if (result.ok) {
+        onRedeemed(result.status, result.message);
+      } else {
+        alert(result.message);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={styles.proModalBackdrop} onClick={onClose} role="presentation">
+      <div
+        style={styles.promoModalPanel}
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="兌換碼"
+      >
+        <div style={styles.promoModalTitle}>輸入兌換碼</div>
+        <input
+          value={code}
+          onChange={(e) => setCode(e.target.value)}
+          placeholder="例如 NEWSVIP30"
+          style={styles.promoInput}
+          autoCapitalize="characters"
+          autoComplete="off"
+        />
+        <div style={styles.proUpgradeBtnRow}>
+          <button
+            type="button"
+            disabled={busy || !code.trim()}
+            onClick={() => void submit()}
+            style={styles.proUpgradePrimaryBtn}
+          >
+            {busy ? "兌換中…" : "兌換"}
+          </button>
+          <button type="button" onClick={onClose} style={styles.proUpgradeSecondaryBtn}>
+            取消
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -3077,13 +3313,12 @@ function AiHistorySection({
 }
 
 function AccountSyncSection({
-  planTier,
+  isPro,
   onOpenAuthModal,
 }: {
-  planTier: PlanTier;
+  isPro: boolean;
   onOpenAuthModal: () => void;
 }) {
-  const isPro = planTier === "pro";
 
   return (
     <section style={styles.accountPanel}>
@@ -3298,7 +3533,7 @@ function AiSummaryPanel({
   onCopyScript,
   onOpenAnalysis,
   selectedNewsCount,
-  planTier,
+  isPro,
   aiQuotaRemaining,
   aiDailyLimit,
   onOpenProModal,
@@ -3320,7 +3555,7 @@ function AiSummaryPanel({
   onCopyScript: () => void;
   onOpenAnalysis: () => void;
   selectedNewsCount: number;
-  planTier: PlanTier;
+  isPro: boolean;
   aiQuotaRemaining: number;
   aiDailyLimit: number;
   onOpenProModal: () => void;
@@ -3338,7 +3573,7 @@ function AiSummaryPanel({
           <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
             <span style={styles.aiSummaryKicker}>AI 分析</span>
             <span style={styles.aiQuotaLine}>
-              今日剩餘 {aiQuotaRemaining} / {aiDailyLimit} 次（{planTier === "pro" ? "Pro" : "Free"}）
+              今日剩餘 {aiQuotaRemaining} / {aiDailyLimit} 次（{isPro ? "Pro" : "Free"}）
             </span>
           </div>
           {selectedScriptDuration != null && aiScript.trim() ? (
@@ -3446,13 +3681,13 @@ function AiDurationSheet({
   loading,
   onClose,
   onSelect,
-  planTier,
+  isPro,
   onOpenProModal,
 }: {
   loading: boolean;
   onClose: () => void;
   onSelect: (d: AiDuration) => void;
-  planTier: PlanTier;
+  isPro: boolean;
   onOpenProModal: () => void;
 }) {
   return (
@@ -3476,35 +3711,41 @@ function AiDurationSheet({
           將為已勾選的新聞產生重點摘要與 AI 主播稿
         </p>
         <div style={styles.aiSheetOptions}>
-          {([1, 3, 5] as const).map((d) => (
-            <button
-              key={d}
-              type="button"
-              disabled={loading || (planTier !== "pro" && d === 5)}
-              className="ai-duration-option"
-              onClick={() => {
-                onSelect(d);
-              }}
-              style={{
-                ...styles.aiSheetOptionBtn,
-                ...(planTier !== "pro" && d === 5 ? styles.aiSheetOptionLocked : {}),
-              }}
-            >
-              <span style={styles.aiSheetOptionMain}>
-                {d} 分鐘{" "}
-                {planTier !== "pro" && d === 5 ? (
-                  <span style={styles.proLockTag}>5 分鐘即將開放</span>
-                ) : null}
-              </span>
-              <span style={styles.aiSheetOptionSub}>
-                {d === 1
-                  ? "快報 · 無廣告"
-                  : d === 3
-                    ? "平衡 · 無插頁廣告"
-                    : "深度 · 即將開放"}
-              </span>
-            </button>
-          ))}
+          {([1, 3, 5] as const).map((d) => {
+            const locked = !isPro && d === 5;
+            return (
+              <button
+                key={d}
+                type="button"
+                disabled={loading}
+                className="ai-duration-option"
+                onClick={() => {
+                  if (locked) {
+                    onClose();
+                    onOpenProModal();
+                    return;
+                  }
+                  onSelect(d);
+                }}
+                style={{
+                  ...styles.aiSheetOptionBtn,
+                  ...(locked ? styles.aiSheetOptionLocked : {}),
+                }}
+              >
+                <span style={styles.aiSheetOptionMain}>
+                  {d} 分鐘{" "}
+                  {locked ? <span style={styles.proLockTag}>Pro 專屬</span> : null}
+                </span>
+                <span style={styles.aiSheetOptionSub}>
+                  {d === 1
+                    ? "快報"
+                    : d === 3
+                      ? "平衡"
+                      : "深度 · 通勤完整收聽"}
+                </span>
+              </button>
+            );
+          })}
         </div>
         <button type="button" onClick={onClose} style={styles.aiSheetCancel}>
           取消
@@ -3740,6 +3981,7 @@ function NewsList({
   emptyText = "沒有新聞",
   compact = false,
   denseCards = false,
+  isPro = false,
   homeToolbar,
   playingIndex = -1,
 }: {
@@ -3751,6 +3993,7 @@ function NewsList({
   emptyText?: string;
   compact?: boolean;
   denseCards?: boolean;
+  isPro?: boolean;
   homeToolbar?: {
     selectAll: () => void;
     clearAll: () => void;
@@ -3829,7 +4072,7 @@ function NewsList({
       <div style={denseCards ? styles.newsListDense : styles.newsList}>
         {(() => {
           const blocks: JSX.Element[] = [];
-          const showNativeAd = title === "新聞" && news.length >= 8;
+          const showNativeAd = !isPro && title === "新聞" && news.length >= 8;
           const adIndex = showNativeAd ? Math.min(4, Math.floor(news.length / 2)) : -1;
 
           news.forEach((item, index) => {
@@ -4801,6 +5044,7 @@ const styles: Record<string, CSSProperties> = {
     fontSize: "13px",
     lineHeight: 1.5,
     wordBreak: "break-word",
+    whiteSpace: "pre-line",
   },
   aiSummaryLoading: {
     color: "#94A3B8",
@@ -5838,6 +6082,167 @@ const styles: Record<string, CSSProperties> = {
     border: "1px solid rgba(52,211,153,.22)",
     borderRadius: "999px",
     padding: "4px 10px",
+  },
+  proUpgradeCardCompact: {
+    marginTop: "8px",
+    marginBottom: "6px",
+    padding: "12px 14px",
+    borderRadius: "14px",
+    background:
+      "linear-gradient(135deg, rgba(124,58,237,.14) 0%, rgba(15,23,42,.9) 100%)",
+    border: "1px solid rgba(167,139,250,.25)",
+  },
+  proUpgradeCardSettings: {
+    marginBottom: "14px",
+    padding: "14px",
+    borderRadius: "16px",
+    background: "rgba(15,23,42,.88)",
+    border: "1px solid rgba(255,255,255,.1)",
+  },
+  proUpgradeTitle: {
+    fontSize: "15px",
+    fontWeight: 900,
+    color: "#F8FAFC",
+    lineHeight: 1.35,
+    marginBottom: "8px",
+  },
+  proUpgradeList: {
+    margin: "0 0 10px",
+    paddingLeft: "18px",
+    fontSize: "13px",
+    color: "#CBD5E1",
+    lineHeight: 1.5,
+  },
+  proUpgradeCompactSub: {
+    margin: "0 0 8px",
+    fontSize: "12px",
+    color: "#94A3B8",
+    lineHeight: 1.4,
+  },
+  proUpgradePriceRow: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: "6px",
+    fontSize: "12px",
+    fontWeight: 800,
+    color: "#A7F3D0",
+    marginBottom: "10px",
+  },
+  proUpgradePriceDot: { color: "#64748B" },
+  proUpgradeBtnRow: {
+    display: "flex",
+    gap: "8px",
+    flexWrap: "wrap",
+  },
+  proUpgradePrimaryBtn: {
+    flex: "1 1 120px",
+    border: "none",
+    borderRadius: "12px",
+    padding: "10px 14px",
+    fontSize: "13px",
+    fontWeight: 900,
+    color: "white",
+    background: "linear-gradient(135deg, #7C3AED, #4F46E5)",
+    cursor: "pointer",
+  },
+  proUpgradeSecondaryBtn: {
+    flex: "1 1 100px",
+    borderRadius: "12px",
+    padding: "10px 14px",
+    fontSize: "13px",
+    fontWeight: 800,
+    color: "#E2E8F0",
+    background: "rgba(255,255,255,.08)",
+    border: "1px solid rgba(255,255,255,.14)",
+    cursor: "pointer",
+  },
+  proUpgradeFootnote: {
+    margin: "8px 0 0",
+    fontSize: "11px",
+    color: "#64748B",
+    lineHeight: 1.35,
+  },
+  proStatusLine: {
+    fontSize: "14px",
+    color: "#CBD5E1",
+    lineHeight: 1.55,
+    marginBottom: "6px",
+  },
+  proModalBackdrop: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(2,6,23,.72)",
+    zIndex: 200,
+    display: "flex",
+    alignItems: "flex-end",
+    justifyContent: "center",
+    padding: "12px",
+    paddingBottom: "max(12px, env(safe-area-inset-bottom, 0px))",
+  },
+  proModalPanel: {
+    width: "min(460px, 100%)",
+    maxHeight: "min(88dvh, 720px)",
+    overflowY: "auto",
+    borderRadius: "20px",
+    padding: "14px",
+    background: "#0F172A",
+    border: "1px solid rgba(255,255,255,.12)",
+  },
+  proModalFocusBox: {
+    marginBottom: "12px",
+    padding: "12px",
+    borderRadius: "12px",
+    background: "rgba(124,58,237,.15)",
+    border: "1px solid rgba(167,139,250,.3)",
+  },
+  proModalFocusTitle: {
+    fontSize: "16px",
+    fontWeight: 900,
+    color: "#F8FAFC",
+    marginBottom: "6px",
+  },
+  proModalFocusBody: {
+    margin: 0,
+    fontSize: "13px",
+    color: "#CBD5E1",
+    lineHeight: 1.45,
+  },
+  proModalCloseBtn: {
+    width: "100%",
+    marginTop: "10px",
+    padding: "12px",
+    borderRadius: "12px",
+    border: "none",
+    background: "rgba(255,255,255,.08)",
+    color: "#CBD5E1",
+    fontWeight: 700,
+    fontSize: "14px",
+    cursor: "pointer",
+  },
+  promoModalPanel: {
+    width: "min(400px, 100%)",
+    borderRadius: "18px",
+    padding: "16px",
+    background: "#0F172A",
+    border: "1px solid rgba(255,255,255,.12)",
+  },
+  promoModalTitle: {
+    fontSize: "16px",
+    fontWeight: 900,
+    marginBottom: "12px",
+    color: "#F8FAFC",
+  },
+  promoInput: {
+    width: "100%",
+    boxSizing: "border-box",
+    marginBottom: "12px",
+    padding: "10px 12px",
+    borderRadius: "10px",
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.06)",
+    color: "white",
+    fontSize: "14px",
+    outline: "none",
   },
   paywallBackdrop: {
     position: "fixed",
