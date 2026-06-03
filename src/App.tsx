@@ -3,9 +3,15 @@ import type { CSSProperties } from "react";
 import { Headphones, Home, Settings, Star } from "lucide-react";
 import {
   AI_DAILY_LIMIT_PRO,
+  canAddCustomKeyword,
+  canAddFavorite,
+  canAddTopic,
+  canUseDeepMode,
   canUseFiveMinuteScript,
+  filterHistoryByPlan,
   formatProExpiresAt,
   getAiDailyLimit,
+  getPlanLimits,
   getProStatus,
   isProActive,
   proSourceLabel,
@@ -142,6 +148,18 @@ const SPLASH_DURATION_MS = 1500;
 
 const SELECTED_TOPICS_KEY = "pns_selected_topics_v1";
 const CUSTOM_KEYWORD_KEY = "pns_custom_keyword_v1";
+const CUSTOM_KEYWORDS_LIST_KEY = "pns_custom_keywords_v1";
+
+type AiAnalysisMode = "normal" | "deep";
+
+type UpgradeModalKind =
+  | "general"
+  | "five_minute"
+  | "quota"
+  | "topic"
+  | "favorite"
+  | "keyword"
+  | "deep";
 
 const DEFAULT_TOPICS = ["NBA", "MLB", "大谷翔平", "Curry", "BTC"];
 
@@ -181,6 +199,28 @@ function readCustomKeyword(): string {
 function writeCustomKeyword(v: string) {
   try {
     localStorage.setItem(CUSTOM_KEYWORD_KEY, v);
+  } catch {
+    /* ignore */
+  }
+}
+
+function readSavedCustomKeywords(): string[] {
+  try {
+    const raw = localStorage.getItem(CUSTOM_KEYWORDS_LIST_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw) as unknown;
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+      .map((s) => s.trim());
+  } catch {
+    return [];
+  }
+}
+
+function writeSavedCustomKeywords(list: string[]) {
+  try {
+    localStorage.setItem(CUSTOM_KEYWORDS_LIST_KEY, JSON.stringify(list));
   } catch {
     /* ignore */
   }
@@ -374,13 +414,17 @@ function isNewsFreshEnough(pubDateRaw: string, nowMs: number): boolean {
 }
 
 /** 已選新聞（最多 5 則）+ 稿長 快取用 fingerprint */
-function aiSummaryCacheFingerprint(items: NewsItem[], duration: AiDuration): string {
+function aiSummaryCacheFingerprint(
+  items: NewsItem[],
+  duration: AiDuration,
+  deepMode = false
+): string {
   const base = [...items]
     .slice(0, 5)
     .map((n) => `${normalizeKey(n.title)}|${n.source.trim()}`)
     .sort()
     .join("\0");
-  return `${duration}\0${base}`;
+  return `${duration}\0${deepMode ? "deep" : "normal"}\0${base}`;
 }
 
 function clampSpeed(n: number): number {
@@ -701,7 +745,11 @@ export default function App() {
   const [showProDebugTools, setShowProDebugTools] = useState(() =>
     syncProDebugModeFromUrl()
   );
-  const [proUpgradeModalOpen, setProUpgradeModalOpen] = useState(false);
+  const [upgradeModal, setUpgradeModal] = useState<UpgradeModalKind | null>(null);
+  const [aiAnalysisMode, setAiAnalysisMode] = useState<AiAnalysisMode>("normal");
+  const [savedCustomKeywords, setSavedCustomKeywords] = useState<string[]>(() =>
+    readSavedCustomKeywords()
+  );
   const [promoModalOpen, setPromoModalOpen] = useState(false);
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState(() => !readOnboardingSeen());
@@ -731,24 +779,31 @@ export default function App() {
   const favoriteNews = news.filter((n) => n.favorite);
 
   const isPro = isProActive(proStatus);
-  const aiDailyLimit = getAiDailyLimit(proStatus);
+  const planLimits = useMemo(() => getPlanLimits(proStatus), [proStatus]);
+  const aiDailyLimit = planLimits.aiDailyLimit;
   const aiQuotaRemaining = Math.max(0, aiDailyLimit - aiQuota.used);
+  const visibleAiHistory = useMemo(
+    () => filterHistoryByPlan(aiHistory, proStatus),
+    [aiHistory, proStatus]
+  );
 
   const refreshProStatus = useCallback(() => {
     setProStatus(getProStatus());
   }, []);
 
   const openProUpgrade = useCallback(() => {
-    setProUpgradeModalOpen(true);
+    setUpgradeModal("general");
+  }, []);
+
+  const showProPaymentComingSoon = useCallback(() => {
+    alert("Pro 訂閱即將開放，請稍後再試或使用兌換碼。");
   }, []);
 
   const setAiQuotaExhaustedMessage = useCallback(() => {
     if (isProActive(proStatus)) {
       setAiError("今日 AI 次數已用完，明天會自動重置");
     } else {
-      setAiError(
-        "今日免費 AI 次數已用完\n升級 Pro 可獲得每日更多 AI 新聞稿次數，並解鎖 5 分鐘深度稿"
-      );
+      setUpgradeModal("quota");
     }
   }, [proStatus]);
 
@@ -1168,13 +1223,25 @@ export default function App() {
   };
 
   const toggleTopic = (label: string) => {
-    setSelectedTopics((prev) =>
-      prev.includes(label) ? prev.filter((t) => t !== label) : [...prev, label]
-    );
+    setSelectedTopics((prev) => {
+      if (prev.includes(label)) {
+        return prev.filter((t) => t !== label);
+      }
+      if (!canAddTopic(prev.length, proStatus)) {
+        if (isProActive(proStatus)) {
+          alert("已達 Pro 主題追蹤上限");
+        } else {
+          setUpgradeModal("topic");
+        }
+        return prev;
+      }
+      return [...prev, label];
+    });
   };
 
   const selectAllTopics = () => {
-    setSelectedTopics(topics.map((t) => t.label));
+    const limit = getPlanLimits(proStatus).topicLimit;
+    setSelectedTopics(topics.map((t) => t.label).slice(0, limit));
   };
 
   const clearTopics = () => {
@@ -1194,6 +1261,17 @@ export default function App() {
   };
 
   const toggleFavorite = (item: NewsItem) => {
+    if (!item.favorite && !favoriteLinks.includes(item.link)) {
+      if (!canAddFavorite(favoriteLinks.length, proStatus)) {
+        if (isProActive(proStatus)) {
+          alert("已達 Pro 收藏上限");
+        } else {
+          setUpgradeModal("favorite");
+        }
+        return;
+      }
+    }
+
     setNews((prev) =>
       prev.map((n) => (n.id === item.id ? { ...n, favorite: !n.favorite } : n))
     );
@@ -1203,6 +1281,35 @@ export default function App() {
         ? prev.filter((link) => link !== item.link)
         : [...prev, item.link]
     );
+  };
+
+  const addSavedCustomKeyword = () => {
+    const kw = customKeyword.trim();
+    if (!kw) {
+      alert("請先輸入關鍵字");
+      return;
+    }
+    if (savedCustomKeywords.includes(kw)) {
+      alert("此關鍵字已在清單中");
+      return;
+    }
+    if (!canAddCustomKeyword(savedCustomKeywords.length, proStatus)) {
+      if (isProActive(proStatus)) {
+        alert("已達 Pro 自訂關鍵字上限");
+      } else {
+        setUpgradeModal("keyword");
+      }
+      return;
+    }
+    const next = [...savedCustomKeywords, kw];
+    setSavedCustomKeywords(next);
+    writeSavedCustomKeywords(next);
+  };
+
+  const removeSavedCustomKeyword = (kw: string) => {
+    const next = savedCustomKeywords.filter((k) => k !== kw);
+    setSavedCustomKeywords(next);
+    writeSavedCustomKeywords(next);
   };
 
   const selectAll = () => {
@@ -1556,7 +1663,12 @@ export default function App() {
   const runAiAnalysisWithDuration = (duration: AiDuration) => {
     if (duration === 5 && !canUseFiveMinuteScript(proStatus)) {
       setAiDurationSheetOpen(false);
-      setProUpgradeModalOpen(true);
+      setUpgradeModal("five_minute");
+      return;
+    }
+    if (aiAnalysisMode === "deep" && !canUseDeepMode(proStatus)) {
+      setAiDurationSheetOpen(false);
+      setUpgradeModal("deep");
       return;
     }
 
@@ -1628,7 +1740,11 @@ ${newsText}
     const duration = durationOverride ?? aiDuration;
 
     if (duration === 5 && !canUseFiveMinuteScript(proStatus)) {
-      setProUpgradeModalOpen(true);
+      setUpgradeModal("five_minute");
+      return;
+    }
+    if (aiAnalysisMode === "deep" && !canUseDeepMode(proStatus)) {
+      setUpgradeModal("deep");
       return;
     }
 
@@ -1646,7 +1762,8 @@ ${newsText}
       return;
     }
     setAiError(null);
-    const fp = aiSummaryCacheFingerprint(picked, duration);
+    const deepMode = aiAnalysisMode === "deep" && canUseDeepMode(proStatus);
+    const fp = aiSummaryCacheFingerprint(picked, duration, deepMode);
 
     try {
       const raw = localStorage.getItem(AI_SUMMARY_CACHE_KEY);
@@ -1699,6 +1816,7 @@ ${newsText}
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           duration,
+          deepMode,
           items: picked.map((n) => ({ title: n.title, source: n.source })),
         }),
       });
@@ -2244,11 +2362,7 @@ ${newsText}
 
         {tab === "settings" && (
           <>
-            <ProStatusCard
-              proStatus={proStatus}
-              aiDailyLimit={aiDailyLimit}
-              showDebugTools={showProDebugTools}
-            />
+            <ProStatusCard proStatus={proStatus} showDebugTools={showProDebugTools} />
 
             {!isPro ? (
               <ProUpgradeCard
@@ -2278,6 +2392,9 @@ ${newsText}
 
               <div style={styles.settingHint}>
                 首頁會依照這些主題整理新聞。想搜尋單一事件，可直接在首頁搜尋框輸入關鍵字。
+              </div>
+              <div style={styles.settingHint}>
+                已選 {selectedTopics.length} / {planLimits.topicLimit} 個主題
               </div>
 
               <div style={styles.actionRow}>
@@ -2313,16 +2430,57 @@ ${newsText}
 
             <section style={styles.controlPanel}>
               <div style={styles.controlTitle}>自訂關鍵字</div>
+              <div style={styles.settingHint}>
+                已儲存 {savedCustomKeywords.length} / {planLimits.customKeywordLimit} 個
+              </div>
               <input
                 value={customKeyword}
                 onChange={(e) => setCustomKeyword(e.target.value)}
                 placeholder="例如：俄烏戰爭、Solana、台積電..."
                 style={styles.settingInput}
               />
-              <button onClick={updateMyNews} style={styles.fullButton}>
-                套用並更新新聞
-              </button>
+              <div style={styles.actionRow}>
+                <button type="button" onClick={addSavedCustomKeyword} style={styles.miniButton}>
+                  加入關鍵字清單
+                </button>
+                <button onClick={updateMyNews} style={styles.gptButton}>
+                  套用並更新新聞
+                </button>
+              </div>
+              {savedCustomKeywords.length > 0 ? (
+                <div style={styles.savedKeywordChips}>
+                  {savedCustomKeywords.map((kw) => (
+                    <span key={kw} style={styles.savedKeywordChip}>
+                      {kw}
+                      <button
+                        type="button"
+                        onClick={() => removeSavedCustomKeyword(kw)}
+                        style={styles.savedKeywordChipRemove}
+                        aria-label={`移除 ${kw}`}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              ) : null}
             </section>
+
+            <AiHistorySection
+              entries={visibleAiHistory}
+              activeId={activeAiHistoryId}
+              onSelect={loadAiHistoryEntry}
+              onPlay={playAiHistoryEntry}
+              onCopy={(entry) => void copyAiScriptText(entry.script)}
+              onDelete={removeAiHistoryEntry}
+              onClearAll={clearAllAiHistory}
+              historyHint={
+                isPro
+                  ? "Pro 可顯示最近 180 天 AI 新聞稿歷史"
+                  : "免費版顯示最近 7 天 AI 新聞稿歷史。升級 Pro 可保留更長時間"
+              }
+              hiddenOlderCount={aiHistory.length - visibleAiHistory.length}
+            />
 
             <section style={styles.controlPanel}>
               <div style={styles.controlTitle}>AI 使用額度</div>
@@ -2449,18 +2607,24 @@ ${newsText}
             onClose={() => setAiDurationSheetOpen(false)}
             onSelect={runAiAnalysisWithDuration}
             isPro={isPro}
-            onOpenProModal={openProUpgrade}
+            analysisMode={aiAnalysisMode}
+            onAnalysisModeChange={setAiAnalysisMode}
+            onOpenProModal={(kind) => {
+              setAiDurationSheetOpen(false);
+              setUpgradeModal(kind);
+            }}
           />
         ) : null}
 
-        {proUpgradeModalOpen ? (
-          <ProUpgradeModal
-            onClose={() => setProUpgradeModalOpen(false)}
+        {upgradeModal ? (
+          <UpgradeModal
+            kind={upgradeModal}
+            onClose={() => setUpgradeModal(null)}
             onRedeem={() => {
-              setProUpgradeModalOpen(false);
+              setUpgradeModal(null);
               setPromoModalOpen(true);
             }}
-            fiveMinuteFocus
+            onUpgrade={showProPaymentComingSoon}
           />
         ) : null}
 
@@ -2904,11 +3068,12 @@ function CollapsibleHighlightsSection({ highlights }: { highlights: AiHighlight[
 }
 
 const PRO_SELL_POINTS = [
-  "移除所有廣告",
   "解鎖 5 分鐘深度 AI 新聞稿",
-  "每日更多 AI 產生次數",
-  "更乾淨的閱讀與播放體驗",
-  "未來支援每日簡報與重要新聞提醒",
+  "每日 20 次 AI 產生額度",
+  "追蹤更多主題與自訂關鍵字",
+  "收藏與 AI 歷史保留更久",
+  "移除所有廣告",
+  "即將支援每日 AI 早報 / 晚報",
 ] as const;
 
 function ProUpgradeCard({
@@ -2931,13 +3096,18 @@ function ProUpgradeCard({
       role="note"
       aria-label="升級 Pro"
     >
-      <div style={styles.proUpgradeTitle}>升級 Pro，打造更完整的 AI 新聞台</div>
+      <div style={styles.proUpgradeTitle}>升級 Pro，打造你的完整 AI 新聞台</div>
       {!compact ? (
-        <ul style={styles.proUpgradeList}>
-          {PRO_SELL_POINTS.map((p) => (
-            <li key={p}>{p}</li>
-          ))}
-        </ul>
+        <>
+          <p style={styles.proUpgradeSubtitle}>
+            更多主題、更長新聞稿、深度解析、無廣告播放。
+          </p>
+          <ul style={styles.proUpgradeList}>
+            {PRO_SELL_POINTS.map((p) => (
+              <li key={p}>{p}</li>
+            ))}
+          </ul>
+        </>
       ) : (
         <p style={styles.proUpgradeCompactSub}>
           無廣告 · 5 分鐘深度稿 · 每日 {AI_DAILY_LIMIT_PRO} 次 AI
@@ -2949,8 +3119,13 @@ function ProUpgradeCard({
         <span>年費 {PRO_PRICING.yearly.label}</span>
       </div>
       <div style={styles.proUpgradeBtnRow}>
-        <button type="button" onClick={onUpgrade} style={styles.proUpgradePrimaryBtn}>
-          升級 Pro
+        <button
+          type="button"
+          onClick={onUpgrade}
+          style={styles.proUpgradePrimaryBtn}
+          title="正式付款即將開放"
+        >
+          升級 Pro（即將開放）
         </button>
         <button type="button" onClick={onRedeem} style={styles.proUpgradeSecondaryBtn}>
           輸入兌換碼
@@ -2963,15 +3138,14 @@ function ProUpgradeCard({
 
 function ProStatusCard({
   proStatus,
-  aiDailyLimit,
   showDebugTools,
 }: {
   proStatus: ProStatus;
-  aiDailyLimit: number;
   showDebugTools: boolean;
 }) {
   const active = isProActive(proStatus);
   const source = proSourceLabel(proStatus.proSource);
+  const limits = getPlanLimits(proStatus);
 
   return (
     <section style={styles.controlPanel}>
@@ -2987,7 +3161,22 @@ function ProStatusCard({
           </div>
           <div style={styles.proStatusLine}>
             <strong>每日 AI 次數：</strong>
-            {aiDailyLimit} 次
+            {limits.aiDailyLimit} 次
+          </div>
+          <div style={styles.proStatusLine}>
+            <strong>可追蹤主題：</strong>
+            {limits.topicLimit} 個
+          </div>
+          <div style={styles.proStatusLine}>
+            <strong>自訂關鍵字：</strong>
+            {limits.customKeywordLimit} 個
+          </div>
+          <div style={styles.proStatusLine}>
+            <strong>收藏上限：</strong>
+            {limits.favoriteLimit} 則
+          </div>
+          <div style={styles.proStatusLine}>
+            <strong>AI 歷史：</strong>最近 {limits.historyDays} 天
           </div>
           <div style={styles.proStatusLine}>已移除廣告</div>
           {source ? (
@@ -3003,10 +3192,26 @@ function ProStatusCard({
             <strong>目前方案：</strong>Free
           </div>
           <div style={styles.proStatusLine}>
-            <strong>每日 AI 次數：</strong>3 次
+            <strong>每日 AI 次數：</strong>
+            {limits.aiDailyLimit} 次
+          </div>
+          <div style={styles.proStatusLine}>
+            <strong>可追蹤主題：</strong>
+            {limits.topicLimit} 個
+          </div>
+          <div style={styles.proStatusLine}>
+            <strong>自訂關鍵字：</strong>
+            {limits.customKeywordLimit} 個
+          </div>
+          <div style={styles.proStatusLine}>
+            <strong>收藏上限：</strong>
+            {limits.favoriteLimit} 則
+          </div>
+          <div style={styles.proStatusLine}>
+            <strong>AI 歷史：</strong>最近 {limits.historyDays} 天
           </div>
           <div style={styles.settingHint}>
-            升級 Pro 可移除廣告並解鎖 5 分鐘新聞稿
+            升級 Pro 可解鎖 5 分鐘新聞稿、更多主題、更多收藏與無廣告體驗
           </div>
         </>
       )}
@@ -3018,7 +3223,7 @@ function ProStatusCard({
             type="button"
             onClick={() => {
               const ok = window.confirm(
-                "確定要重置 Pro 測試狀態嗎？這只會清除本機 Pro 狀態，不會影響收藏與主題設定。"
+                "確定要重置 Pro 測試狀態嗎？這只會清除本機 Pro 狀態，不會影響收藏、主題與 AI 歷史。"
               );
               if (!ok) return;
               resetProTestState();
@@ -3039,15 +3244,96 @@ function ProStatusCard({
   );
 }
 
-function ProUpgradeModal({
+function UpgradeModal({
+  kind,
   onClose,
   onRedeem,
-  fiveMinuteFocus,
+  onUpgrade,
 }: {
+  kind: UpgradeModalKind;
   onClose: () => void;
   onRedeem: () => void;
-  fiveMinuteFocus?: boolean;
+  onUpgrade: () => void;
 }) {
+  const renderLimitBody = () => {
+    switch (kind) {
+      case "topic":
+        return (
+          <>
+            <div style={styles.proModalFocusTitle}>
+              免費版最多追蹤 {getPlanLimits().topicLimit} 個主題
+            </div>
+            <p style={styles.proModalFocusBody}>
+              升級 Pro 可追蹤更多主題，打造更完整的個人新聞台
+            </p>
+          </>
+        );
+      case "favorite":
+        return (
+          <>
+            <div style={styles.proModalFocusTitle}>
+              免費版最多收藏 {getPlanLimits().favoriteLimit} 則新聞
+            </div>
+            <p style={styles.proModalFocusBody}>
+              升級 Pro 可收藏更多內容，方便之後回顧
+            </p>
+          </>
+        );
+      case "keyword":
+        return (
+          <>
+            <div style={styles.proModalFocusTitle}>
+              免費版最多新增 {getPlanLimits().customKeywordLimit} 個自訂關鍵字
+            </div>
+            <p style={styles.proModalFocusBody}>
+              升級 Pro 可追蹤更多人物、球隊、股票、幣種與事件
+            </p>
+          </>
+        );
+      case "deep":
+        return (
+          <>
+            <div style={styles.proModalFocusTitle}>深度解析模式為 Pro 專屬</div>
+            <p style={styles.proModalFocusBody}>
+              升級 Pro 可解鎖事件背景、影響與後續觀察的 AI 整理（不提供投資建議）
+            </p>
+          </>
+        );
+      case "quota":
+        return (
+          <>
+            <div style={styles.proModalFocusTitle}>今日免費 AI 次數已用完</div>
+            <p style={styles.proModalFocusBody}>明天會自動重置</p>
+            <p style={styles.proModalFocusBody}>
+              升級 Pro 可獲得每日 20 次 AI 額度、5 分鐘深度稿與無廣告體驗
+            </p>
+          </>
+        );
+      case "five_minute":
+        return (
+          <>
+            <div style={styles.proModalFocusTitle}>5 分鐘深度新聞稿為 Pro 專屬</div>
+            <p style={styles.proModalFocusBody}>
+              適合通勤、開車、運動時完整收聽今日重點。
+            </p>
+            <p style={styles.proModalFocusBody}>
+              升級 Pro 可解鎖 5 分鐘新聞稿、每日 20 次 AI 額度、更多主題追蹤與無廣告體驗。
+            </p>
+          </>
+        );
+      default:
+        return null;
+    }
+  };
+
+  const isLimitKind =
+    kind === "topic" ||
+    kind === "favorite" ||
+    kind === "keyword" ||
+    kind === "deep" ||
+    kind === "quota" ||
+    kind === "five_minute";
+
   return (
     <div style={styles.proModalBackdrop} onClick={onClose} role="presentation">
       <div
@@ -3057,23 +3343,32 @@ function ProUpgradeModal({
         aria-modal="true"
         aria-label="升級 Pro"
       >
-        {fiveMinuteFocus ? (
-          <div style={styles.proModalFocusBox}>
-            <div style={styles.proModalFocusTitle}>5 分鐘深度新聞稿為 Pro 專屬</div>
-            <p style={styles.proModalFocusBody}>
-              適合通勤、開車、運動時完整收聽今日重點
-            </p>
-          </div>
+        {isLimitKind ? (
+          <div style={styles.proModalFocusBox}>{renderLimitBody()}</div>
         ) : null}
-        <ProUpgradeCard
-          variant="settings"
-          proStatus={{ isPro: false, proExpiresAt: null, proSource: null }}
-          onUpgrade={() => alert("Pro 訂閱即將開放，請稍後再試或使用兌換碼。")}
-          onRedeem={onRedeem}
-        />
-        <button type="button" onClick={onClose} style={styles.proModalCloseBtn}>
-          關閉
-        </button>
+
+        {kind === "general" ? (
+          <ProUpgradeCard
+            variant="settings"
+            proStatus={{ isPro: false, proExpiresAt: null, proSource: null }}
+            onUpgrade={onUpgrade}
+            onRedeem={onRedeem}
+          />
+        ) : (
+          <div style={styles.proUpgradeBtnRow}>
+            <button type="button" onClick={onUpgrade} style={styles.proUpgradePrimaryBtn}>
+              升級 Pro（即將開放）
+            </button>
+            {kind === "five_minute" ? (
+              <button type="button" onClick={onRedeem} style={styles.proUpgradeSecondaryBtn}>
+                輸入兌換碼
+              </button>
+            ) : null}
+            <button type="button" onClick={onClose} style={styles.proUpgradeSecondaryBtn}>
+              {kind === "quota" ? "明天再用" : "稍後再說"}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -3247,6 +3542,8 @@ function AiHistorySection({
   onCopy,
   onDelete,
   onClearAll,
+  historyHint,
+  hiddenOlderCount = 0,
 }: {
   entries: AiHistoryEntry[];
   activeId: string | null;
@@ -3255,6 +3552,8 @@ function AiHistorySection({
   onCopy: (entry: AiHistoryEntry) => void;
   onDelete: (id: string) => void;
   onClearAll: () => void;
+  historyHint?: string;
+  hiddenOlderCount?: number;
 }) {
   return (
     <section style={styles.aiHistoryPanel}>
@@ -3262,8 +3561,13 @@ function AiHistorySection({
         <div>
           <div style={styles.aiHistoryTitle}>AI 歷史</div>
           <div style={styles.aiHistorySub}>
-            最近 {AI_HISTORY_MAX} 筆 · 點擊載入主播稿
+            {historyHint ?? `最近 ${AI_HISTORY_MAX} 筆 · 點擊載入主播稿`}
           </div>
+          {hiddenOlderCount > 0 ? (
+            <div style={styles.aiHistoryOlderNote}>
+              另有 {hiddenOlderCount} 筆較早紀錄仍保存在本機，升級 Pro 後可在此查看更長時間
+            </div>
+          ) : null}
         </div>
         {entries.length > 0 ? (
           <button type="button" onClick={onClearAll} style={styles.aiHistoryClearBtn}>
@@ -3722,13 +4026,17 @@ function AiDurationSheet({
   onClose,
   onSelect,
   isPro,
+  analysisMode,
+  onAnalysisModeChange,
   onOpenProModal,
 }: {
   loading: boolean;
   onClose: () => void;
   onSelect: (d: AiDuration) => void;
   isPro: boolean;
-  onOpenProModal: () => void;
+  analysisMode: AiAnalysisMode;
+  onAnalysisModeChange: (mode: AiAnalysisMode) => void;
+  onOpenProModal: (kind: UpgradeModalKind) => void;
 }) {
   return (
     <div
@@ -3750,6 +4058,37 @@ function AiDurationSheet({
         <p style={styles.aiSheetDesc}>
           將為已勾選的新聞產生重點摘要與 AI 主播稿
         </p>
+        <div style={styles.aiSheetModeRow}>
+          <button
+            type="button"
+            disabled={loading}
+            onClick={() => onAnalysisModeChange("normal")}
+            style={{
+              ...styles.aiSheetModeBtn,
+              ...(analysisMode === "normal" ? styles.aiSheetModeBtnActive : {}),
+            }}
+          >
+            一般整理
+          </button>
+          <button
+            type="button"
+            disabled={loading}
+            onClick={() => {
+              if (!isPro) {
+                onClose();
+                onOpenProModal("deep");
+                return;
+              }
+              onAnalysisModeChange("deep");
+            }}
+            style={{
+              ...styles.aiSheetModeBtn,
+              ...(analysisMode === "deep" ? styles.aiSheetModeBtnActive : {}),
+            }}
+          >
+            深度解析 {!isPro ? <span style={styles.proLockTag}>Pro</span> : null}
+          </button>
+        </div>
         <div style={styles.aiSheetOptions}>
           {([1, 3, 5] as const).map((d) => {
             const locked = !isPro && d === 5;
@@ -3762,7 +4101,7 @@ function AiDurationSheet({
                 onClick={() => {
                   if (locked) {
                     onClose();
-                    onOpenProModal();
+                    onOpenProModal("five_minute");
                     return;
                   }
                   onSelect(d);
@@ -4506,6 +4845,12 @@ const styles: Record<string, CSSProperties> = {
     color: "#64748B",
     lineHeight: 1.4,
   },
+  aiHistoryOlderNote: {
+    marginTop: "6px",
+    fontSize: "11px",
+    color: "#94A3B8",
+    lineHeight: 1.4,
+  },
   aiHistoryClearBtn: {
     flexShrink: 0,
     border: "1px solid rgba(248,113,113,.35)",
@@ -4953,6 +5298,32 @@ const styles: Record<string, CSSProperties> = {
     padding: "12px",
     borderRadius: "14px",
     marginTop: "8px",
+  },
+  savedKeywordChips: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: "8px",
+    marginTop: "10px",
+  },
+  savedKeywordChip: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "6px",
+    padding: "6px 10px",
+    borderRadius: "999px",
+    background: "rgba(255,255,255,.08)",
+    border: "1px solid rgba(255,255,255,.12)",
+    fontSize: "12px",
+    color: "#E2E8F0",
+  },
+  savedKeywordChipRemove: {
+    border: "none",
+    background: "transparent",
+    color: "#94A3B8",
+    cursor: "pointer",
+    fontSize: "14px",
+    lineHeight: 1,
+    padding: 0,
   },
   fullButton: {
     width: "100%",
@@ -5998,6 +6369,27 @@ const styles: Record<string, CSSProperties> = {
     fontSize: "13px",
     lineHeight: 1.45,
   },
+  aiSheetModeRow: {
+    display: "flex",
+    gap: "8px",
+    marginBottom: "14px",
+  },
+  aiSheetModeBtn: {
+    flex: 1,
+    padding: "10px 8px",
+    borderRadius: "12px",
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.06)",
+    color: "#CBD5E1",
+    fontSize: "13px",
+    fontWeight: 800,
+    cursor: "pointer",
+  },
+  aiSheetModeBtnActive: {
+    border: "1px solid rgba(45,212,191,.45)",
+    background: "rgba(16,185,129,.15)",
+    color: "#F8FAFC",
+  },
   aiSheetOptions: {
     display: "flex",
     flexDirection: "column",
@@ -6145,6 +6537,12 @@ const styles: Record<string, CSSProperties> = {
     color: "#F8FAFC",
     lineHeight: 1.35,
     marginBottom: "8px",
+  },
+  proUpgradeSubtitle: {
+    margin: "0 0 8px",
+    fontSize: "13px",
+    color: "#94A3B8",
+    lineHeight: 1.45,
   },
   proUpgradeList: {
     margin: "0 0 10px",

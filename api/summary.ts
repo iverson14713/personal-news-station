@@ -167,6 +167,7 @@ export default async function handler(req: any, res: any) {
 
   const body = parseBody(req);
   const duration = normalizeDuration(body.duration);
+  const deepMode = body.deepMode === true || body.mode === "deep";
   const rawItems = body.items;
   const items: SummaryItem[] = Array.isArray(rawItems)
     ? rawItems
@@ -227,7 +228,14 @@ ${alloc.highlightsGuide}
 - script 必須涵蓋全部 ${n} 則新聞；禁止「第一則…第二則…」機械編號。
 - 轉場範例：「首先帶您關注…」「接下來看到…」「另外，財經方面…」「最後快速補充幾則…」
 - 結構：簡短開場 → 依重要度播報（詳略分明）→ 簡短結尾。
-- 像新聞節目，不是固定模板摘要；字數/句數服務於「聽起來像 ${duration} 分鐘」，勿為湊字數重複空話。`;
+- 像新聞節目，不是固定模板摘要；字數/句數服務於「聽起來像 ${duration} 分鐘」，勿為湊字數重複空話。${
+    deepMode
+      ? `
+
+【深度解析模式】
+請補充事件背景、重點整理、可能影響、後續觀察，不要提供投資建議。`
+      : ""
+  }`;
 
   const userMsg = `以下為使用者選取的 ${n} 則新聞（僅標題與來源）。
 請先判斷每則重要程度（🔥/⚠️/ℹ️），再依「${duration} 分鐘模式」與「共 ${n} 則」動態分配 highlights 與 script 篇幅。

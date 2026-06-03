@@ -1,5 +1,5 @@
 /**
- * Pro 訂閱狀態（本機模擬，結構預留 Supabase / IAP / Stripe）
+ * Pro 訂閱狀態與方案限制（本機模擬，結構預留 Supabase / IAP / Stripe）
  */
 
 export type ProSource = "purchase" | "promo" | "manual" | null;
@@ -10,12 +10,44 @@ export type ProStatus = {
   proSource: ProSource;
 };
 
+export type PlanLimits = {
+  aiDailyLimit: number;
+  topicLimit: number;
+  customKeywordLimit: number;
+  favoriteLimit: number;
+  historyDays: number;
+  fiveMinuteEnabled: boolean;
+  deepModeEnabled: boolean;
+};
+
 const PRO_STORAGE_KEY = "pns_pro_status_v1";
 const LEGACY_PLAN_TIER_KEY = "pns_plan_tier_v1";
 export const DEBUG_MODE_KEY = "pns_debug_mode";
 
-export const AI_DAILY_LIMIT_FREE = 3;
-export const AI_DAILY_LIMIT_PRO = 20;
+const FREE_LIMITS: PlanLimits = {
+  aiDailyLimit: 3,
+  topicLimit: 5,
+  customKeywordLimit: 2,
+  favoriteLimit: 20,
+  historyDays: 7,
+  fiveMinuteEnabled: false,
+  deepModeEnabled: false,
+};
+
+const PRO_LIMITS: PlanLimits = {
+  aiDailyLimit: 20,
+  topicLimit: 30,
+  customKeywordLimit: 20,
+  favoriteLimit: 500,
+  historyDays: 180,
+  fiveMinuteEnabled: true,
+  deepModeEnabled: true,
+};
+
+/** @deprecated 請改用 getPlanLimits */
+export const AI_DAILY_LIMIT_FREE = FREE_LIMITS.aiDailyLimit;
+/** @deprecated 請改用 getPlanLimits */
+export const AI_DAILY_LIMIT_PRO = PRO_LIMITS.aiDailyLimit;
 
 /** 兌換碼 → 天數（之後可改為呼叫 /api/promo/redeem） */
 export const PROMO_CODE_DAYS: Record<string, number> = {
@@ -119,12 +151,45 @@ export function isProActive(status?: ProStatus): boolean {
   return s.isPro;
 }
 
+export function getPlanLimits(status?: ProStatus): PlanLimits {
+  return isProActive(status) ? { ...PRO_LIMITS } : { ...FREE_LIMITS };
+}
+
 export function getAiDailyLimit(status?: ProStatus): number {
-  return isProActive(status) ? AI_DAILY_LIMIT_PRO : AI_DAILY_LIMIT_FREE;
+  return getPlanLimits(status).aiDailyLimit;
 }
 
 export function canUseFiveMinuteScript(status?: ProStatus): boolean {
-  return isProActive(status);
+  return getPlanLimits(status).fiveMinuteEnabled;
+}
+
+export function canAddTopic(currentCount: number, status?: ProStatus): boolean {
+  return currentCount < getPlanLimits(status).topicLimit;
+}
+
+export function canAddCustomKeyword(currentCount: number, status?: ProStatus): boolean {
+  return currentCount < getPlanLimits(status).customKeywordLimit;
+}
+
+export function canAddFavorite(currentCount: number, status?: ProStatus): boolean {
+  return currentCount < getPlanLimits(status).favoriteLimit;
+}
+
+export function getHistoryVisibleSince(status?: ProStatus): number {
+  const days = getPlanLimits(status).historyDays;
+  return Date.now() - days * 86400000;
+}
+
+export function filterHistoryByPlan<T extends { savedAt: number }>(
+  entries: T[],
+  status?: ProStatus
+): T[] {
+  const since = getHistoryVisibleSince(status);
+  return entries.filter((e) => e.savedAt >= since);
+}
+
+export function canUseDeepMode(status?: ProStatus): boolean {
+  return getPlanLimits(status).deepModeEnabled;
 }
 
 export function setPromoPro(days: number, source: ProSource = "promo"): ProStatus {
@@ -179,7 +244,6 @@ export function proSourceLabel(source: ProSource): string | null {
   return null;
 }
 
-/** 若網址含 ?debug=1，寫入 localStorage 以便正式站持續顯示測試工具 */
 export function syncProDebugModeFromUrl(): boolean {
   try {
     if (typeof window !== "undefined") {
@@ -194,7 +258,6 @@ export function syncProDebugModeFromUrl(): boolean {
   return isProDebugToolsVisible();
 }
 
-/** 開發／測試工具是否可見 */
 export function isProDebugToolsVisible(): boolean {
   try {
     if (import.meta.env.DEV) return true;
@@ -210,7 +273,6 @@ export function isProDebugToolsVisible(): boolean {
   return false;
 }
 
-/** 僅清除 Pro 相關本機狀態，不影響收藏、主題、AI 歷史等 */
 export function resetProTestState(): void {
   try {
     localStorage.removeItem(PRO_STORAGE_KEY);
@@ -220,7 +282,6 @@ export function resetProTestState(): void {
   }
 }
 
-/** @deprecated 請改用 resetProTestState */
 export function clearProForDebug() {
   resetProTestState();
 }
