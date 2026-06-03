@@ -10,6 +10,8 @@ import {
   isProActive,
   proSourceLabel,
   redeemPromoCode,
+  isProDebugToolsVisible,
+  resetProTestState,
   type ProStatus,
 } from "./pro";
 
@@ -2236,6 +2238,7 @@ ${newsText}
         {tab === "settings" && (
           <>
             <ProStatusCard proStatus={proStatus} aiDailyLimit={aiDailyLimit} />
+            <ResetProDebugButton />
 
             {!isPro ? (
               <ProUpgradeCard
@@ -2944,6 +2947,27 @@ function ProUpgradeCard({
         </button>
       </div>
       <p style={styles.proUpgradeFootnote}>正式付款即將開放（App Store / Google Play）</p>
+    </div>
+  );
+}
+
+function ResetProDebugButton() {
+  if (!isProDebugToolsVisible()) return null;
+
+  const handleReset = () => {
+    const ok = window.confirm(
+      "確定要重置 Pro 測試狀態嗎？這只會清除本機 Pro 狀態，不會影響收藏與主題設定。"
+    );
+    if (!ok) return;
+    resetProTestState();
+    window.location.reload();
+  };
+
+  return (
+    <div style={styles.proDebugResetWrap}>
+      <button type="button" onClick={handleReset} style={styles.proDebugResetBtn}>
+        重置 Pro 測試狀態
+      </button>
     </div>
   );
 }
@@ -6167,6 +6191,22 @@ const styles: Record<string, CSSProperties> = {
     color: "#CBD5E1",
     lineHeight: 1.55,
     marginBottom: "6px",
+  },
+  proDebugResetWrap: {
+    marginTop: "-8px",
+    marginBottom: "12px",
+    paddingLeft: "2px",
+  },
+  proDebugResetBtn: {
+    border: "none",
+    background: "transparent",
+    padding: "4px 0",
+    fontSize: "12px",
+    fontWeight: 600,
+    color: "#94A3B8",
+    textDecoration: "underline",
+    cursor: "pointer",
+    WebkitTapHighlightColor: "transparent",
   },
   proModalBackdrop: {
     position: "fixed",

@@ -12,6 +12,7 @@ export type ProStatus = {
 
 const PRO_STORAGE_KEY = "pns_pro_status_v1";
 const LEGACY_PLAN_TIER_KEY = "pns_plan_tier_v1";
+export const DEBUG_MODE_KEY = "pns_debug_mode";
 
 export const AI_DAILY_LIMIT_FREE = 3;
 export const AI_DAILY_LIMIT_PRO = 20;
@@ -178,6 +179,33 @@ export function proSourceLabel(source: ProSource): string | null {
   return null;
 }
 
+/** 開發／測試工具是否可見 */
+export function isProDebugToolsVisible(): boolean {
+  try {
+    if (import.meta.env.DEV) return true;
+    if (typeof window !== "undefined") {
+      if (new URLSearchParams(window.location.search).get("debug") === "1") {
+        return true;
+      }
+      if (localStorage.getItem(DEBUG_MODE_KEY) === "1") return true;
+    }
+  } catch {
+    /* ignore */
+  }
+  return false;
+}
+
+/** 僅清除 Pro 相關本機狀態，不影響收藏、主題、AI 歷史等 */
+export function resetProTestState(): void {
+  try {
+    localStorage.removeItem(PRO_STORAGE_KEY);
+    localStorage.removeItem(LEGACY_PLAN_TIER_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** @deprecated 請改用 resetProTestState */
 export function clearProForDebug() {
-  writeProStatus({ isPro: false, proExpiresAt: null, proSource: null });
+  resetProTestState();
 }
