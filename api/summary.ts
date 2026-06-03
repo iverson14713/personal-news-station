@@ -1,7 +1,14 @@
 const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
 const OPENAI_TIMEOUT_MS = 50000;
 
-type SummaryItem = { title: string; source: string };
+type SummaryItem = {
+  title: string;
+  source: string;
+  summary: string;
+  url: string;
+  publishedAt: string;
+  topic: string;
+};
 type AiDuration = 1 | 3 | 5;
 
 type HighlightOut = { level: string; title: string; summary: string };
@@ -43,6 +50,57 @@ function hasFinanceRelatedNews(items: SummaryItem[]): boolean {
   );
 }
 
+const ENTITY_PRESERVATION_RULES = `【實體名稱保留｜硬性規則】
+產出新聞稿時，必須保留每則新聞的關鍵實體名稱，不得改寫成模糊代稱。
+必須保留（若原始資料有出現）：人名、球隊、公司、幣種（BTC/ETH/Solana 等）、ETF/股票/指數、國家地區、賽事組織、事件名稱。
+每一則新聞在 script 中第一次出現時，必須清楚寫出主體名稱（從標題、摘要、來源推得的名稱務必寫出）。
+嚴禁在第一次介紹時使用：這位球員、該名球員、某球星、某公司、該幣種、該事件、這項政策、這個市場、某重砲手、104億重砲手（若標題/摘要有姓名卻不寫姓名）等模糊說法。
+若標題或摘要真的沒有姓名，才可保守寫「一名球員」等，且不可自行編造姓名。
+深度解析須以提供的標題、摘要、來源為基礎，不得補出原資料沒有的細節；分析可保守，不可把推測講成事實。`;
+
+const OUTPUT_SELF_CHECK = `【輸出前自我檢查】
+輸出 JSON 前請確認：
+1. 每則主要新聞是否都明確寫出人名、球隊、公司、幣種或事件名稱？
+2. 是否用「這位球員」「某公司」「該幣種」等取代原本應出現的名稱？
+3. 是否補充了原新聞沒有的細節（薪資、交易、季後賽等）？
+4. 是否保持新聞整理與市場觀察語氣，未把推測講成定論？
+若有上述問題，請修正 script 後再輸出。`;
+
+function parseSummaryItem(o: Record<string, unknown>): SummaryItem | null {
+  const title = String(o?.title ?? "").trim().slice(0, 500);
+  if (!title) return null;
+  const summary = String(o?.summary ?? o?.description ?? "")
+    .trim()
+    .slice(0, 800);
+  const url = String(o?.url ?? o?.link ?? "").trim().slice(0, 500);
+  const publishedAt = String(o?.publishedAt ?? o?.pubDate ?? "")
+    .trim()
+    .slice(0, 80);
+  const topic = String(o?.topic ?? o?.keyword ?? "").trim().slice(0, 120);
+  return {
+    title,
+    source: String(o?.source ?? "").trim().slice(0, 200),
+    summary,
+    url,
+    publishedAt,
+    topic,
+  };
+}
+
+function formatNewsListForPrompt(items: SummaryItem[]): string {
+  return items
+    .map((it, i) => {
+      const lines = [`新聞 ${i + 1}：`, `標題：${it.title}`, `來源：${it.source}`];
+      if (it.summary) lines.push(`摘要：${it.summary}`);
+      else lines.push("摘要：（無，請僅依標題與來源保守撰寫，勿捏造姓名或數據）");
+      if (it.url) lines.push(`連結：${it.url}`);
+      if (it.publishedAt) lines.push(`時間：${it.publishedAt}`);
+      if (it.topic) lines.push(`相關主題／關鍵字：${it.topic}`);
+      return lines.join("\n");
+    })
+    .join("\n\n");
+}
+
 function deepDiveCount(duration: AiDuration, newsCount: number): number {
   if (duration === 1) return Math.min(2, newsCount);
   if (duration === 3) return Math.min(3, Math.max(2, newsCount >= 4 ? 3 : 2));
@@ -76,6 +134,7 @@ function buildNormalAllocation(duration: AiDuration, n: number): Allocation {
 【字數】總字數約 250～400 字（寧短勿冗）。
 【語氣】新聞主播式、清楚、簡潔；只整理主要重點，不要評論專欄、不要延伸分析、不要預測漲跌。
 【結構】簡短開場 → 快速帶過 ${n} 則重點（🔥/⚠️ 可 1～2 句，ℹ️ 1 句）→ 簡短結尾。
+【名稱】每則第一次出現必寫清楚人名／球隊／公司／幣種等，禁止「這位球員」「某公司」。
 【禁止】寫「事件背景／為什麼重要／後續觀察」等分析段落標題；禁止把每則都寫成深度稿。`,
       highlightsGuide: `highlights 共 ${n} 則，與輸入一一對應。
 - level：🔥重大 / ⚠️注意 / ℹ️一般（依重要度排序）。
@@ -123,56 +182,42 @@ function buildDeepAllocation(
   diveCount: number
 ): Allocation {
   const supplement = Math.max(0, n - diveCount);
-
-  const deepStructure = `【深度解析架構｜僅用於你挑選的 ${diveCount} 則最重要主題】
-每個深入主題請依序使用以下段落標題（標題文字需出現在 script 中）：
-「一、事件背景」
-「二、為什麼重要」
-「三、可能影響」
-「四、後續觀察」
-並在該主題內融入：核心重點、風險或不確定性（勿捏造數據；不確定處用「可能」「尚待觀察」）。
-【禁止】把 ${diveCount} 則都寫成相同長度；禁止只是改寫標題或換句話說的摘要。`;
-
   const supplementGuide =
     supplement > 0
-      ? `【快速補充】其餘 ${supplement} 則次要新聞集中放在「快速補充」段落，每則 1～2 句帶過即可，不要套用四段分析標題。`
+      ? `其餘 ${supplement} 則次要新聞請用「快速補充」一兩句帶過，不要展開分析。`
       : "";
 
-  const antiRewrite = `【硬性要求】深度解析模式不可只是改寫新聞摘要，必須加入背景、影響、後續觀察與不確定性；script 的分析段落必須明顯比一般整理更有「為什麼重要、會怎樣、要看什麼」的資訊量。`;
+  const antiRewrite =
+    "深度解析不可只是改寫一般整理；須回答為什麼重要、影響誰、後續觀察什麼、有哪些不確定性。";
 
   if (duration === 1) {
     return {
-      maxTokens: 1100,
-      temperature: 0.48,
-      modeLabel: "1 分鐘｜深度解析 Pro",
-      scriptGuide: `【定位】理解為什麼重要、可能影響與後續觀察（不是快報摘要）。
-【字數】總字數約 400～600 字。
-【策略】從 ${n} 則中挑 1～2 則最重要主題深入；${supplementGuide}
-${deepStructure}
-${antiRewrite}
-【語氣】分析解讀但保持中性；不誇大、不保證漲跌；無來源勿寫死。`,
-      highlightsGuide: `highlights 共 ${n} 則，與輸入一一對應（順序不可變）。
-- 深入分析的 1～2 則：summary 3～4 句，需含背景＋為何重要＋影響或觀察之一。
-- 其餘：summary 1 句快報即可。
-- 勿每則都寫滿分析句。`,
+      maxTokens: 900,
+      temperature: 0.5,
+      modeLabel: "1 分鐘｜深度解析 Pro｜口播",
+      scriptGuide: `【定位】1～2 分鐘內講清楚 1～2 則最重要新聞的背景與意義（自然主播口播）。
+【字數】script 約 350～550 字。
+【策略】從 ${n} 則中只挑 1～2 則講深；${supplementGuide}
+【寫法】開頭第一句就要寫出該則新聞的主體全名（人名＋球隊／公司等）；再講背景、為何重要、後續觀察。
+【禁止】報告式「一、二、三、四」標題；禁止「這位球員」「某重砲手」取代標題裡已有的人名；${antiRewrite}`,
+      highlightsGuide: `highlights 共 ${n} 則，與輸入一一對應。
+- 深入 1～2 則：summary 2～3 句。
+- 其餘：summary 1 句。`,
     };
   }
 
   if (duration === 3) {
     return {
-      maxTokens: 1800,
+      maxTokens: 2000,
       temperature: 0.5,
       modeLabel: "3 分鐘｜深度解析 Pro",
-      scriptGuide: `【定位】理解事件為什麼重要、可能影響與後續要觀察什麼。
-【字數】總字數約 1000～1400 字。
-【策略】挑 ${diveCount} 則最重要主題做完整四段分析；${supplementGuide}
-${deepStructure}
-${antiRewrite}
-【語氣】有分析感、像評論員整理市場與局勢，但非投資叫單；保留不確定性。`,
+      scriptGuide: `【定位】新聞台深度口播，挑 2～3 個主題，比一般整理更有分析感。
+【字數】script 約 900～1300 字。
+【策略】${diveCount} 則主題；${supplementGuide}
+【寫法】每段第一句必明確寫出新聞主體全名（例：「首先關注 MLB 的 Ohtani…」而非「首先關注一位球員」）；先講標題/摘要中的事實，再講為何重要、可能影響、後續觀察。
+【禁止】無資料卻寫薪資結構、交易市場、季後賽前景；資訊不足就簡短保守；禁止模糊代稱；${antiRewrite}`,
       highlightsGuide: `highlights 共 ${n} 則，與輸入一一對應。
-- 深入 ${diveCount} 則：summary 3～5 句（背景、重要性、影響、觀察、風險至少涵蓋其三）。
-- 快速補充則：1～2 句。
-- 禁止每則 highlights 都寫相同長度。`,
+- 深入主題 summary 2～4 句；其餘 1～2 句。`,
     };
   }
 
@@ -180,16 +225,13 @@ ${antiRewrite}
     maxTokens: 2600,
     temperature: 0.52,
     modeLabel: "5 分鐘｜深度解析 Pro｜完整深度",
-    scriptGuide: `【定位】完整深度解析：背景、影響、後續觀察與不確定性。
-【字數】總字數約 1600～2200 字。
-【策略】挑 ${diveCount} 則最重要主題，每則完整走四段標題；${supplementGuide}
-${deepStructure}
-${antiRewrite}
-【語氣】層次分明、像深度新聞 Podcast；可適度鋪陳脈絡，但勿捏造數據或過度肯定。`,
+    scriptGuide: `【定位】完整深度解析約 3 個主題，仍保持新聞台口播感。
+【字數】script 約 1500～2200 字。
+【策略】${diveCount} 則主題可用明確小段開場（勿用論文式「一、二、三、四」全套）；${supplementGuide}
+【內容】含背景、重要性、影響、後續觀察與不確定性；${antiRewrite}
+【禁止】不要像券商研究報告；script 內禁止出現 JSON 或 highlights 資料。`,
     highlightsGuide: `highlights 共 ${n} 則，與輸入一一對應。
-- 深入 ${diveCount} 則：summary 4～6 句，結構化涵蓋背景、核心、重要性、影響、後續觀察、風險。
-- 快速補充則：1～2 句。
-- 深入主題的 highlights 必須明顯比快速補充更長、更有分析感。`,
+- 深入主題 summary 3～5 句；快速補充 1～2 句。`,
   };
 }
 
@@ -203,26 +245,32 @@ function buildFinanceDisclaimerBlock(needsDisclaimer: boolean): string {
 並遵守：不保證漲跌、不過度誇張投資語氣、不把無來源內容講得太肯定。`;
 }
 
-function buildDeepModeSystemBlock(deepMode: boolean, diveCount: number): string {
+function buildDeepModeSystemBlock(
+  deepMode: boolean,
+  diveCount: number,
+  duration: AiDuration
+): string {
   if (!deepMode) {
     return `
 
-【一般整理模式｜與深度解析的差異】
-你正在撰寫「一般整理」，不是深度解析。
-- 任務：讓聽眾快速知道「今天發生什麼事」。
-- 禁止：把 script 寫成帶「一、事件背景」等標題的分析稿；禁止與深度解析稿雷同的長篇評論。
-- highlights 與 script 都應明顯短於、簡於深度解析模式。`;
+【一般整理模式】
+- 快速整理今天發生什麼事，可涵蓋 3～5 則，以摘要為主，少延伸。
+- script 只能是口播新聞稿全文，禁止在 script 內輸出 JSON 或 highlights。`;
   }
+
+  const oneMinNote =
+    duration === 1
+      ? "\n- 1 分鐘深度：口播敘事、350～550 字，禁止「一、二、三、四」報告標題。"
+      : duration === 3
+        ? "\n- 3 分鐘深度：可用輕量小標，900～1300 字，勿像 JSON 或報告。"
+        : "\n- 5 分鐘深度：段落可更完整，1500～2200 字，仍保持主播感。";
 
   return `
 
-【深度解析 Pro 模式｜與一般整理的差異】
-你正在撰寫「深度解析 Pro」，不是一般新聞摘要。
-- 任務：讓聽眾理解「為什麼重要、可能影響什麼、後續要觀察什麼」。
-- 必須：從 ${diveCount} 則（或時長允許的上限）挑最重要主題深入；其餘放「快速補充」。
-- 每個深入主題在 script 中須涵蓋：事件背景、核心重點、為什麼重要、可能影響、後續觀察、風險或不確定性（可融入四段標題內，勿只列標題不寫內容）。
-- 硬性禁止：不可只是把一般整理換句話說；不可每則新聞平均展開；不可缺少「可能」「尚待觀察」等不確定性表述（當標題資訊不足時）。
-- 深度解析模式不可只是改寫新聞摘要，必須加入背景、影響、後續觀察與不確定性。`;
+【深度解析 Pro】
+- 挑 ${diveCount} 則最重要主題講深，其餘快速補充；不可只改寫一般整理。
+- script 僅放口播稿，highlights 只放在 JSON 的 highlights 陣列，禁止混進 script。
+- 須有「為什麼重要／影響誰／後續觀察／不確定性」；深度解析不可只是改寫摘要。${oneMinNote}`;
 }
 
 function safeJsonParse(s: string): Record<string, unknown> | null {
@@ -234,6 +282,60 @@ function safeJsonParse(s: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+function stripMarkdownJsonFence(text: string): string {
+  let s = text.trim();
+  if (s.startsWith("```")) {
+    s = s.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  }
+  return s;
+}
+
+function looksLikeSummaryJsonBlob(text: string): boolean {
+  const t = text.trim();
+  if (!t.startsWith("{")) return false;
+  return t.includes('"highlights"') && t.includes('"script"');
+}
+
+function extractJsonObjectSubstring(text: string): string | null {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  return text.slice(start, end + 1);
+}
+
+function extractOpenAiSummary(content: string): {
+  script: string;
+  highlights: HighlightOut[];
+} {
+  const cleaned = stripMarkdownJsonFence(content);
+  const candidates = [cleaned, extractJsonObjectSubstring(cleaned)].filter(
+    Boolean
+  ) as string[];
+
+  for (const candidate of candidates) {
+    const parsed = safeJsonParse(candidate);
+    if (!parsed || typeof parsed.script !== "string") continue;
+    let script = parsed.script.trim();
+    let highlights = coerceHighlights(parsed.highlights);
+    if (script && looksLikeSummaryJsonBlob(script)) {
+      const nested = safeJsonParse(script);
+      if (nested && typeof nested.script === "string") {
+        script = nested.script.trim();
+        highlights = coerceHighlights(nested.highlights);
+      } else {
+        continue;
+      }
+    }
+    if (script) return { script, highlights };
+  }
+
+  if (looksLikeSummaryJsonBlob(cleaned)) {
+    return { script: "", highlights: [] };
+  }
+
+  return { script: cleaned, highlights: [] };
 }
 
 function coerceHighlights(raw: unknown): HighlightOut[] {
@@ -291,14 +393,8 @@ export default async function handler(req: any, res: any) {
   const items: SummaryItem[] = Array.isArray(rawItems)
     ? rawItems
         .slice(0, 5)
-        .map((x: unknown) => {
-          const o = x as Record<string, unknown>;
-          return {
-            title: String(o?.title ?? "").slice(0, 500),
-            source: String(o?.source ?? "").slice(0, 200),
-          };
-        })
-        .filter((x) => x.title.length > 0)
+        .map((x: unknown) => parseSummaryItem(x as Record<string, unknown>))
+        .filter((x): x is SummaryItem => x !== null)
     : [];
 
   if (items.length === 0) {
@@ -313,12 +409,7 @@ export default async function handler(req: any, res: any) {
   const alloc = buildDynamicAllocation(duration, n, deepMode);
   const financeDisclaimer = buildFinanceDisclaimerBlock(hasFinanceRelatedNews(items));
 
-  const listText = items
-    .map(
-      (it, i) =>
-        `${i + 1}. 標題：${it.title}\n   來源：${it.source}`
-    )
-    .join("\n\n");
+  const listText = formatNewsListForPrompt(items);
 
   const outputKind = deepMode ? "深度解析 Pro 稿" : "一般整理主播稿";
   const modeStrategyLine = deepMode
@@ -328,16 +419,22 @@ export default async function handler(req: any, res: any) {
     ? "分析解讀"
     : "今日重點整理";
   const scriptTitleRule = deepMode
-    ? "深入主題須用四段標題"
-    : "禁止使用深度解析四段標題";
+    ? duration === 1
+      ? "自然口播深入，禁止報告式編號標題"
+      : "可用輕量段落，禁止 JSON 或報告體"
+    : "禁止使用深度解析報告標題";
   const durationFeel = deepMode ? " 深度解析" : " 一般整理";
   const userWriteHint = deepMode
-    ? `請挑 ${diveCount} 則做深度四段分析，其餘放「快速補充」。不可只改寫摘要。`
+    ? duration === 1
+      ? "請挑 1～2 則用口播方式深入講解，其餘一句話快速補充。script 只寫新聞稿，不要輸出 JSON。"
+      : `請挑 ${diveCount} 則深入分析，其餘快速補充。script 只寫口播稿，不可只改寫摘要。`
     : "請以新聞主播快報整理，不要寫成深度分析。";
 
   const system = `你是「AI 個人新聞台」的專業新聞編輯與主播稿撰寫助理。
-使用者只會提供新聞「標題」與「來源」，沒有全文；請依標題合理推斷主題並整理，不要捏造具體數據或未被標題暗示的事實。
+使用者提供每則新聞的標題、來源、摘要（若有）、連結與時間；請嚴格依這些資料整理，不要捏造具體數據、姓名或未被資料暗示的事實。
 語氣：繁體中文、中性；有節奏、有轉場。
+
+${ENTITY_PRESERVATION_RULES}
 
 【本次參數】
 - 產稿類型：${outputKind}
@@ -350,7 +447,7 @@ ${alloc.scriptGuide}
 
 【highlights 總則】
 ${alloc.highlightsGuide}
-${buildDeepModeSystemBlock(deepMode, diveCount)}
+${buildDeepModeSystemBlock(deepMode, diveCount, duration)}
 ${financeDisclaimer}
 
 你必須只輸出一個 JSON 物件（不要 markdown 程式碼區、不要前後說明文字），結構如下：
@@ -358,7 +455,7 @@ ${financeDisclaimer}
   "highlights": [
     { "level": "🔥重大", "title": "簡短標題", "summary": "依模式與重要度調整" }
   ],
-  "script": "完整 AI 主播稿（單一字串，可含換行；深度模式須含指定段落標題）"
+  "script": "僅口播新聞稿全文（單一字串，可換行；不可含 JSON、highlights、欄位名）"
 }
 
 【共通規則】
@@ -366,12 +463,14 @@ ${financeDisclaimer}
 - level 僅能使用：「🔥重大」「⚠️注意」「ℹ️一般」。
 - script 必須讓聽眾聽得出「${scriptIntentLine}」；${scriptTitleRule}。
 - 轉場範例：「首先帶您關注…」「接下來深入看…」「快速補充幾則…」「最後提醒…」
-- 字數/句數服務於「聽起來像 ${duration} 分鐘${durationFeel}」，勿為湊字數重複空話。`;
+- 字數/句數服務於「聽起來像 ${duration} 分鐘${durationFeel}」，勿為湊字數重複空話。
 
-  const userMsg = `以下為使用者選取的 ${n} 則新聞（僅標題與來源）。
+${OUTPUT_SELF_CHECK}`;
+
+  const userMsg = `以下為使用者選取的 ${n} 則新聞（含標題、來源、摘要等，請務必保留其中的專有名詞與人名）：
 請先判斷每則重要程度（🔥/⚠️/ℹ️），再依「${alloc.modeLabel}」撰寫。
 ${userWriteHint}
-輸出 JSON，highlights 必須 ${n} 則：
+輸出 JSON，highlights 必須 ${n} 則；highlights 的 title 也請使用明確名稱，勿用模糊代稱。
 
 ${listText}`;
 
@@ -432,23 +531,11 @@ ${listText}`;
       });
     }
 
-    const parsed = safeJsonParse(content);
-    if (parsed && typeof parsed.script === "string") {
-      const script = parsed.script.trim();
-      const highlights = coerceHighlights(parsed.highlights);
-      if (!script) {
-        return sendJson(res, {
-          ok: false,
-          error: "AI 回傳的 script 為空",
-        });
-      }
+    const { script, highlights } = extractOpenAiSummary(content);
+    if (!script) {
       return sendJson(res, {
-        ok: true,
-        duration,
-        deepMode,
-        highlights,
-        script,
-        jsonFallback: false,
+        ok: false,
+        error: "AI 未回傳可讀新聞稿，請稍後再試",
       });
     }
 
@@ -456,9 +543,9 @@ ${listText}`;
       ok: true,
       duration,
       deepMode,
-      highlights: [],
-      script: content,
-      jsonFallback: true,
+      highlights,
+      script,
+      jsonFallback: false,
     });
   } catch (e) {
     const aborted =

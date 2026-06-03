@@ -20,6 +20,7 @@ import {
   syncProDebugModeFromUrl,
   type ProStatus,
 } from "./pro";
+import { parseAiSummaryContent, warnScriptQuality } from "./aiSummaryParse";
 
 type Tab = "home" | "player" | "video" | "favorites" | "settings";
 
@@ -42,6 +43,7 @@ type NewsItem = {
   link: string;
   source: string;
   pubDate: string;
+  description: string;
   selected: boolean;
   favorite: boolean;
 };
@@ -118,6 +120,45 @@ const topics: Topic[] = [
 
 function cleanTitle(title: string) {
   return title.replace(/\s-\s.*$/, "").trim();
+}
+
+function stripHtmlToText(html: string): string {
+  if (!html) return "";
+  return html
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, "$1")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** 傳入 summary API 的新聞欄位（含摘要，避免 AI 模糊改寫人名） */
+function buildSummaryApiItems(
+  items: NewsItem[],
+  context: { keyword?: string; topics?: string[] }
+) {
+  const topicHint =
+    context.keyword?.trim() ||
+    (context.topics && context.topics.length > 0
+      ? context.topics.slice(0, 5).join("、")
+      : "");
+
+  return items.map((n) => {
+    const row: Record<string, string> = {
+      title: n.title,
+      source: n.source,
+    };
+    const summary = (n.description || "").trim();
+    if (summary) row.summary = summary.slice(0, 800);
+    if (n.link) row.url = n.link;
+    if (n.pubDate) row.publishedAt = n.pubDate;
+    if (topicHint) row.topic = topicHint;
+    return row;
+  });
 }
 
 /** AI 精華：相同選取結果快取時間 */
@@ -422,7 +463,10 @@ function aiSummaryCacheFingerprint(
 ): string {
   const base = [...items]
     .slice(0, 5)
-    .map((n) => `${normalizeKey(n.title)}|${n.source.trim()}`)
+    .map(
+      (n) =>
+        `${normalizeKey(n.title)}|${n.source.trim()}|${normalizeKey(n.description || "")}`
+    )
     .sort()
     .join("\0");
   return `${duration}\0${deepMode ? "deep" : "normal"}\0${base}`;
@@ -973,7 +1017,7 @@ export default function App() {
   useEffect(() => {
     const latest = readAiHistory()[0];
     if (!latest?.script?.trim()) return;
-    setAiScript(latest.script);
+    setAiScript(parseAiSummaryContent(latest.script, latest.highlights).script);
     setAiHighlights(latest.highlights ?? []);
     setAiJsonFallback(Boolean(latest.jsonFallback));
     setSelectedScriptDuration(latest.duration);
@@ -1075,6 +1119,9 @@ export default function App() {
             rawTitle.split(" - ").pop() ||
             "Google News";
           const pubDate = item.querySelector("pubDate")?.textContent || "";
+          const description = stripHtmlToText(
+            item.querySelector("description")?.textContent || ""
+          );
           const t = parseNewsPubDate(pubDate)?.getTime() ?? 0;
 
           return {
@@ -1083,6 +1130,7 @@ export default function App() {
             link,
             source,
             pubDate,
+            description,
             selected: false,
             favorite: favoriteLinks.includes(link),
             sortTime: t,
@@ -1106,6 +1154,7 @@ export default function App() {
           link: row.link,
           source: row.source,
           pubDate: row.pubDate,
+          description: row.description,
           selected: parsedNews.length < 5,
           favorite: row.favorite,
         });
@@ -1659,9 +1708,12 @@ export default function App() {
   }, []);
 
   const loadAiHistoryEntry = useCallback((entry: AiHistoryEntry) => {
-    setAiScript(entry.script);
-    setAiHighlights(entry.highlights ?? []);
-    setAiJsonFallback(Boolean(entry.jsonFallback));
+    const parsed = parseAiSummaryContent(entry.script, entry.highlights);
+    setAiScript(parsed.script);
+    setAiHighlights(
+      parsed.highlights.length > 0 ? parsed.highlights : entry.highlights ?? []
+    );
+    setAiJsonFallback(false);
     setSelectedScriptDuration(entry.duration);
     setAiDuration(entry.duration);
     setAiError(null);
@@ -1685,15 +1737,18 @@ export default function App() {
 
   const playAiHistoryEntry = useCallback(
     (entry: AiHistoryEntry) => {
-      setAiScript(entry.script);
-      setAiHighlights(entry.highlights ?? []);
-      setAiJsonFallback(Boolean(entry.jsonFallback));
+      const parsed = parseAiSummaryContent(entry.script, entry.highlights);
+      setAiScript(parsed.script);
+      setAiHighlights(
+        parsed.highlights.length > 0 ? parsed.highlights : entry.highlights ?? []
+      );
+      setAiJsonFallback(false);
       setSelectedScriptDuration(entry.duration);
       setAiDuration(entry.duration);
       setAiError(null);
       setActiveAiHistoryId(entry.id);
       setTab("player");
-      startPlayback(entry.script);
+      startPlayback(parsed.script);
     },
     [startPlayback]
   );
@@ -1738,10 +1793,16 @@ export default function App() {
 
   function buildGptPromptFromItems(items: NewsItem[]): string {
     const newsText = items
-      .map(
-        (item, index) =>
-          `${index + 1}. ${item.title}\n來源：${item.source}\n連結：${item.link}`
-      )
+      .map((item, index) => {
+        const lines = [
+          `新聞 ${index + 1}：`,
+          `標題：${item.title}`,
+          `來源：${item.source}`,
+        ];
+        if (item.description) lines.push(`摘要：${item.description}`);
+        if (item.link) lines.push(`連結：${item.link}`);
+        return lines.join("\n");
+      })
       .join("\n\n");
 
     return `
@@ -1843,10 +1904,14 @@ ${newsText}
           typeof o.script === "string" &&
           o.script.length > 0
         ) {
+          const cached = parseAiSummaryContent(o.script, o.highlights);
+          if (!cached.script) {
+            /* 快取損壞，改走 API */
+          } else {
           setAiError(null);
-          setAiScript(o.script);
-          setAiHighlights(Array.isArray(o.highlights) ? o.highlights : []);
-          setAiJsonFallback(Boolean(o.jsonFallback));
+          setAiScript(cached.script);
+          setAiHighlights(cached.highlights);
+          setAiJsonFallback(false);
           setSelectedScriptDuration(
             o.duration === 3 || o.duration === 5 ? o.duration : 1
           );
@@ -1859,6 +1924,7 @@ ${newsText}
           );
           setAiLastFp(fp);
           return;
+          }
         }
       }
     } catch {
@@ -1876,7 +1942,10 @@ ${newsText}
         body: JSON.stringify({
           duration,
           deepMode,
-          items: picked.map((n) => ({ title: n.title, source: n.source })),
+          items: buildSummaryApiItems(picked, {
+            keyword: customKeyword,
+            topics: selectedTopics,
+          }),
         }),
       });
       const { data, error: parseError } = await readSummaryApiPayload(res);
@@ -1900,17 +1969,17 @@ ${newsText}
         return;
       }
 
-      const script = String(data.script || "").trim();
-      if (!script) {
+      const parsed = parseAiSummaryContent(data.script, data.highlights);
+      if (!parsed.script) {
         setAiError("AI 未回傳有效內容");
         await runGptFallbackClipboard();
         return;
       }
 
-      const highlights = Array.isArray(data.highlights) ? data.highlights : [];
-      setAiScript(script);
-      setAiHighlights(highlights);
-      setAiJsonFallback(Boolean(data.jsonFallback));
+      setAiScript(parsed.script);
+      setAiHighlights(parsed.highlights);
+      setAiJsonFallback(false);
+      warnScriptQuality(parsed.script, picked);
       setSelectedScriptDuration(
         data.duration === 3 || data.duration === 5 ? data.duration : duration
       );
@@ -1923,9 +1992,9 @@ ${newsText}
             fp,
             savedAt,
             duration,
-            highlights,
-            script,
-            jsonFallback: Boolean(data.jsonFallback),
+            highlights: parsed.highlights,
+            script: parsed.script,
+            jsonFallback: false,
             newsTitles: picked.map((n) => n.title),
           })
         );
@@ -1938,9 +2007,9 @@ ${newsText}
         savedAt,
         duration:
           data.duration === 3 || data.duration === 5 ? data.duration : duration,
-        script,
-        highlights,
-        jsonFallback: Boolean(data.jsonFallback),
+        script: parsed.script,
+        highlights: parsed.highlights,
+        jsonFallback: false,
         newsTitles: picked.map((n) => n.title),
       };
       appendAiHistoryEntry(historyEntry);
@@ -2026,8 +2095,11 @@ ${newsText}
 
   const loadAiFavorite = useCallback(
     (fav: AiFavoriteEntry, autoplay: boolean) => {
-      setAiScript(fav.script);
-      setAiHighlights(fav.highlights ?? []);
+      const parsed = parseAiSummaryContent(fav.script, fav.highlights);
+      setAiScript(parsed.script);
+      setAiHighlights(
+        parsed.highlights.length > 0 ? parsed.highlights : fav.highlights ?? []
+      );
       setAiJsonFallback(false);
       setSelectedScriptDuration(fav.duration);
       setAiDuration(fav.duration);
@@ -2037,7 +2109,7 @@ ${newsText}
       setAiLastNewsTitles(Array.isArray(fav.newsTitles) ? fav.newsTitles : []);
       setAiLastFp(fav.id.split("-").slice(1).join("-") || fav.id);
       setTab("player");
-      if (autoplay) startPlayback(fav.script);
+      if (autoplay) startPlayback(parsed.script);
     },
     [startPlayback]
   );
