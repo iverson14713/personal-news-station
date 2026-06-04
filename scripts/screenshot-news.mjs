@@ -13,6 +13,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
 const OUT_DIR = path.join(root, "screenshots", "news");
 const PORT = 4173;
+const HOST = "127.0.0.1";
 const W = 1290;
 const H = 2796;
 
@@ -27,20 +28,67 @@ function runBuild() {
   });
 }
 
+function waitForHttpServer(httpServer, timeoutMs = 30_000) {
+  return new Promise((resolve, reject) => {
+    if (!httpServer) {
+      reject(new Error("preview httpServer missing"));
+      return;
+    }
+    if (httpServer.listening) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(() => {
+      reject(new Error("preview server listen timeout"));
+    }, timeoutMs);
+    httpServer.once("listening", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    httpServer.once("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
+async function waitForServerReady(baseUrl, timeoutMs = 30_000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const res = await fetch(`${baseUrl}/`);
+      if (res.ok) return;
+    } catch {
+      /* retry */
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  throw new Error(`Server not ready: ${baseUrl}`);
+}
+
 async function main() {
   console.log("Building…");
   await runBuild();
 
   const previewServer = await preview({
     root,
-    preview: { port: PORT, strictPort: true },
+    preview: {
+      port: PORT,
+      strictPort: true,
+      host: HOST,
+    },
   });
+
+  await waitForHttpServer(previewServer.httpServer);
   previewServer.printUrls();
+
+  const base = `http://${HOST}:${PORT}`;
+  console.log(`Waiting for preview at ${base}…`);
+  await waitForServerReady(base);
 
   await mkdir(OUT_DIR, { recursive: true });
 
   const browser = await chromium.launch();
-  const base = `http://127.0.0.1:${PORT}`;
 
   try {
     for (let i = 1; i <= 5; i++) {
@@ -48,12 +96,13 @@ async function main() {
         viewport: { width: W, height: H },
         deviceScaleFactor: 1,
       });
-      await page.goto(`${base}/app-store-screenshot/news/${i}`, {
-        waitUntil: "networkidle",
+      const url = `${base}/app-store-screenshot/news/${i}`;
+      await page.goto(url, {
+        waitUntil: "load",
         timeout: 60_000,
       });
-      await page.waitForSelector(`#screenshot-${i}`, { timeout: 15_000 });
-      await page.waitForTimeout(400);
+      await page.waitForSelector(`#screenshot-${i}`, { timeout: 30_000 });
+      await page.waitForTimeout(500);
       const out = path.join(OUT_DIR, `news-${i}.png`);
       await page.screenshot({ path: out, fullPage: false });
       console.log(`Saved ${out}`);
