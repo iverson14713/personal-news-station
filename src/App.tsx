@@ -21,6 +21,7 @@ import {
   type ProStatus,
 } from "./pro";
 import { parseAiSummaryContent, warnScriptQuality } from "./aiSummaryParse";
+import { TOKENS, shortVoiceLabel } from "./theme";
 
 type Tab = "home" | "player" | "video" | "favorites" | "settings";
 
@@ -2118,7 +2119,7 @@ ${newsText}
     tab === "home"
       ? "首頁"
       : tab === "player"
-        ? "播放控制台"
+        ? "正在播放"
         : tab === "video"
           ? ENABLE_VIDEO_NEWS_UI
             ? "影音新聞"
@@ -2142,10 +2143,11 @@ ${newsText}
         {tab === "home" ? (
           <header style={styles.homeHeader}>
             <div style={{ minWidth: 0 }}>
-              <h1 style={styles.homeBrand}>AI個人新聞台</h1>
+              <h1 style={styles.homeBrand}>今日 AI 新聞台</h1>
               <p style={styles.homeStats}>
-                追蹤 <span style={styles.homeStatNum}>{selectedTopics.length}</span> 主題 ·
-                已選 <span style={styles.homeStatNum}>{selectedNews.length}</span> 則
+                追蹤 <span style={styles.homeStatNum}>{selectedTopics.length}</span> 個主題｜
+                <span style={styles.homeStatNum}>{news.length}</span> 則新聞
+                {lastUpdated ? "已更新" : ""}
               </p>
             </div>
             {isSpeaking ? (
@@ -2176,85 +2178,31 @@ ${newsText}
               </button>
             </div>
 
-            <div style={styles.homeToolbarScroll} className="hide-scrollbar">
-              <button
-                type="button"
-                onClick={() => startPlayback()}
-                style={{
-                  ...styles.toolbarBtn,
-                  ...styles.toolbarBtnPlay,
-                }}
-              >
-                {aiScript.trim() ? "▶ 播放 AI 稿" : "▶ 播放"}
-              </button>
-              <button
-                type="button"
-                onClick={openAiAnalysis}
-                disabled={aiLoading || selectedNews.length === 0}
-                style={{
-                  ...styles.toolbarBtnAi,
-                  opacity: aiLoading || selectedNews.length === 0 ? 0.65 : 1,
-                  cursor:
-                    aiLoading || selectedNews.length === 0
-                      ? "not-allowed"
-                      : "pointer",
-                }}
-              >
-                {aiLoading ? "AI 分析中..." : "✨ AI 分析"}
-              </button>
-              <button
-                type="button"
-                onClick={updateMyNews}
-                disabled={loading}
-                style={{
-                  ...styles.toolbarBtnNeutral,
-                  opacity: loading ? 0.65 : 1,
-                  cursor: loading ? "not-allowed" : "pointer",
-                }}
-              >
-                {loading ? "…" : "重新整理"}
-              </button>
-              <button
-                type="button"
-                onClick={() => setTab("settings")}
-                style={styles.toolbarBtnNeutral}
-              >
-                設定主題
-              </button>
-            </div>
-
             {newsBanner ? (
               <div style={styles.videoInfoBanner} role="status">
                 {newsBanner}
               </div>
             ) : null}
 
-            <AiSummaryPanel
-              aiLoading={aiLoading}
-              aiError={aiError}
-              aiScript={aiScript}
-              aiHighlights={aiHighlights}
-              aiJsonFallback={aiJsonFallback}
-              selectedScriptDuration={selectedScriptDuration}
-              scriptFontSize={scriptFontSize}
-              onScriptFontSizeChange={setScriptFontSize}
-              isSpeaking={isSpeaking}
-              isPaused={isPaused}
-              onPlayScript={(script) => startPlayback(script)}
-              onStopScript={stopPlayback}
-              onCopyScript={() => void copyAiScript()}
-              onOpenAnalysis={openAiAnalysis}
-              selectedNewsCount={selectedNews.length}
-              isPro={isPro}
+            <HomeStationHero
+              selectedCount={selectedNews.length}
               aiQuotaRemaining={aiQuotaRemaining}
               aiDailyLimit={aiDailyLimit}
-              onOpenProModal={openProUpgrade}
-              aiFavorited={currentAiIsFavorited}
-              onToggleAiFavorite={toggleAiFavorite}
+              isPro={isPro}
+              hasScript={aiScript.trim().length > 0}
+              aiLoading={aiLoading}
+              onGenerate={openAiAnalysis}
+              onRefresh={updateMyNews}
+              onSettingsTopics={() => setTab("settings")}
+              onContinuePlay={() => {
+                startPlayback();
+                setTab("player");
+              }}
+              loadingNews={loading}
             />
 
             <NewsList
-              title="新聞"
+              title="今日新聞"
               compact
               denseCards
               isPro={isPro}
@@ -2267,7 +2215,35 @@ ${newsText}
               loading={loading}
               toggleNews={toggleNews}
               toggleFavorite={toggleFavorite}
-              emptyText="目前沒有新聞。可先按「更新」或稍後再試。"
+              emptyText="目前沒有新聞。可先按「更新新聞」或稍後再試。"
+            />
+
+            <AiSummaryPanel
+              variant="home"
+              aiLoading={aiLoading}
+              aiError={aiError}
+              aiScript={aiScript}
+              aiHighlights={aiHighlights}
+              aiJsonFallback={aiJsonFallback}
+              selectedScriptDuration={selectedScriptDuration}
+              scriptFontSize={scriptFontSize}
+              onScriptFontSizeChange={setScriptFontSize}
+              isSpeaking={isSpeaking}
+              isPaused={isPaused}
+              onPlayScript={(script) => {
+                startPlayback(script);
+                setTab("player");
+              }}
+              onStopScript={stopPlayback}
+              onCopyScript={() => void copyAiScript()}
+              onOpenAnalysis={openAiAnalysis}
+              selectedNewsCount={selectedNews.length}
+              isPro={isPro}
+              aiQuotaRemaining={aiQuotaRemaining}
+              aiDailyLimit={aiDailyLimit}
+              onOpenProModal={openProUpgrade}
+              aiFavorited={currentAiIsFavorited}
+              onToggleAiFavorite={toggleAiFavorite}
             />
 
             <SiteFooter />
@@ -2308,6 +2284,7 @@ ${newsText}
             ) : null}
 
             <AiSummaryPanel
+              variant="player"
               aiLoading={aiLoading}
               aiError={aiError}
               aiScript={aiScript}
@@ -2449,53 +2426,51 @@ ${newsText}
         )}
 
         {tab === "favorites" && (
-          <>
-            <ActionButtons
-              selectAll={selectAll}
-              clearAll={clearAll}
-              copyGptPrompt={copyGptPrompt}
-            />
-
-            <AiFavoritesSection
-              favorites={aiFavorites}
-              onOpen={(fav) => loadAiFavorite(fav, true)}
-              onPlay={(fav) => loadAiFavorite(fav, true)}
-              onCopy={(fav) => void copyAiScriptText(fav.script)}
-              onToggle={(id) => {
-                setAiFavorites((prev) => {
-                  const next = prev.filter((x) => x.id !== id);
-                  writeAiFavorites(next);
-                  return next;
-                });
-              }}
-            />
-
-            <NewsList
-              title="收藏新聞"
-              news={favoriteNews}
-              loading={false}
-              toggleNews={toggleNews}
-              toggleFavorite={toggleFavorite}
-              emptyText="目前沒有收藏新聞。"
-            />
-          </>
+          <FavoritesTabView
+            aiFavorites={aiFavorites}
+            favoriteNews={favoriteNews}
+            onLoadAiFavorite={(fav) => loadAiFavorite(fav, true)}
+            onCopyAiFavorite={(fav) => void copyAiScriptText(fav.script)}
+            onRemoveAiFavorite={(id) => {
+              setAiFavorites((prev) => {
+                const next = prev.filter((x) => x.id !== id);
+                writeAiFavorites(next);
+                return next;
+              });
+            }}
+            toggleNews={toggleNews}
+            toggleFavorite={toggleFavorite}
+          />
         )}
 
         {tab === "settings" && (
           <>
-            <ProStatusCard proStatus={proStatus} showDebugTools={showProDebugTools} />
+            <SettingsSummaryGrid
+              isPro={isPro}
+              aiQuotaRemaining={aiQuotaRemaining}
+              aiDailyLimit={aiDailyLimit}
+              topicCount={selectedTopics.length}
+              topicLimit={planLimits.topicLimit}
+              keywordCount={savedCustomKeywords.length}
+              keywordLimit={planLimits.customKeywordLimit}
+              historyDays={planLimits.historyDays}
+              voiceLabel={shortVoiceLabel(voiceName)}
+              speed={speed}
+            />
 
-            {!isPro ? (
-              <ProUpgradeCard
-                variant="settings"
-                proStatus={proStatus}
-                onUpgrade={openProUpgrade}
-                onRedeem={() => setPromoModalOpen(true)}
-              />
-            ) : null}
+            <SettingsCollapsible title="Pro 方案詳情" subtitle={isPro ? "Pro 已啟用" : "升級解鎖完整功能"}>
+              <ProStatusCard proStatus={proStatus} showDebugTools={showProDebugTools} />
+              {!isPro ? (
+                <ProUpgradeCard
+                  variant="settings"
+                  proStatus={proStatus}
+                  onUpgrade={openProUpgrade}
+                  onRedeem={() => setPromoModalOpen(true)}
+                />
+              ) : null}
+            </SettingsCollapsible>
 
-            <section style={styles.controlPanel}>
-              <div style={styles.controlTitle}>帳號同步</div>
+            <SettingsCollapsible title="帳號同步" subtitle="雲端同步即將開放">
               <div style={styles.settingHint}>
                 帳號同步功能即將開放，目前資料會保存在本機。
               </div>
@@ -2506,18 +2481,16 @@ ${newsText}
               >
                 了解更多
               </button>
-            </section>
+            </SettingsCollapsible>
 
-            <section style={styles.controlPanel}>
-              <div style={styles.controlTitle}>我的追蹤主題</div>
-
+            <SettingsCollapsible
+              title="我的追蹤主題"
+              subtitle={`已選 ${selectedTopics.length} / ${planLimits.topicLimit}`}
+              defaultOpen
+            >
               <div style={styles.settingHint}>
-                首頁會依照這些主題整理新聞。想搜尋單一事件，可直接在首頁搜尋框輸入關鍵字。
+                首頁會依照這些主題整理新聞；搜尋單一事件請用首頁搜尋框。
               </div>
-              <div style={styles.settingHint}>
-                已選 {selectedTopics.length} / {planLimits.topicLimit} 個主題
-              </div>
-
               <div style={styles.actionRow}>
                 <button onClick={selectAllTopics} style={styles.miniButton}>
                   主題全選
@@ -2529,7 +2502,6 @@ ${newsText}
                   預設主題
                 </button>
               </div>
-
               <div style={styles.topicGridSettings}>
                 {topics.map((topic) => {
                   const active = selectedTopics.includes(topic.label);
@@ -2547,13 +2519,12 @@ ${newsText}
                   );
                 })}
               </div>
-            </section>
+            </SettingsCollapsible>
 
-            <section style={styles.controlPanel}>
-              <div style={styles.controlTitle}>自訂關鍵字</div>
-              <div style={styles.settingHint}>
-                已儲存 {savedCustomKeywords.length} / {planLimits.customKeywordLimit} 個
-              </div>
+            <SettingsCollapsible
+              title="自訂關鍵字"
+              subtitle={`已儲存 ${savedCustomKeywords.length} / ${planLimits.customKeywordLimit}`}
+            >
               <input
                 value={customKeyword}
                 onChange={(e) => setCustomKeyword(e.target.value)}
@@ -2585,7 +2556,7 @@ ${newsText}
                   ))}
                 </div>
               ) : null}
-            </section>
+            </SettingsCollapsible>
 
             <SettingsCollapsibleAiHistorySection
               entries={visibleAiHistory}
@@ -2604,8 +2575,10 @@ ${newsText}
               hiddenOlderCount={aiHistory.length - visibleAiHistory.length}
             />
 
-            <section style={styles.controlPanel}>
-              <div style={styles.controlTitle}>AI 使用額度</div>
+            <SettingsCollapsible
+              title="AI 使用額度"
+              subtitle={`今日剩餘 ${aiQuotaRemaining} / ${aiDailyLimit} 次`}
+            >
               <div style={styles.planQuotaRow}>
                 <div style={styles.planQuotaLeft}>
                   <div style={styles.planQuotaTitle}>今日剩餘</div>
@@ -2619,26 +2592,29 @@ ${newsText}
                   </div>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => {
-                  try {
-                    localStorage.removeItem("pns_ai_daily_quota_v1");
-                  } catch {
-                    /* ignore */
-                  }
-                  setAiQuota({ date: todayYmdLocal(), used: 0 });
-                  alert("已重置今日 AI 次數");
-                }}
-                style={styles.dangerFullButton}
-              >
-                重置 AI 次數
-              </button>
-            </section>
+              {showProDebugTools ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    try {
+                      localStorage.removeItem("pns_ai_daily_quota_v1");
+                    } catch {
+                      /* ignore */
+                    }
+                    setAiQuota({ date: todayYmdLocal(), used: 0 });
+                    alert("已重置今日 AI 次數");
+                  }}
+                  style={styles.dangerFullButton}
+                >
+                  重置 AI 次數
+                </button>
+              ) : null}
+            </SettingsCollapsible>
 
-            <section style={styles.controlPanel}>
-              <div style={styles.controlTitle}>語音設定</div>
-
+            <SettingsCollapsible
+              title="語音設定"
+              subtitle={`${shortVoiceLabel(voiceName)} · ${speed.toFixed(2)}x`}
+            >
               <select
                 value={voiceName}
                 onChange={(e) => {
@@ -2653,7 +2629,6 @@ ${newsText}
                   </option>
                 ))}
               </select>
-
               <div style={styles.speedRow}>
                 <span>播放速度 {speed.toFixed(2)}x</span>
                 <input
@@ -2666,18 +2641,18 @@ ${newsText}
                   style={{ width: "55%" }}
                 />
               </div>
-            </section>
+            </SettingsCollapsible>
 
-            <section style={styles.controlPanel}>
-              <div style={styles.controlTitle}>收藏管理</div>
-              <div style={styles.settingHint}>目前收藏 {favoriteNews.length} 則新聞。</div>
+            <SettingsCollapsible
+              title="收藏管理"
+              subtitle={`${favoriteNews.length} 則收藏新聞`}
+            >
               <button onClick={clearFavorites} style={styles.dangerFullButton}>
                 清除全部收藏
               </button>
-            </section>
+            </SettingsCollapsible>
 
-            <section style={styles.controlPanel}>
-              <div style={styles.controlTitle}>幫助 / 關於</div>
+            <SettingsCollapsible title="幫助 / 關於" subtitle="新手教學與說明">
               <button
                 type="button"
                 onClick={() => {
@@ -2685,17 +2660,13 @@ ${newsText}
                   setOnboardingStep(0);
                   setOnboardingOpen(true);
                 }}
-                style={{ ...styles.toolbarBtnNeutral, width: "100%", marginTop: "10px" }}
+                style={{ ...styles.toolbarBtnNeutral, width: "100%" }}
               >
                 重新觀看新手教學
               </button>
-            </section>
+            </SettingsCollapsible>
 
-            <section style={styles.controlPanel}>
-              <div style={styles.controlTitle}>法律與隱私</div>
-              <div style={styles.settingHint}>
-                上架審查與使用者權益相關說明。
-              </div>
+            <SettingsCollapsible title="法律與隱私" subtitle="隱私權與服務條款">
               <div style={styles.legalLinksRow}>
                 <a href="/privacy" style={styles.legalLink}>
                   隱私權政策
@@ -2704,7 +2675,7 @@ ${newsText}
                   服務條款
                 </a>
               </div>
-            </section>
+            </SettingsCollapsible>
           </>
         )}
 
@@ -2928,6 +2899,7 @@ function PlayerDeck({
   onOpenAnalysis: () => void;
   aiLoading: boolean;
 }) {
+  const [voiceOpen, setVoiceOpen] = useState(false);
   const active = isSpeaking || isPaused;
   const canPlay = aiScript.trim().length > 0 || selectedNewsCount > 0;
   const statusLabel = isPaused
@@ -2953,7 +2925,7 @@ function PlayerDeck({
         </div>
       </div>
 
-      <div style={styles.playerProgressTrack}>
+      <div style={styles.playerProgressTrackLarge}>
         <div
           style={{
             ...styles.playerProgressFill,
@@ -2997,44 +2969,41 @@ function PlayerDeck({
         ) : null}
       </div>
 
-      <select
-        value={voiceName}
-        onChange={(e) => onVoiceChange(e.target.value)}
-        style={styles.select}
-      >
-        {voices.map((voice) => (
-          <option key={voice.name} value={voice.name}>
-            {voice.name}（{voice.lang}）
-          </option>
-        ))}
-      </select>
-
-      <div style={styles.speedRow}>
-        <span>語速 {speed.toFixed(2)}x</span>
-        <input
-          type="range"
-          min={String(SPEED_MIN)}
-          max={String(SPEED_MAX)}
-          step={String(SPEED_STEP)}
-          value={speed}
-          onChange={(e) => onSpeedChange(Number(e.target.value))}
-          style={{ width: "58%" }}
-        />
-      </div>
-
       <button
         type="button"
-        onClick={onOpenAnalysis}
-        disabled={aiLoading || selectedNewsCount === 0}
-        style={{
-          ...styles.aiSummaryButtonSmall,
-          width: "100%",
-          marginTop: "4px",
-          opacity: aiLoading || selectedNewsCount === 0 ? 0.65 : 1,
-        }}
+        onClick={() => setVoiceOpen((v) => !v)}
+        style={styles.playerVoiceToggle}
       >
-        {aiLoading ? "AI 分析中..." : "✨ AI 分析"}
+        <span>語音與語速 · {speed.toFixed(2)}x</span>
+        <span>{voiceOpen ? "▲" : "▼"}</span>
       </button>
+      {voiceOpen ? (
+        <>
+          <select
+            value={voiceName}
+            onChange={(e) => onVoiceChange(e.target.value)}
+            style={styles.select}
+          >
+            {voices.map((voice) => (
+              <option key={voice.name} value={voice.name}>
+                {voice.name}（{voice.lang}）
+              </option>
+            ))}
+          </select>
+          <div style={styles.speedRow}>
+            <span>語速 {speed.toFixed(2)}x</span>
+            <input
+              type="range"
+              min={String(SPEED_MIN)}
+              max={String(SPEED_MAX)}
+              step={String(SPEED_STEP)}
+              value={speed}
+              onChange={(e) => onSpeedChange(Number(e.target.value))}
+              style={{ width: "58%" }}
+            />
+          </div>
+        </>
+      ) : null}
     </section>
   );
 }
@@ -4024,7 +3993,240 @@ function SplashScreen() {
   );
 }
 
+function HomeStationHero({
+  selectedCount,
+  aiQuotaRemaining,
+  aiDailyLimit,
+  isPro,
+  hasScript,
+  aiLoading,
+  onGenerate,
+  onRefresh,
+  onSettingsTopics,
+  onContinuePlay,
+  loadingNews,
+}: {
+  selectedCount: number;
+  aiQuotaRemaining: number;
+  aiDailyLimit: number;
+  isPro: boolean;
+  hasScript: boolean;
+  aiLoading: boolean;
+  onGenerate: () => void;
+  onRefresh: () => void;
+  onSettingsTopics: () => void;
+  onContinuePlay: () => void;
+  loadingNews: boolean;
+}) {
+  return (
+    <section style={styles.stationHero}>
+      <div style={styles.stationHeroGlow} aria-hidden />
+      <h2 style={styles.stationHeroTitle}>今日重點已準備好</h2>
+      <p style={styles.stationHeroBody}>
+        已選 {selectedCount} 則新聞，可產生 1 / 3 / 5 分鐘 AI 新聞稿。
+      </p>
+      <div style={styles.stationHeroMeta}>
+        今日剩餘 {aiQuotaRemaining} / {aiDailyLimit} 次 · {isPro ? "Pro" : "Free"}
+      </div>
+      <button
+        type="button"
+        onClick={onGenerate}
+        disabled={aiLoading || selectedCount === 0}
+        style={{
+          ...styles.stationHeroCta,
+          opacity: aiLoading || selectedCount === 0 ? 0.6 : 1,
+          cursor: aiLoading || selectedCount === 0 ? "not-allowed" : "pointer",
+        }}
+      >
+        {aiLoading ? "AI 分析中…" : "產生 AI 新聞稿"}
+      </button>
+      {hasScript ? (
+        <button type="button" onClick={onContinuePlay} style={styles.stationHeroSecondaryCta}>
+          繼續播放
+        </button>
+      ) : (
+        <p style={styles.stationHeroHint}>產生新聞稿後即可播放</p>
+      )}
+      <div style={styles.stationHeroActions}>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={loadingNews}
+          style={styles.stationHeroGhostBtn}
+        >
+          {loadingNews ? "更新中…" : "更新新聞"}
+        </button>
+        <button type="button" onClick={onSettingsTopics} style={styles.stationHeroGhostBtn}>
+          設定主題
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function SettingsSummaryGrid({
+  isPro,
+  aiQuotaRemaining,
+  aiDailyLimit,
+  topicCount,
+  topicLimit,
+  keywordCount,
+  keywordLimit,
+  historyDays,
+  voiceLabel,
+  speed,
+}: {
+  isPro: boolean;
+  aiQuotaRemaining: number;
+  aiDailyLimit: number;
+  topicCount: number;
+  topicLimit: number;
+  keywordCount: number;
+  keywordLimit: number;
+  historyDays: number;
+  voiceLabel: string;
+  speed: number;
+}) {
+  const cards = [
+    {
+      title: "Pro 方案",
+      lines: [
+        isPro ? "目前 Pro" : "Free 方案",
+        `今日 AI ${aiQuotaRemaining} / ${aiDailyLimit}`,
+        isPro ? "已移除廣告" : "含廣告",
+      ],
+    },
+    {
+      title: "追蹤主題",
+      lines: [`已選 ${topicCount} / ${topicLimit}`, `自訂關鍵字 ${keywordCount} / ${keywordLimit}`],
+    },
+    {
+      title: "AI 歷史",
+      lines: [`最近 ${historyDays} 天`, "預設收合"],
+    },
+    {
+      title: "播放設定",
+      lines: [`語音：${voiceLabel}`, `語速：${speed.toFixed(2)}x`],
+    },
+  ];
+  return (
+    <div style={styles.settingsSummaryGrid}>
+      {cards.map((c) => (
+        <div key={c.title} style={styles.settingsSummaryCard}>
+          <div style={styles.settingsSummaryCardTitle}>{c.title}</div>
+          {c.lines.map((line) => (
+            <div key={line} style={styles.settingsSummaryCardLine}>
+              {line}
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SettingsCollapsible({
+  title,
+  subtitle,
+  defaultOpen = false,
+  children,
+}: {
+  title: string;
+  subtitle?: string;
+  defaultOpen?: boolean;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <section style={styles.settingsCollapseSection}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        style={styles.settingsCollapseHead}
+        aria-expanded={open}
+      >
+        <div style={{ minWidth: 0, textAlign: "left" }}>
+          <div style={styles.settingsCollapseTitle}>{title}</div>
+          {subtitle ? <div style={styles.settingsCollapseSub}>{subtitle}</div> : null}
+        </div>
+        <span style={styles.settingsCollapseChevron}>{open ? "▲" : "▼"}</span>
+      </button>
+      {open ? <div style={styles.settingsCollapseBody}>{children}</div> : null}
+    </section>
+  );
+}
+
+function FavoritesTabView({
+  aiFavorites,
+  favoriteNews,
+  onLoadAiFavorite,
+  onCopyAiFavorite,
+  onRemoveAiFavorite,
+  toggleNews,
+  toggleFavorite,
+}: {
+  aiFavorites: AiFavoriteEntry[];
+  favoriteNews: NewsItem[];
+  onLoadAiFavorite: (fav: AiFavoriteEntry) => void;
+  onCopyAiFavorite: (fav: AiFavoriteEntry) => void;
+  onRemoveAiFavorite: (id: string) => void;
+  toggleNews: (id: string) => void;
+  toggleFavorite: (item: NewsItem) => void;
+}) {
+  const [segment, setSegment] = useState<"ai" | "news">("ai");
+  return (
+    <>
+      <div style={styles.favSegmented} role="tablist" aria-label="收藏類型">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={segment === "ai"}
+          onClick={() => setSegment("ai")}
+          style={{
+            ...styles.favSegmentBtn,
+            ...(segment === "ai" ? styles.favSegmentBtnActive : {}),
+          }}
+        >
+          AI 新聞稿
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={segment === "news"}
+          onClick={() => setSegment("news")}
+          style={{
+            ...styles.favSegmentBtn,
+            ...(segment === "news" ? styles.favSegmentBtnActive : {}),
+          }}
+        >
+          收藏新聞
+        </button>
+      </div>
+      {segment === "ai" ? (
+        <AiFavoritesSection
+          favorites={aiFavorites}
+          onOpen={onLoadAiFavorite}
+          onPlay={onLoadAiFavorite}
+          onCopy={onCopyAiFavorite}
+          onToggle={onRemoveAiFavorite}
+        />
+      ) : (
+        <NewsList
+          title="收藏新聞"
+          news={favoriteNews}
+          loading={false}
+          toggleNews={toggleNews}
+          toggleFavorite={toggleFavorite}
+          emptyText="目前沒有收藏新聞"
+          emptyHint="看到重要新聞時，點星星即可收藏"
+        />
+      )}
+    </>
+  );
+}
+
 function AiSummaryPanel({
+  variant = "full",
   aiLoading,
   aiError,
   aiScript,
@@ -4047,6 +4249,7 @@ function AiSummaryPanel({
   aiFavorited,
   onToggleAiFavorite,
 }: {
+  variant?: "home" | "player" | "full";
   aiLoading: boolean;
   aiError: string | null;
   aiScript: string;
@@ -4072,16 +4275,29 @@ function AiSummaryPanel({
   const scriptFontPx = SCRIPT_FONT_PX[scriptFontSize];
   const playbackActive = isSpeaking || isPaused;
   const hasContent = aiScript.trim().length > 0 || aiHighlights.length > 0;
+  const isHome = variant === "home";
+  const isPlayer = variant === "player";
+  const [playerScriptOpen, setPlayerScriptOpen] = useState(true);
 
-  return (
-    <div style={styles.aiSummaryWrap}>
-      <div style={styles.aiSummaryCard}>
+  if (isHome && !aiLoading && !aiError && !hasContent) {
+    return null;
+  }
+  if (isPlayer && !aiLoading && !aiError && !hasContent) {
+    return null;
+  }
+
+  const kickerLabel = isHome || isPlayer ? "今日新聞台" : "AI 分析";
+
+  const inner = (
+    <>
         <div style={styles.aiSummaryHeaderRow}>
           <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
-            <span style={styles.aiSummaryKicker}>AI 分析</span>
+            <span style={styles.aiSummaryKicker}>{kickerLabel}</span>
+            {!isPlayer ? (
             <span style={styles.aiQuotaLine}>
               今日剩餘 {aiQuotaRemaining} / {aiDailyLimit} 次（{isPro ? "Pro" : "Free"}）
             </span>
+            ) : null}
           </div>
           {selectedScriptDuration != null && aiScript.trim() ? (
             <span style={styles.aiSummaryBadge}>
@@ -4101,7 +4317,7 @@ function AiSummaryPanel({
                 （AI 回傳非標準 JSON，以下以純文字顯示）
               </div>
             ) : null}
-            {aiHighlights.length > 0 ? (
+            {aiHighlights.length > 0 && !isPlayer ? (
               <CollapsibleHighlightsSection highlights={aiHighlights} />
             ) : null}
             {aiScript.trim() ? (
@@ -4109,12 +4325,16 @@ function AiSummaryPanel({
                 <div style={styles.aiScriptSectionHead}>
                   <div style={styles.aiScriptTitleRow}>
                     <span style={styles.aiScriptTitle}>AI 主播稿</span>
-                    <span style={styles.aiScriptPrimaryBadge}>主要內容</span>
+                    {!isPlayer ? (
+                      <span style={styles.aiScriptPrimaryBadge}>主要內容</span>
+                    ) : null}
                   </div>
+                  {!isPlayer ? (
                   <ScriptFontSizeControl
                     value={scriptFontSize}
                     onChange={onScriptFontSizeChange}
                   />
+                  ) : null}
                 </div>
                 <div style={styles.aiScriptActions}>
                   <button
@@ -4163,23 +4383,45 @@ function AiSummaryPanel({
               </div>
             ) : null}
           </>
-        ) : (
+        ) : isHome ? null : (
           <div style={styles.aiHintMuted}>
-            勾選新聞後點「AI 分析」，選擇 1／3／5 分鐘；AI 會依新聞數量與重要度自動分配篇幅（最多
-            5 則）。
+            勾選新聞後點「產生 AI 新聞稿」，選擇 1／3／5 分鐘。
           </div>
         )}
 
-        {!aiLoading && selectedNewsCount > 0 ? (
+        {!aiLoading && selectedNewsCount > 0 && !isPlayer ? (
           <button
             type="button"
             onClick={onOpenAnalysis}
             style={styles.aiPanelRegenerateBtn}
           >
-            重新 AI 分析
+            重新產生
           </button>
         ) : null}
+    </>
+  );
+
+  if (isPlayer) {
+    return (
+      <div style={styles.aiSummaryWrapPlayer}>
+        <button
+          type="button"
+          onClick={() => setPlayerScriptOpen((v) => !v)}
+          style={styles.playerScriptToggle}
+        >
+          <span>主播稿與操作</span>
+          <span>{playerScriptOpen ? "收合 ▲" : "展開 ▼"}</span>
+        </button>
+        {playerScriptOpen ? (
+          <div style={styles.aiSummaryCard}>{inner}</div>
+        ) : null}
       </div>
+    );
+  }
+
+  return (
+    <div style={styles.aiSummaryWrap}>
+      <div style={styles.aiSummaryCard}>{inner}</div>
     </div>
   );
 }
@@ -4397,7 +4639,10 @@ function AiFavoritesSection({
       </div>
 
       {favorites.length === 0 ? (
-        <div style={styles.aiFavEmpty}>尚未收藏 AI 新聞稿。</div>
+        <div style={styles.emptyStateBox}>
+          <div>尚未收藏 AI 新聞稿</div>
+          <div style={styles.emptyStateHint}>產生新聞稿後可點「收藏 AI 稿」保存</div>
+        </div>
       ) : (
         <div style={styles.aiFavList}>
           {favorites.map((fav) => {
@@ -4526,6 +4771,7 @@ function NewsList({
   isPro = false,
   homeToolbar,
   playingIndex = -1,
+  emptyHint,
 }: {
   title: string;
   news: NewsItem[];
@@ -4542,6 +4788,7 @@ function NewsList({
     lastUpdated: string;
   };
   playingIndex?: number;
+  emptyHint?: string;
 }) {
   const headerMerged = !!homeToolbar;
   const selectedCount = news.filter((n) => n.selected).length;
@@ -4580,7 +4827,8 @@ function NewsList({
               </button>
             </div>
             <div style={styles.homeNewsToolbarRight}>
-              <span style={styles.homeNewsCount}>{news.length} 則新聞</span>
+              <span style={styles.homeNewsSelected}>已選 {selectedCount} 則</span>
+              <span style={styles.homeNewsCount}>{news.length} 則</span>
               <span style={styles.homeNewsUpdated}>
                 {homeToolbar.lastUpdated
                   ? `更新 ${homeToolbar.lastUpdated}`
@@ -4608,7 +4856,10 @@ function NewsList({
       )}
 
       {!loading && news.length === 0 && (
-        <div style={styles.loading}>{emptyText}</div>
+        <div style={styles.emptyStateBox}>
+          <div>{emptyText}</div>
+          {emptyHint ? <div style={styles.emptyStateHint}>{emptyHint}</div> : null}
+        </div>
       )}
 
       <div style={denseCards ? styles.newsListDense : styles.newsList}>
@@ -4642,24 +4893,29 @@ function NewsList({
               >
                 <div style={styles.newsIndex}>{String(index + 1).padStart(2, "0")}</div>
 
-                <div style={{ flex: 1 }}>
-                  <div style={styles.newsTitle}>
-                    {item.selected ? "✅ " : ""}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div
+                    style={{
+                      ...styles.newsTitle,
+                      ...(denseCards ? styles.newsTitleClamp : {}),
+                    }}
+                  >
                     {item.title}
                   </div>
 
                   <div style={styles.newsMeta}>
-                    <span>{item.source}</span>
+                    <span style={styles.newsSource}>{item.source}</span>
 
-                    <div style={{ display: "flex", gap: 10 }}>
+                    <div style={styles.newsMetaActions}>
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
                           toggleFavorite(item);
                         }}
                         style={styles.favoriteButton}
+                        aria-label={item.favorite ? "取消收藏" : "收藏"}
                       >
-                        {item.favorite ? "⭐" : "☆"}
+                        {item.favorite ? "★" : "☆"}
                       </button>
 
                       <a
@@ -4667,7 +4923,7 @@ function NewsList({
                         target="_blank"
                         rel="noreferrer"
                         onClick={(e) => e.stopPropagation()}
-                        style={styles.link}
+                        style={styles.newsLinkSubtle}
                       >
                         原文
                       </a>
@@ -4693,9 +4949,8 @@ const styles: Record<string, CSSProperties> = {
     margin: 0,
     padding: 0,
     overflowX: "hidden",
-    background:
-      "radial-gradient(circle at top left, #1D4ED8 0, transparent 28%), linear-gradient(180deg, #020617 0%, #0F172A 100%)",
-    color: "white",
+    background: TOKENS.bgPage,
+    color: TOKENS.textPrimary,
     fontFamily:
       '-apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans TC", sans-serif',
   },
@@ -4741,6 +4996,250 @@ const styles: Record<string, CSSProperties> = {
     borderRadius: "999px",
     padding: "5px 10px",
     marginTop: "0",
+  },
+  stationHero: {
+    position: "relative",
+    marginTop: "10px",
+    marginBottom: "14px",
+    padding: "18px 16px",
+    borderRadius: TOKENS.radiusLg,
+    background: TOKENS.cardBg,
+    border: `1px solid ${TOKENS.cardBorder}`,
+    boxShadow: "0 12px 36px rgba(0,0,0,.28)",
+    overflow: "hidden",
+  },
+  stationHeroGlow: {
+    position: "absolute",
+    top: -40,
+    right: -30,
+    width: 140,
+    height: 140,
+    borderRadius: "50%",
+    background: "radial-gradient(circle, rgba(99,102,241,.2) 0%, transparent 70%)",
+    pointerEvents: "none",
+  },
+  stationHeroTitle: {
+    margin: 0,
+    fontSize: "18px",
+    fontWeight: 900,
+    color: TOKENS.textPrimary,
+    lineHeight: 1.25,
+  },
+  stationHeroBody: {
+    margin: "10px 0 0",
+    fontSize: "14px",
+    color: "#CBD5E1",
+    lineHeight: 1.45,
+  },
+  stationHeroMeta: {
+    marginTop: "10px",
+    fontSize: "12px",
+    fontWeight: 700,
+    color: TOKENS.textMuted,
+  },
+  stationHeroCta: {
+    display: "block",
+    width: "100%",
+    marginTop: "14px",
+    padding: "14px 16px",
+    border: "none",
+    borderRadius: TOKENS.radiusMd,
+    background: TOKENS.ctaGreen,
+    color: "#022C22",
+    fontSize: "16px",
+    fontWeight: 900,
+    cursor: "pointer",
+    boxShadow: "0 8px 24px rgba(16,185,129,.28)",
+  },
+  stationHeroSecondaryCta: {
+    display: "block",
+    width: "100%",
+    marginTop: "10px",
+    padding: "12px 16px",
+    border: "1px solid rgba(129,140,248,.45)",
+    borderRadius: TOKENS.radiusMd,
+    background: "rgba(99,102,241,.2)",
+    color: "#E0E7FF",
+    fontSize: "14px",
+    fontWeight: 800,
+    cursor: "pointer",
+  },
+  stationHeroHint: {
+    margin: "10px 0 0",
+    fontSize: "12px",
+    color: TOKENS.textMuted,
+    textAlign: "center",
+  },
+  stationHeroActions: {
+    display: "flex",
+    gap: "8px",
+    marginTop: "12px",
+  },
+  stationHeroGhostBtn: {
+    flex: 1,
+    padding: "10px 12px",
+    borderRadius: TOKENS.radiusMd,
+    border: `1px solid ${TOKENS.cardBorder}`,
+    background: "rgba(255,255,255,.06)",
+    color: TOKENS.textSecondary,
+    fontSize: "13px",
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+  settingsSummaryGrid: {
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr",
+    gap: "10px",
+    marginBottom: "12px",
+  },
+  settingsSummaryCard: {
+    padding: "12px",
+    borderRadius: TOKENS.radiusMd,
+    background: TOKENS.cardBg,
+    border: `1px solid ${TOKENS.cardBorder}`,
+    minHeight: 88,
+  },
+  settingsSummaryCardTitle: {
+    fontSize: "13px",
+    fontWeight: 900,
+    color: "#A5B4FC",
+    marginBottom: "8px",
+  },
+  settingsSummaryCardLine: {
+    fontSize: "11px",
+    color: TOKENS.textSecondary,
+    lineHeight: 1.4,
+    fontWeight: 600,
+  },
+  settingsCollapseSection: {
+    marginBottom: "10px",
+    borderRadius: TOKENS.radiusMd,
+    background: "rgba(15,23,42,.55)",
+    border: `1px solid ${TOKENS.cardBorder}`,
+    overflow: "hidden",
+  },
+  settingsCollapseHead: {
+    width: "100%",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "10px",
+    padding: "14px 14px",
+    border: "none",
+    background: "transparent",
+    color: "inherit",
+    cursor: "pointer",
+  },
+  settingsCollapseTitle: {
+    fontSize: "15px",
+    fontWeight: 800,
+    color: TOKENS.textPrimary,
+  },
+  settingsCollapseSub: {
+    marginTop: "4px",
+    fontSize: "12px",
+    color: TOKENS.textMuted,
+    fontWeight: 600,
+  },
+  settingsCollapseChevron: {
+    fontSize: "12px",
+    color: TOKENS.textSecondary,
+    flexShrink: 0,
+  },
+  settingsCollapseBody: {
+    padding: "0 14px 14px",
+    display: "flex",
+    flexDirection: "column",
+    gap: "10px",
+  },
+  favSegmented: {
+    display: "flex",
+    gap: "8px",
+    marginBottom: "12px",
+    padding: "4px",
+    borderRadius: TOKENS.radiusMd,
+    background: "rgba(15,23,42,.6)",
+    border: `1px solid ${TOKENS.cardBorder}`,
+  },
+  favSegmentBtn: {
+    flex: 1,
+    padding: "10px 12px",
+    border: "none",
+    borderRadius: "10px",
+    background: "transparent",
+    color: TOKENS.textSecondary,
+    fontSize: "13px",
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+  favSegmentBtnActive: {
+    background: "rgba(99,102,241,.28)",
+    color: "#E0E7FF",
+    fontWeight: 800,
+  },
+  emptyStateBox: {
+    padding: "20px 16px",
+    textAlign: "center",
+    color: TOKENS.textSecondary,
+    fontSize: "14px",
+    fontWeight: 700,
+    lineHeight: 1.5,
+    borderRadius: TOKENS.radiusMd,
+    background: "rgba(255,255,255,.04)",
+    border: `1px dashed ${TOKENS.cardBorder}`,
+  },
+  emptyStateHint: {
+    marginTop: "8px",
+    fontSize: "12px",
+    color: TOKENS.textMuted,
+    fontWeight: 600,
+  },
+  homeNewsSelected: {
+    fontSize: "12px",
+    fontWeight: 800,
+    color: "#A7F3D0",
+  },
+  aiSummaryWrapPlayer: {
+    marginTop: "8px",
+    marginBottom: "8px",
+    minWidth: 0,
+  },
+  playerScriptToggle: {
+    width: "100%",
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    padding: "10px 12px",
+    marginBottom: "6px",
+    borderRadius: TOKENS.radiusMd,
+    border: `1px solid ${TOKENS.cardBorder}`,
+    background: "rgba(255,255,255,.05)",
+    color: TOKENS.textSecondary,
+    fontSize: "12px",
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+  playerVoiceToggle: {
+    width: "100%",
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginTop: "10px",
+    padding: "10px 12px",
+    borderRadius: TOKENS.radiusMd,
+    border: `1px solid ${TOKENS.cardBorder}`,
+    background: "rgba(255,255,255,.05)",
+    color: TOKENS.textSecondary,
+    fontSize: "12px",
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+  playerProgressTrackLarge: {
+    height: "8px",
+    borderRadius: "999px",
+    background: "rgba(255,255,255,.12)",
+    overflow: "hidden",
+    marginBottom: "14px",
   },
   headerOther: {
     display: "flex",
@@ -6171,25 +6670,51 @@ const styles: Record<string, CSSProperties> = {
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
   },
-  newsList: { display: "flex", flexDirection: "column", gap: "10px" },
-  newsListDense: { display: "flex", flexDirection: "column", gap: "6px" },
+  newsList: { display: "flex", flexDirection: "column", gap: "12px" },
+  newsListDense: { display: "flex", flexDirection: "column", gap: "10px" },
   newsCard: {
     display: "flex",
-    gap: "12px",
+    gap: "10px",
     alignItems: "flex-start",
-    background: "rgba(255,255,255,.07)",
-    border: "1px solid rgba(255,255,255,.08)",
-    borderRadius: "18px",
-    padding: "13px",
+    background: TOKENS.cardBg,
+    border: `1px solid ${TOKENS.cardBorder}`,
+    borderRadius: TOKENS.radiusLg,
+    padding: "14px",
     cursor: "pointer",
+    transition: "border-color 0.15s ease, box-shadow 0.15s ease",
   },
   newsCardDense: {
-    padding: "8px 10px",
-    borderRadius: "13px",
+    padding: "12px",
+    borderRadius: TOKENS.radiusMd,
   },
   newsCardActive: {
-    background: "rgba(37,99,235,.26)",
-    border: "1px solid rgba(147,197,253,.45)",
+    background: "rgba(37,99,235,.22)",
+    border: `1px solid ${TOKENS.cardBorderActive}`,
+    boxShadow: TOKENS.glowSelected,
+  },
+  newsTitleClamp: {
+    display: "-webkit-box",
+    WebkitLineClamp: 2,
+    WebkitBoxOrient: "vertical",
+    overflow: "hidden",
+  },
+  newsSource: {
+    fontSize: "11px",
+    color: TOKENS.textMuted,
+    fontWeight: 600,
+  },
+  newsMetaActions: {
+    display: "flex",
+    gap: 8,
+    alignItems: "center",
+  },
+  newsLinkSubtle: {
+    fontSize: "11px",
+    color: "#64748B",
+    textDecoration: "none",
+    padding: "2px 8px",
+    borderRadius: "6px",
+    border: "1px solid rgba(255,255,255,.08)",
   },
   newsCardPlaying: {
     background: "rgba(124,58,237,.22)",
@@ -6392,18 +6917,23 @@ const styles: Record<string, CSSProperties> = {
     flexShrink: 0,
   },
   newsIndex: {
-    width: "32px",
-    height: "32px",
-    borderRadius: "11px",
-    background: "rgba(255,255,255,.1)",
+    width: "26px",
+    height: "26px",
+    borderRadius: "8px",
+    background: "rgba(255,255,255,.06)",
     display: "grid",
     placeItems: "center",
-    color: "#93C5FD",
-    fontWeight: 900,
-    fontSize: "11px",
+    color: "#64748B",
+    fontWeight: 700,
+    fontSize: "10px",
     flexShrink: 0,
   },
-  newsTitle: { fontSize: "14px", fontWeight: 800, lineHeight: 1.4 },
+  newsTitle: {
+    fontSize: "15px",
+    fontWeight: 800,
+    lineHeight: 1.35,
+    color: TOKENS.textPrimary,
+  },
   newsMeta: {
     display: "flex",
     justifyContent: "space-between",
