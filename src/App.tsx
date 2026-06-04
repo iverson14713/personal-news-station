@@ -2201,6 +2201,8 @@ ${newsText}
               loadingNews={loading}
             />
 
+            <HomePageAdSlot isPro={isPro} />
+
             <NewsList
               title="今日新聞"
               compact
@@ -2279,7 +2281,7 @@ ${newsText}
                 clientId={readAdSenseClientId()}
                 slotId={ADSENSE_PLAYER_BANNER_SLOT_ID}
                 format="horizontal"
-                placeholderVariant="banner"
+                placement="playerBanner"
               />
             ) : null}
 
@@ -4705,17 +4707,36 @@ function SiteFooter() {
   );
 }
 
+/** 首頁：主狀態卡與新聞列表之間的低干擾橫幅（Free only） */
+function HomePageAdSlot({ isPro }: { isPro: boolean }) {
+  if (isPro) return null;
+  return (
+    <div style={styles.homeAdSlotWrap} role="complementary" aria-label="Advertisement">
+      <AdSenseSlot
+        clientId={readAdSenseClientId()}
+        slotId={ADSENSE_HOME_SLOT_ID}
+        format="horizontal"
+        placement="homeBanner"
+      />
+    </div>
+  );
+}
+
 function AdSenseSlot({
   clientId,
   slotId,
   format,
-  placeholderVariant,
+  placement = "banner",
 }: {
   clientId: string;
   slotId: string;
   format: "auto" | "horizontal" | "rectangle";
-  placeholderVariant: "native" | "banner";
+  placement?: "homeBanner" | "playerBanner" | "native";
 }) {
+  const isHomeBanner = placement === "homeBanner";
+  const isPlayerBanner = placement === "playerBanner";
+  const isBannerLike = isHomeBanner || isPlayerBanner || placement === "banner";
+
   useEffect(() => {
     if (!clientId) return;
     try {
@@ -4727,29 +4748,54 @@ function AdSenseSlot({
     }
   }, [clientId, slotId]);
 
+  const labelRow = (
+    <div style={styles.adLabelRow}>
+      <span style={styles.adTag}>Advertisement</span>
+      <span style={styles.adBannerText}>贊助內容 · Banner</span>
+    </div>
+  );
+
   if (!clientId) {
-    return placeholderVariant === "banner" ? (
-      <div style={styles.adBanner} role="note" aria-label="Advertisement">
-        <div style={styles.adTag}>Advertisement</div>
-        <div style={styles.adBannerText}>贊助內容 · Banner</div>
-      </div>
-    ) : (
+    if (isHomeBanner) {
+      return (
+        <div style={styles.adHomeBannerPlaceholder} role="note">
+          {labelRow}
+          <div style={styles.adHomeBannerPlaceholderBody}>廣告版位（待 AdSense 設定）</div>
+        </div>
+      );
+    }
+    if (isBannerLike) {
+      return (
+        <div style={styles.adBannerPlaceholder} role="note">
+          {labelRow}
+        </div>
+      );
+    }
+    return (
       <div style={styles.adNative} role="note" aria-label="Advertisement">
-        <div style={styles.adTag}>Advertisement</div>
-        <div style={styles.adTitle}>贊助內容</div>
-        <div style={styles.adBody}>此位置將展示原生廣告，不影響閱讀與播放。</div>
+        {labelRow}
+        <div style={styles.adBody}>此位置將展示贊助內容。</div>
       </div>
     );
   }
 
+  const frameStyle = isHomeBanner
+    ? styles.adHomeBannerFrame
+    : isBannerLike
+      ? styles.adBannerFrame
+      : styles.adNativeFrame;
+
   return (
-    <div
-      style={placeholderVariant === "banner" ? styles.adBannerFrame : styles.adNativeFrame}
-      aria-label="Advertisement"
-    >
+    <div style={frameStyle} role="note" aria-label="Advertisement">
+      {labelRow}
       <ins
         className="adsbygoogle"
-        style={{ display: "block", width: "100%" }}
+        style={{
+          display: "block",
+          width: "100%",
+          minHeight: isHomeBanner ? 48 : 50,
+          maxHeight: isHomeBanner ? 56 : undefined,
+        }}
         data-ad-client={clientId}
         data-ad-slot={slotId}
         data-ad-format={format}
@@ -4865,21 +4911,8 @@ function NewsList({
       <div style={denseCards ? styles.newsListDense : styles.newsList}>
         {(() => {
           const blocks: JSX.Element[] = [];
-          const showNativeAd = !isPro && title === "新聞" && news.length >= 8;
-          const adIndex = showNativeAd ? Math.min(4, Math.floor(news.length / 2)) : -1;
 
           news.forEach((item, index) => {
-            if (showNativeAd && index === adIndex) {
-              blocks.push(
-                <AdSenseSlot
-                  key="native-ad"
-                  clientId={readAdSenseClientId()}
-                  slotId={ADSENSE_HOME_SLOT_ID}
-                  format="auto"
-                  placeholderVariant="native"
-                />
-              );
-            }
             blocks.push(
               <article
                 key={item.id}
@@ -5713,46 +5746,79 @@ const styles: Record<string, CSSProperties> = {
     background: "rgba(255,255,255,.06)",
     border: "1px solid rgba(255,255,255,.12)",
   },
-  adNative: {
-    borderRadius: "16px",
-    padding: "14px 14px 16px",
-    background: "rgba(255,255,255,.04)",
-    border: "1px solid rgba(255,255,255,.08)",
+  homeAdSlotWrap: {
+    marginTop: "14px",
+    marginBottom: "14px",
   },
-  adBanner: {
+  adHomeBannerPlaceholder: {
+    borderRadius: "12px",
+    padding: "10px 12px 12px",
+    background: "rgba(15,23,42,.55)",
+    border: "1px dashed rgba(148,163,184,.28)",
+    maxHeight: 88,
+    overflow: "hidden",
+  },
+  adHomeBannerPlaceholderBody: {
+    marginTop: "6px",
+    fontSize: "12px",
+    color: "#64748B",
+    fontWeight: 600,
+    textAlign: "center",
+  },
+  adHomeBannerFrame: {
+    borderRadius: "12px",
+    padding: "8px 12px 10px",
+    background: "rgba(15,23,42,.55)",
+    border: "1px dashed rgba(148,163,184,.28)",
+    maxHeight: 88,
+    overflow: "hidden",
+  },
+  adBannerPlaceholder: {
     marginTop: "12px",
-    borderRadius: "16px",
+    borderRadius: "12px",
+    padding: "10px 12px",
+    background: "rgba(15,23,42,.55)",
+    border: "1px dashed rgba(148,163,184,.28)",
+    minHeight: 48,
+    maxHeight: 72,
+  },
+  adNative: {
+    borderRadius: "12px",
     padding: "12px 14px",
-    background: "rgba(255,255,255,.04)",
-    border: "1px solid rgba(255,255,255,.08)",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: "10px",
+    background: "rgba(15,23,42,.45)",
+    border: "1px dashed rgba(148,163,184,.22)",
   },
   adNativeFrame: {
-    borderRadius: "16px",
-    padding: "10px 10px",
-    background: "rgba(255,255,255,.02)",
-    border: "1px solid rgba(255,255,255,.06)",
+    borderRadius: "12px",
+    padding: "8px 12px",
+    background: "rgba(15,23,42,.45)",
+    border: "1px dashed rgba(148,163,184,.22)",
   },
   adBannerFrame: {
     marginTop: "12px",
-    borderRadius: "16px",
-    padding: "8px 10px",
-    background: "rgba(255,255,255,.02)",
-    border: "1px solid rgba(255,255,255,.06)",
+    borderRadius: "12px",
+    padding: "8px 12px 10px",
+    background: "rgba(15,23,42,.55)",
+    border: "1px dashed rgba(148,163,184,.28)",
+    maxHeight: 80,
+    overflow: "hidden",
+  },
+  adLabelRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "8px",
+    marginBottom: "4px",
   },
   adTag: {
     fontSize: "10px",
     fontWeight: 900,
-    letterSpacing: "0.10em",
+    letterSpacing: "0.12em",
     textTransform: "uppercase",
-    color: "rgba(148,163,184,.75)",
+    color: "rgba(148,163,184,.85)",
   },
-  adTitle: { marginTop: "8px", fontSize: "14px", fontWeight: 900, color: "#F8FAFC" },
-  adBody: { marginTop: "6px", fontSize: "13px", lineHeight: 1.45, color: "#94A3B8" },
-  adBannerText: { fontSize: "13px", fontWeight: 800, color: "#CBD5E1" },
+  adBody: { marginTop: "6px", fontSize: "12px", lineHeight: 1.4, color: "#64748B" },
+  adBannerText: { fontSize: "11px", fontWeight: 700, color: "#64748B" },
   controlPanel: {
     marginTop: "18px",
     background: "rgba(15,23,42,.82)",
