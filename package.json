@@ -2,7 +2,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite"
+    "preview": "vite preview",
+    "screenshot:news": "node scripts/screenshot-news.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
@@ -12,6 +13,7 @@
     "lucide-react": "latest"
   },
   "devDependencies": {
+    "playwright": "^1.49.0",
     "typescript": "latest"
   }
 }
