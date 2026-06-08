@@ -23,7 +23,11 @@ import {
 import { parseAiSummaryContent, warnScriptQuality } from "./aiSummaryParse";
 import { TOKENS, shortVoiceLabel } from "./theme";
 import type { AiDailyInsight } from "./AiDailyInsightCard";
-import { AiDailyInsightCard, normalizeDailyInsight } from "./AiDailyInsightCard";
+import {
+  AiDailyInsightCard,
+  findClosestNewsByTitle,
+  normalizeDailyInsight,
+} from "./AiDailyInsightCard";
 
 type Tab = "home" | "player" | "video" | "favorites" | "settings";
 
@@ -286,7 +290,8 @@ function readAdSenseClientId(): string {
 const ADSENSE_HOME_SLOT_ID = "0000000000";
 const ADSENSE_PLAYER_BANNER_SLOT_ID = "0000000000";
 
-const AI_INSIGHT_CACHE_KEY = "pns_ai_daily_insight_v1";
+const AI_INSIGHT_CACHE_KEY = "pns_ai_daily_insight_v2";
+const AI_INSIGHT_CACHE_KEY_LEGACY = "pns_ai_daily_insight_v1";
 
 function buildDailyInsightFingerprint(items: NewsItem[]): string {
   const base = [...items]
@@ -970,7 +975,7 @@ export default function App() {
       keywords: keywords.slice(0, 5),
       controversies: [],
       recommendedNews: picked.slice(0, 3).map((n, i) => ({
-        id: n.id,
+        title: n.title,
         reason: fallbackReasons[i] ?? "值得優先關注",
       })),
     };
@@ -1050,6 +1055,7 @@ export default function App() {
           AI_INSIGHT_CACHE_KEY,
           JSON.stringify({ date: today, fp, insight: normalizedInsight })
         );
+        localStorage.removeItem(AI_INSIGHT_CACHE_KEY_LEGACY);
       } catch {
         /* ignore */
       }
@@ -2373,12 +2379,18 @@ ${newsText}
               loadingInsight={dailyInsightLoading}
               onRequestInsight={handleRequestDailyInsight}
               onOpenProModal={openProUpgrade}
-              onOpenRecommendedNews={(id) => {
-                const item = news.find((n) => n.id === id);
+              onOpenRecommendedNews={(title, matchedNewsId) => {
+                let item =
+                  matchedNewsId != null
+                    ? news.find((n) => n.id === matchedNewsId) ?? null
+                    : null;
+                if (!item) item = findClosestNewsByTitle(news, title);
                 if (!item) return;
                 if (!item.selected) {
                   setNews((prev) =>
-                    prev.map((n) => (n.id === id ? { ...n, selected: true } : n))
+                    prev.map((n) =>
+                      n.id === item.id ? { ...n, selected: true } : n
+                    )
                   );
                 }
                 window.open(item.link, "_blank", "noopener,noreferrer");

@@ -104,7 +104,7 @@ function formatNewsListForPrompt(items: SummaryItem[]): string {
     .join("\n\n");
 }
 
-type DailyInsightReco = { id: string; reason: string };
+type DailyInsightReco = { title: string; reason: string };
 
 type DailyInsightOut = {
   attentionLevel: "低" | "中" | "高";
@@ -151,17 +151,24 @@ function coerceDailyInsight(raw: unknown): DailyInsightOut | null {
   const recommendedNews: DailyInsightReco[] = [];
   if (Array.isArray(recoRaw)) {
     for (const row of recoRaw.slice(0, 3)) {
-      if (typeof row === "string" || typeof row === "number") {
-        const id = String(row).trim();
-        if (id) recommendedNews.push({ id, reason: "值得優先關注" });
+      if (typeof row === "string") {
+        const text = row.trim();
+        if (text.length >= 6) {
+          recommendedNews.push({ title: text.slice(0, 300), reason: "值得優先關注" });
+        }
         continue;
       }
       if (!row || typeof row !== "object") continue;
       const r = row as Record<string, unknown>;
-      const id = String(r.id ?? r.index ?? "").trim();
+      const title = typeof r.title === "string" ? r.title.trim() : "";
       const reason =
         typeof r.reason === "string" ? r.reason.trim().slice(0, 40) : "值得優先關注";
-      if (id) recommendedNews.push({ id, reason: reason || "值得優先關注" });
+      if (title) {
+        recommendedNews.push({
+          title: title.slice(0, 300),
+          reason: reason || "值得優先關注",
+        });
+      }
     }
   }
 
@@ -512,7 +519,7 @@ export default async function handler(req: any, res: any) {
   "controversies": ["爭議焦點1", "爭議焦點2"],
   "keywords": ["關鍵字1", "關鍵字2", "關鍵字3"],
   "recommendedNews": [
-    { "id": "news-id", "reason": "一句推薦原因" }
+    { "title": "新聞標題（請複製輸入標題原文或極接近版本）", "reason": "一句推薦原因" }
   ]
 }
 
@@ -522,7 +529,7 @@ export default async function handler(req: any, res: any) {
 - hotReason：AI 快報風格，45～60 字以內，一句話點出今日主軸；不要小作文、不要口號、不要投資建議。
 - controversies：3～5 個，偏「事件／爭論／衝突／風險」標籤（例：監管收緊、裁判判決、關鍵失誤）；不要放人名、公司名、幣種名。
 - keywords：3～5 個，偏「名詞／人物／主題／實體」（例：比特幣、Coinbase、NBA）；不要與 controversies 重複。
-- recommendedNews：1～3 則物件；id 優先使用輸入新聞的 id（缺 id 才用 1-based index）；reason 為 8～16 字推薦原因（例：影響市場情緒最大、今日爭議度最高）。`;
+- recommendedNews：1～3 則物件；title 必須來自輸入新聞標題（勿回傳 id）；reason 為 8～16 字推薦原因（例：影響市場情緒最大、今日爭議度最高）。`;
 
     const userMsg = `請根據以下新聞，以 AI 新聞總編輯角度分析：
 - 今日最值得注意事件

@@ -4,7 +4,7 @@ import type { CSSProperties } from "react";
 import type { NewsItem } from "./App";
 
 export type AiDailyInsightRecommended = {
-  id: string;
+  title: string;
   reason: string;
 };
 
@@ -17,21 +17,93 @@ export type AiDailyInsight = {
   recommendedNews: AiDailyInsightRecommended[];
 };
 
+export type RecommendedDisplayItem = {
+  title: string;
+  reason: string;
+  matchedItem: NewsItem | null;
+};
+
+/** 與 App.tsx normalizeKey 一致，供標題比對 */
+export function normalizeInsightTitleKey(title: string): string {
+  return title.replace(/[，。！？、\s\-｜|:：]/g, "").slice(0, 28);
+}
+
+function fuzzyTitleScore(a: string, b: string): number {
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  if (a.includes(b) || b.includes(a)) return 0.88;
+  const shorter = a.length <= b.length ? a : b;
+  const longer = a.length <= b.length ? b : a;
+  if (longer.includes(shorter) && shorter.length >= 6) return 0.75;
+  const setA = new Set(a.split(""));
+  let overlap = 0;
+  for (const ch of b) {
+    if (setA.has(ch)) overlap += 1;
+  }
+  return overlap / Math.max(a.length, b.length, 1);
+}
+
+export function findClosestNewsByTitle(
+  news: NewsItem[],
+  aiTitle: string
+): NewsItem | null {
+  const key = normalizeInsightTitleKey(aiTitle);
+  if (!key) return null;
+
+  const exact = news.find((n) => normalizeInsightTitleKey(n.title) === key);
+  if (exact) return exact;
+
+  const includes = news.find((n) => {
+    const nk = normalizeInsightTitleKey(n.title);
+    return nk.includes(key) || key.includes(nk);
+  });
+  if (includes) return includes;
+
+  let best: NewsItem | null = null;
+  let bestScore = 0;
+  for (const n of news) {
+    const score = fuzzyTitleScore(key, normalizeInsightTitleKey(n.title));
+    if (score > bestScore) {
+      bestScore = score;
+      best = n;
+    }
+  }
+  return bestScore >= 0.42 ? best : null;
+}
+
+export function matchNewsByTitle(
+  news: NewsItem[],
+  aiTitle: string
+): NewsItem | null {
+  return findClosestNewsByTitle(news, aiTitle);
+}
+
 export function coerceInsightRecommendedNews(raw: unknown): AiDailyInsightRecommended[] {
   if (!Array.isArray(raw)) return [];
   const out: AiDailyInsightRecommended[] = [];
   for (const row of raw.slice(0, 3)) {
-    if (typeof row === "string" || typeof row === "number") {
-      const id = String(row).trim();
-      if (id) out.push({ id, reason: "值得優先關注" });
+    if (typeof row === "string") {
+      const text = row.trim();
+      // 舊版 id/index 字串通常很短或無中文，略過
+      if (text.length >= 6 && /[\u4e00-\u9fffA-Za-z]/.test(text)) {
+        out.push({ title: text.slice(0, 300), reason: "值得優先關注" });
+      }
       continue;
     }
     if (!row || typeof row !== "object") continue;
     const o = row as Record<string, unknown>;
-    const id = String(o.id ?? o.index ?? "").trim();
+    const title =
+      typeof o.title === "string"
+        ? o.title.trim()
+        : typeof o.id === "string" && o.id.length > 12
+          ? ""
+          : "";
     const reason =
       typeof o.reason === "string" ? o.reason.trim().slice(0, 40) : "值得優先關注";
-    if (id) out.push({ id, reason: reason || "值得優先關注" });
+    // 忽略舊版僅含 id 的格式
+    if (title) {
+      out.push({ title: title.slice(0, 300), reason: reason || "值得優先關注" });
+    }
   }
   return out;
 }
@@ -72,21 +144,6 @@ export function normalizeDailyInsight(raw: unknown): AiDailyInsight | null {
   };
 }
 
-function resolveInsightNewsItem(news: NewsItem[], ref: string): NewsItem | null {
-  const trimmed = ref.trim();
-  if (!trimmed) return null;
-  const byId = news.find((n) => n.id === trimmed);
-  if (byId) return byId;
-  const num = Number(trimmed);
-  if (!Number.isNaN(num) && Number.isFinite(num)) {
-    const oneBased = num >= 1 && num <= news.length ? news[num - 1] : null;
-    if (oneBased) return oneBased;
-    const zeroBased = num >= 0 && num < news.length ? news[num] : null;
-    if (zeroBased) return zeroBased;
-  }
-  return null;
-}
-
 export type AiDailyInsightCardProps = {
   isPro: boolean;
   news: NewsItem[];
@@ -94,7 +151,7 @@ export type AiDailyInsightCardProps = {
   loadingInsight: boolean;
   onRequestInsight: () => void;
   onOpenProModal: () => void;
-  onOpenRecommendedNews: (id: string) => void;
+  onOpenRecommendedNews: (title: string, matchedNewsId: string | null) => void;
 };
 
 export function AiDailyInsightCard({
@@ -113,7 +170,7 @@ export function AiDailyInsightCard({
     if (!hasNews) return;
     if (!isPro) {
       onOpenProModal();
-      setExpanded(true); // 允許看到模糊 preview，但不呼叫 API
+      setExpanded(true);
       return;
     }
     setExpanded((prev) => !prev);
@@ -124,7 +181,6 @@ export function AiDailyInsightCard({
     if (!expanded) return;
     if (insight) return;
     if (loadingInsight) return;
-    // 只在 Pro 展開時才觸發請求，避免首頁載入就耗用成本
     onRequestInsight();
   }, [expanded, insight, isPro, loadingInsight, onRequestInsight]);
 
@@ -137,23 +193,37 @@ export function AiDailyInsightCard({
   const controversyTags = insight?.controversies ?? [];
   const recommendedRefs = insight?.recommendedNews ?? [];
 
-  const recommendedItems = useMemo(() => {
+  const recommendedItems = useMemo((): RecommendedDisplayItem[] => {
+    console.log("[AI Insight] recommendedNews from AI:", recommendedRefs);
+
     const seen = new Set<string>();
-    const out: { item: NewsItem; reason: string }[] = [];
+    const out: RecommendedDisplayItem[] = [];
+    let matched = 0;
+
     for (const ref of recommendedRefs) {
-      const item = resolveInsightNewsItem(news, ref.id);
-      if (!item || seen.has(item.id)) continue;
-      seen.add(item.id);
+      const title = ref.title.trim();
+      if (!title) continue;
+      const dedupeKey = normalizeInsightTitleKey(title);
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+
+      const matchedItem = matchNewsByTitle(news, title);
+      if (matchedItem) matched += 1;
+
       out.push({
-        item,
+        title,
         reason: ref.reason.trim() || "值得優先關注",
+        matchedItem,
       });
       if (out.length >= 3) break;
     }
+
+    console.log("[AI Insight] recommended mapping matched:", matched, "/", out.length);
     return out;
   }, [news, recommendedRefs]);
 
   const previewBlur = !isPro;
+  const showRecommendedSection = recommendedRefs.length > 0;
 
   return (
     <section style={styles.wrap}>
@@ -191,78 +261,82 @@ export function AiDailyInsightCard({
             ...(expanded ? styles.bodyExpanded : {}),
           }}
         >
-        {loadingInsight && (
-          <div style={styles.loadingRow}>AI 分析中，請稍候…</div>
-        )}
+          {loadingInsight && (
+            <div style={styles.loadingRow}>AI 分析中，請稍候…</div>
+          )}
 
-        {!loadingInsight && (
-          <>
-            <div style={styles.rowGrid}>
-              <div style={styles.metricCard}>
-                <div style={styles.metricLabel}>今日關注度</div>
-                <div style={styles.metricValue}>{attentionText}</div>
-              </div>
-              <div style={styles.metricCard}>
-                <div style={styles.metricLabel}>今日風向</div>
-                <div style={styles.metricValue}>{sentimentText}</div>
-              </div>
-            </div>
-
-            <div style={styles.block}>
-              <div style={styles.blockTitle}>今日最值得注意</div>
-              <p style={styles.blockBody}>{hotReason}</p>
-            </div>
-
-            {controversyTags.length > 0 && (
-              <div style={styles.blockCompact}>
-                <div style={styles.blockTitle}>主要爭議</div>
-                <div style={styles.tagRow}>
-                  {controversyTags.slice(0, 5).map((tag) => (
-                    <span key={`c-${tag}`} style={styles.controversyTag}>
-                      #{tag}
-                    </span>
-                  ))}
+          {!loadingInsight && (
+            <>
+              <div style={styles.rowGrid}>
+                <div style={styles.metricCard}>
+                  <div style={styles.metricLabel}>今日關注度</div>
+                  <div style={styles.metricValue}>{attentionText}</div>
+                </div>
+                <div style={styles.metricCard}>
+                  <div style={styles.metricLabel}>今日風向</div>
+                  <div style={styles.metricValue}>{sentimentText}</div>
                 </div>
               </div>
-            )}
 
-            {keywordTags.length > 0 && (
-              <div style={styles.blockCompact}>
-                <div style={styles.blockTitle}>熱門關鍵字</div>
-                <div style={styles.tagRow}>
-                  {keywordTags.slice(0, 5).map((tag) => (
-                    <span key={`k-${tag}`} style={styles.tag}>
-                      #{tag}
-                    </span>
-                  ))}
-                </div>
+              <div style={styles.block}>
+                <div style={styles.blockTitle}>今日最值得注意</div>
+                <p style={styles.blockBody}>{hotReason}</p>
               </div>
-            )}
 
-            {recommendedItems.length > 0 && (
-              <div style={styles.blockCompact}>
-                <div style={styles.blockTitle}>AI 建議先看</div>
-                <div style={styles.recoList}>
-                  {recommendedItems.map(({ item, reason }, index) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => onOpenRecommendedNews(item.id)}
-                      style={styles.recoChip}
-                      title={item.title}
-                    >
-                      <span style={styles.recoIndex}>{index + 1}</span>
-                      <span style={styles.recoTextCol}>
-                        <span style={styles.recoTitle}>{item.title}</span>
-                        <span style={styles.recoReason}>{reason}</span>
+              {controversyTags.length > 0 && (
+                <div style={styles.blockCompact}>
+                  <div style={styles.blockTitle}>主要爭議</div>
+                  <div style={styles.tagRow}>
+                    {controversyTags.slice(0, 5).map((tag) => (
+                      <span key={`c-${tag}`} style={styles.controversyTag}>
+                        #{tag}
                       </span>
-                    </button>
-                  ))}
+                    ))}
+                  </div>
                 </div>
-              </div>
-            )}
-          </>
-        )}
+              )}
+
+              {keywordTags.length > 0 && (
+                <div style={styles.blockCompact}>
+                  <div style={styles.blockTitle}>熱門關鍵字</div>
+                  <div style={styles.tagRow}>
+                    {keywordTags.slice(0, 5).map((tag) => (
+                      <span key={`k-${tag}`} style={styles.tag}>
+                        #{tag}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {showRecommendedSection && (
+                <div style={styles.blockCompact}>
+                  <div style={styles.blockTitle}>AI 建議先看</div>
+                  <div style={styles.recoList}>
+                    {recommendedItems.map(({ title, reason, matchedItem }, index) => (
+                      <button
+                        key={`reco-${normalizeInsightTitleKey(title)}-${index}`}
+                        type="button"
+                        onClick={() =>
+                          onOpenRecommendedNews(title, matchedItem?.id ?? null)
+                        }
+                        style={styles.recoChip}
+                        title={matchedItem?.title ?? title}
+                      >
+                        <span style={styles.recoIndex}>{index + 1}</span>
+                        <span style={styles.recoTextCol}>
+                          <span style={styles.recoTitle}>
+                            {matchedItem?.title ?? title}
+                          </span>
+                          <span style={styles.recoReason}>{reason}</span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
         </div>
       </div>
 
@@ -472,4 +546,3 @@ const styles: Record<string, CSSProperties> = {
     color: "#94A3B8",
   },
 };
-
