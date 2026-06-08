@@ -104,13 +104,15 @@ function formatNewsListForPrompt(items: SummaryItem[]): string {
     .join("\n\n");
 }
 
+type DailyInsightReco = { id: string; reason: string };
+
 type DailyInsightOut = {
   attentionLevel: "低" | "中" | "高";
   sentiment: "偏正面" | "偏負面" | "中立" | "分歧";
   hotReason: string;
   keywords: string[];
   controversies: string[];
-  recommendedNews: string[];
+  recommendedNews: DailyInsightReco[];
 };
 
 function coerceDailyInsight(raw: unknown): DailyInsightOut | null {
@@ -119,7 +121,7 @@ function coerceDailyInsight(raw: unknown): DailyInsightOut | null {
   const attention = o.attentionLevel;
   const sentiment = o.sentiment;
   const hotReason =
-    typeof o.hotReason === "string" ? o.hotReason.trim().slice(0, 220) : "";
+    typeof o.hotReason === "string" ? o.hotReason.trim().slice(0, 60) : "";
   const attentionLevel =
     attention === "低" || attention === "中" || attention === "高" ? attention : null;
   const sentimentLevel =
@@ -146,13 +148,22 @@ function coerceDailyInsight(raw: unknown): DailyInsightOut | null {
     : [];
 
   const recoRaw = o.recommendedNews;
-  const recommendedNews = Array.isArray(recoRaw)
-    ? recoRaw
-        .map((x) => (typeof x === "string" ? x : typeof x === "number" ? String(x) : ""))
-        .map((s) => s.trim())
-        .filter(Boolean)
-        .slice(0, 3)
-    : [];
+  const recommendedNews: DailyInsightReco[] = [];
+  if (Array.isArray(recoRaw)) {
+    for (const row of recoRaw.slice(0, 3)) {
+      if (typeof row === "string" || typeof row === "number") {
+        const id = String(row).trim();
+        if (id) recommendedNews.push({ id, reason: "值得優先關注" });
+        continue;
+      }
+      if (!row || typeof row !== "object") continue;
+      const r = row as Record<string, unknown>;
+      const id = String(r.id ?? r.index ?? "").trim();
+      const reason =
+        typeof r.reason === "string" ? r.reason.trim().slice(0, 40) : "值得優先關注";
+      if (id) recommendedNews.push({ id, reason: reason || "值得優先關注" });
+    }
+  }
 
   if (!attentionLevel || !sentimentLevel || !hotReason) return null;
   return {
@@ -497,19 +508,21 @@ export default async function handler(req: any, res: any) {
 {
   "attentionLevel": "低" | "中" | "高",
   "sentiment": "偏正面" | "偏負面" | "中立" | "分歧",
-  "hotReason": "一句話說明今天為什麼值得注意",
+  "hotReason": "一句 AI 快報",
   "controversies": ["爭議焦點1", "爭議焦點2"],
   "keywords": ["關鍵字1", "關鍵字2", "關鍵字3"],
-  "recommendedNews": ["新聞id或index"]
+  "recommendedNews": [
+    { "id": "news-id", "reason": "一句推薦原因" }
+  ]
 }
 
 規則：
 - attentionLevel：以「事件重要性 + 討論熱度 + 影響範圍」判斷，不要只看新聞數量。
 - sentiment：整體風向；若正負並存、意見分裂或爭議大，用「分歧」。
-- hotReason：一句話（20～45 字），點出今日最值得注意的事件脈絡，不要口號、不要投資建議。
-- controversies：3～5 個「爭議焦點」chip 標籤（每個 2～10 字），描述今日爭論、分歧、風險或爭議點（例：關鍵失誤、裁判判決、ETF資金），不要與 keywords 完全重複。
-- keywords：3～5 個熱門關鍵字，以名詞為主。
-- recommendedNews：回傳 1～3 個最值得優先閱讀的新聞「id」（若缺 id 才用 1-based index）；優先回傳 id。`;
+- hotReason：AI 快報風格，45～60 字以內，一句話點出今日主軸；不要小作文、不要口號、不要投資建議。
+- controversies：3～5 個，偏「事件／爭論／衝突／風險」標籤（例：監管收緊、裁判判決、關鍵失誤）；不要放人名、公司名、幣種名。
+- keywords：3～5 個，偏「名詞／人物／主題／實體」（例：比特幣、Coinbase、NBA）；不要與 controversies 重複。
+- recommendedNews：1～3 則物件；id 優先使用輸入新聞的 id（缺 id 才用 1-based index）；reason 為 8～16 字推薦原因（例：影響市場情緒最大、今日爭議度最高）。`;
 
     const userMsg = `請根據以下新聞，以 AI 新聞總編輯角度分析：
 - 今日最值得注意事件

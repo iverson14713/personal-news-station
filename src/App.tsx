@@ -23,7 +23,7 @@ import {
 import { parseAiSummaryContent, warnScriptQuality } from "./aiSummaryParse";
 import { TOKENS, shortVoiceLabel } from "./theme";
 import type { AiDailyInsight } from "./AiDailyInsightCard";
-import { AiDailyInsightCard } from "./AiDailyInsightCard";
+import { AiDailyInsightCard, normalizeDailyInsight } from "./AiDailyInsightCard";
 
 type Tab = "home" | "player" | "video" | "favorites" | "settings";
 
@@ -957,16 +957,22 @@ export default function App() {
       picked.length >= 12 ? "高" : picked.length >= 6 ? "中" : "低";
     const sentiment: AiDailyInsight["sentiment"] = "中立";
     const lead = picked[0]?.title?.trim();
-    const hotReason =
-      (lead ? `今天值得注意的焦點包含「${lead}」等議題。` : "今天有多則重要事件值得快速掌握。") +
-      (keywords.length > 0 ? ` 熱門關鍵字：${keywords.slice(0, 3).join("、")}。` : "");
+    const hotReason = (
+      lead
+        ? `${lead.slice(0, 18)}等議題牽動今日版面，市場與輿論分歧加劇。`
+        : "多則重要事件同日交織，今日資訊密度偏高。"
+    ).slice(0, 60);
+    const fallbackReasons = ["影響範圍最大", "今日爭議度高", "值得優先掌握"];
     return {
       attentionLevel,
       sentiment,
       hotReason,
       keywords: keywords.slice(0, 5),
-      controversies: keywords.slice(0, 3),
-      recommendedNews: picked.slice(0, 3).map((n) => n.id),
+      controversies: [],
+      recommendedNews: picked.slice(0, 3).map((n, i) => ({
+        id: n.id,
+        reason: fallbackReasons[i] ?? "值得優先關注",
+      })),
     };
   }, [news]);
 
@@ -999,8 +1005,11 @@ export default function App() {
           insight?: AiDailyInsight;
         };
         if (cached.date === today && cached.fp === fp && cached.insight) {
-          setDailyInsight(cached.insight);
-          return;
+          const cachedInsight = normalizeDailyInsight(cached.insight);
+          if (cachedInsight) {
+            setDailyInsight(cachedInsight);
+            return;
+          }
         }
       }
     } catch {
@@ -1029,36 +1038,11 @@ export default function App() {
         setDailyInsight(buildDailyInsightFallback());
         return;
       }
-      const insight = data.insight;
-      if (
-        !insight ||
-        (insight.attentionLevel !== "低" &&
-          insight.attentionLevel !== "中" &&
-          insight.attentionLevel !== "高") ||
-        (insight.sentiment !== "偏正面" &&
-          insight.sentiment !== "偏負面" &&
-          insight.sentiment !== "中立" &&
-          insight.sentiment !== "分歧") ||
-        typeof insight.hotReason !== "string" ||
-        !Array.isArray(insight.keywords) ||
-        !Array.isArray(insight.recommendedNews) ||
-        (insight.controversies != null && !Array.isArray(insight.controversies))
-      ) {
+      const normalizedInsight = normalizeDailyInsight(data.insight);
+      if (!normalizedInsight) {
         setDailyInsight(buildDailyInsightFallback());
         return;
       }
-      const normalizedInsight: AiDailyInsight = {
-        attentionLevel: insight.attentionLevel,
-        sentiment: insight.sentiment,
-        hotReason: insight.hotReason.slice(0, 180),
-        keywords: insight.keywords.filter((x) => typeof x === "string").slice(0, 5),
-        controversies: (insight.controversies ?? [])
-          .filter((x) => typeof x === "string")
-          .slice(0, 5),
-        recommendedNews: insight.recommendedNews
-          .filter((x) => typeof x === "string")
-          .slice(0, 3),
-      };
       setDailyInsight(normalizedInsight);
 
       try {
@@ -2389,9 +2373,14 @@ ${newsText}
               loadingInsight={dailyInsightLoading}
               onRequestInsight={handleRequestDailyInsight}
               onOpenProModal={openProUpgrade}
-              onOpenNewsLink={(id) => {
+              onOpenRecommendedNews={(id) => {
                 const item = news.find((n) => n.id === id);
                 if (!item) return;
+                if (!item.selected) {
+                  setNews((prev) =>
+                    prev.map((n) => (n.id === id ? { ...n, selected: true } : n))
+                  );
+                }
                 window.open(item.link, "_blank", "noopener,noreferrer");
               }}
             />

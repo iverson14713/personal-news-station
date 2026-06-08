@@ -3,14 +3,74 @@ import type { CSSProperties } from "react";
 
 import type { NewsItem } from "./App";
 
+export type AiDailyInsightRecommended = {
+  id: string;
+  reason: string;
+};
+
 export type AiDailyInsight = {
   attentionLevel: "低" | "中" | "高";
   sentiment: "偏正面" | "偏負面" | "中立" | "分歧";
   hotReason: string;
   keywords: string[];
   controversies: string[];
-  recommendedNews: string[];
+  recommendedNews: AiDailyInsightRecommended[];
 };
+
+export function coerceInsightRecommendedNews(raw: unknown): AiDailyInsightRecommended[] {
+  if (!Array.isArray(raw)) return [];
+  const out: AiDailyInsightRecommended[] = [];
+  for (const row of raw.slice(0, 3)) {
+    if (typeof row === "string" || typeof row === "number") {
+      const id = String(row).trim();
+      if (id) out.push({ id, reason: "值得優先關注" });
+      continue;
+    }
+    if (!row || typeof row !== "object") continue;
+    const o = row as Record<string, unknown>;
+    const id = String(o.id ?? o.index ?? "").trim();
+    const reason =
+      typeof o.reason === "string" ? o.reason.trim().slice(0, 40) : "值得優先關注";
+    if (id) out.push({ id, reason: reason || "值得優先關注" });
+  }
+  return out;
+}
+
+export function normalizeDailyInsight(raw: unknown): AiDailyInsight | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  const attention = o.attentionLevel;
+  const sentiment = o.sentiment;
+  const hotReason = typeof o.hotReason === "string" ? o.hotReason.trim().slice(0, 60) : "";
+  const attentionLevel =
+    attention === "低" || attention === "中" || attention === "高" ? attention : null;
+  const sentimentLevel =
+    sentiment === "偏正面" || sentiment === "偏負面" || sentiment === "中立" || sentiment === "分歧"
+      ? sentiment
+      : null;
+  if (!attentionLevel || !sentimentLevel || !hotReason) return null;
+
+  const keywords = Array.isArray(o.keywords)
+    ? o.keywords.filter((x) => typeof x === "string").map((s) => s.trim()).filter(Boolean).slice(0, 5)
+    : [];
+  const controversies = Array.isArray(o.controversies)
+    ? o.controversies
+        .filter((x) => typeof x === "string")
+        .map((s) => s.trim().replace(/^#+/, ""))
+        .filter(Boolean)
+        .slice(0, 5)
+    : [];
+  const recommendedNews = coerceInsightRecommendedNews(o.recommendedNews);
+
+  return {
+    attentionLevel,
+    sentiment: sentimentLevel,
+    hotReason,
+    keywords,
+    controversies,
+    recommendedNews,
+  };
+}
 
 function resolveInsightNewsItem(news: NewsItem[], ref: string): NewsItem | null {
   const trimmed = ref.trim();
@@ -34,7 +94,7 @@ export type AiDailyInsightCardProps = {
   loadingInsight: boolean;
   onRequestInsight: () => void;
   onOpenProModal: () => void;
-  onOpenNewsLink: (id: string) => void;
+  onOpenRecommendedNews: (id: string) => void;
 };
 
 export function AiDailyInsightCard({
@@ -44,7 +104,7 @@ export function AiDailyInsightCard({
   loadingInsight,
   onRequestInsight,
   onOpenProModal,
-  onOpenNewsLink,
+  onOpenRecommendedNews,
 }: AiDailyInsightCardProps) {
   const hasNews = news.length > 0;
   const [expanded, setExpanded] = useState(false);
@@ -77,14 +137,17 @@ export function AiDailyInsightCard({
   const controversyTags = insight?.controversies ?? [];
   const recommendedRefs = insight?.recommendedNews ?? [];
 
-  const recommendedNews = useMemo(() => {
+  const recommendedItems = useMemo(() => {
     const seen = new Set<string>();
-    const out: NewsItem[] = [];
+    const out: { item: NewsItem; reason: string }[] = [];
     for (const ref of recommendedRefs) {
-      const item = resolveInsightNewsItem(news, ref);
+      const item = resolveInsightNewsItem(news, ref.id);
       if (!item || seen.has(item.id)) continue;
       seen.add(item.id);
-      out.push(item);
+      out.push({
+        item,
+        reason: ref.reason.trim() || "值得優先關注",
+      });
       if (out.length >= 3) break;
     }
     return out;
@@ -176,20 +239,23 @@ export function AiDailyInsightCard({
               </div>
             )}
 
-            {recommendedNews.length > 0 && (
+            {recommendedItems.length > 0 && (
               <div style={styles.blockCompact}>
                 <div style={styles.blockTitle}>AI 建議先看</div>
                 <div style={styles.recoList}>
-                  {recommendedNews.map((item, index) => (
+                  {recommendedItems.map(({ item, reason }, index) => (
                     <button
                       key={item.id}
                       type="button"
-                      onClick={() => onOpenNewsLink(item.id)}
+                      onClick={() => onOpenRecommendedNews(item.id)}
                       style={styles.recoChip}
                       title={item.title}
                     >
                       <span style={styles.recoIndex}>{index + 1}</span>
-                      <span style={styles.recoTitle}>{item.title}</span>
+                      <span style={styles.recoTextCol}>
+                        <span style={styles.recoTitle}>{item.title}</span>
+                        <span style={styles.recoReason}>{reason}</span>
+                      </span>
                     </button>
                   ))}
                 </div>
@@ -262,7 +328,7 @@ const styles: Record<string, CSSProperties> = {
     transition: "max-height 0.22s ease",
   },
   panelExpanded: {
-    maxHeight: 460,
+    maxHeight: 500,
   },
   body: {
     marginTop: 8,
@@ -379,9 +445,14 @@ const styles: Record<string, CSSProperties> = {
     justifyContent: "center",
     marginTop: 1,
   },
-  recoTitle: {
+  recoTextCol: {
     flex: 1,
     minWidth: 0,
+    display: "flex",
+    flexDirection: "column",
+    gap: 2,
+  },
+  recoTitle: {
     fontSize: 12,
     lineHeight: 1.35,
     color: "#E2E8F0",
@@ -389,6 +460,11 @@ const styles: Record<string, CSSProperties> = {
     WebkitLineClamp: 2,
     WebkitBoxOrient: "vertical",
     overflow: "hidden",
+  },
+  recoReason: {
+    fontSize: 10,
+    lineHeight: 1.3,
+    color: "#93C5FD",
   },
   freeHint: {
     marginTop: 6,
