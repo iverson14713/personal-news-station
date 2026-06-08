@@ -109,6 +109,7 @@ type DailyInsightOut = {
   sentiment: "偏正面" | "偏負面" | "中立" | "分歧";
   hotReason: string;
   keywords: string[];
+  controversies: string[];
   recommendedNews: string[];
 };
 
@@ -135,6 +136,15 @@ function coerceDailyInsight(raw: unknown): DailyInsightOut | null {
         .slice(0, 5)
     : [];
 
+  const controversiesRaw = o.controversies;
+  const controversies = Array.isArray(controversiesRaw)
+    ? controversiesRaw
+        .filter((x) => typeof x === "string")
+        .map((s) => s.trim().replace(/^#+/, ""))
+        .filter(Boolean)
+        .slice(0, 5)
+    : [];
+
   const recoRaw = o.recommendedNews;
   const recommendedNews = Array.isArray(recoRaw)
     ? recoRaw
@@ -150,6 +160,7 @@ function coerceDailyInsight(raw: unknown): DailyInsightOut | null {
     sentiment: sentimentLevel,
     hotReason,
     keywords,
+    controversies,
     recommendedNews,
   };
 }
@@ -480,25 +491,35 @@ export default async function handler(req: any, res: any) {
 
   if (kind === "dailyInsight") {
     const listText = formatNewsListForInsight(items);
-    const system = `你是「AI 個人新聞台」的洞察整理助理。
-使用者提供今日新聞（含 id、標題、摘要、來源、連結）。請根據輸入內容，給出今日整體洞察。
+    const system = `你是「AI 個人新聞台」的 AI 新聞總編輯。
+使用者提供今日新聞（含 id、標題、摘要、來源、連結）。請以總編輯視角整理今日資訊，不只是情緒分析，而要幫讀者判斷「今天該關注什麼、爭議在哪、先看哪幾則」。
 輸出必須是 JSON（不要 markdown、不要任何多餘文字），且固定結構如下：
 {
   "attentionLevel": "低" | "中" | "高",
   "sentiment": "偏正面" | "偏負面" | "中立" | "分歧",
   "hotReason": "一句話說明今天為什麼值得注意",
+  "controversies": ["爭議焦點1", "爭議焦點2"],
   "keywords": ["關鍵字1", "關鍵字2", "關鍵字3"],
   "recommendedNews": ["新聞id或index"]
 }
 
 規則：
-- attentionLevel：以「事件重要性 + 討論熱度」判斷，不要只看新聞數量。
-- sentiment：若正負並存或爭議大，用「分歧」。
-- hotReason：一句話（20～45 字為佳），不要口號，不要投資建議。
-- keywords：3～5 個、以名詞為主、每個 2～10 字。
-- recommendedNews：回傳 1～3 個「id」（若缺 id 才能用 index）；優先回傳 id。`;
+- attentionLevel：以「事件重要性 + 討論熱度 + 影響範圍」判斷，不要只看新聞數量。
+- sentiment：整體風向；若正負並存、意見分裂或爭議大，用「分歧」。
+- hotReason：一句話（20～45 字），點出今日最值得注意的事件脈絡，不要口號、不要投資建議。
+- controversies：3～5 個「爭議焦點」chip 標籤（每個 2～10 字），描述今日爭論、分歧、風險或爭議點（例：關鍵失誤、裁判判決、ETF資金），不要與 keywords 完全重複。
+- keywords：3～5 個熱門關鍵字，以名詞為主。
+- recommendedNews：回傳 1～3 個最值得優先閱讀的新聞「id」（若缺 id 才用 1-based index）；優先回傳 id。`;
 
-    const userMsg = `以下是今日新聞（最多 20 則）：\n\n${listText}`;
+    const userMsg = `請根據以下新聞，以 AI 新聞總編輯角度分析：
+- 今日最值得注意事件
+- 今日主要爭議
+- 今日熱門關鍵字
+- 最值得優先看的新聞（1～3 則）
+
+以下是今日新聞（最多 20 則）：
+
+${listText}`;
 
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const controller = new AbortController();
@@ -514,7 +535,7 @@ export default async function handler(req: any, res: any) {
         body: JSON.stringify({
           model: "gpt-4.1-mini",
           temperature: 0.35,
-          max_tokens: 450,
+          max_tokens: 520,
           response_format: { type: "json_object" },
           messages: [
             { role: "system", content: system },

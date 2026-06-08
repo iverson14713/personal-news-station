@@ -465,6 +465,8 @@ const NEWS_MAX_AGE_MS = 2 * 24 * 60 * 60 * 1000;
 const NEWS_RSS_ITEM_SCAN = 280;
 /** 合併後最多顯示幾則 */
 const NEWS_LIST_MAX = 48;
+/** 首頁載入後預設勾選的新聞則數（供 AI 新聞稿與洞察） */
+const DEFAULT_HOME_SELECTED_COUNT = 10;
 /**
  * 選中主題數 ≥ 此值且無自訂關鍵字時，改為每主題各抓 RSS 再合併。
  * （一次用超長 OR 查 Google News 常只回極少筆或 URL 過長）
@@ -963,6 +965,7 @@ export default function App() {
       sentiment,
       hotReason,
       keywords: keywords.slice(0, 5),
+      controversies: keywords.slice(0, 3),
       recommendedNews: picked.slice(0, 3).map((n) => n.id),
     };
   }, [news]);
@@ -1038,7 +1041,8 @@ export default function App() {
           insight.sentiment !== "分歧") ||
         typeof insight.hotReason !== "string" ||
         !Array.isArray(insight.keywords) ||
-        !Array.isArray(insight.recommendedNews)
+        !Array.isArray(insight.recommendedNews) ||
+        (insight.controversies != null && !Array.isArray(insight.controversies))
       ) {
         setDailyInsight(buildDailyInsightFallback());
         return;
@@ -1048,6 +1052,9 @@ export default function App() {
         sentiment: insight.sentiment,
         hotReason: insight.hotReason.slice(0, 180),
         keywords: insight.keywords.filter((x) => typeof x === "string").slice(0, 5),
+        controversies: (insight.controversies ?? [])
+          .filter((x) => typeof x === "string")
+          .slice(0, 5),
         recommendedNews: insight.recommendedNews
           .filter((x) => typeof x === "string")
           .slice(0, 3),
@@ -1330,7 +1337,7 @@ export default function App() {
           source: row.source,
           pubDate: row.pubDate,
           description: row.description,
-          selected: parsedNews.length < 5,
+          selected: parsedNews.length < DEFAULT_HOME_SELECTED_COUNT,
           favorite: row.favorite,
         });
         if (parsedNews.length >= NEWS_LIST_MAX) break;

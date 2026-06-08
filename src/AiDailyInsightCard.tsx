@@ -8,8 +8,24 @@ export type AiDailyInsight = {
   sentiment: "偏正面" | "偏負面" | "中立" | "分歧";
   hotReason: string;
   keywords: string[];
+  controversies: string[];
   recommendedNews: string[];
 };
+
+function resolveInsightNewsItem(news: NewsItem[], ref: string): NewsItem | null {
+  const trimmed = ref.trim();
+  if (!trimmed) return null;
+  const byId = news.find((n) => n.id === trimmed);
+  if (byId) return byId;
+  const num = Number(trimmed);
+  if (!Number.isNaN(num) && Number.isFinite(num)) {
+    const oneBased = num >= 1 && num <= news.length ? news[num - 1] : null;
+    if (oneBased) return oneBased;
+    const zeroBased = num >= 0 && num < news.length ? news[num] : null;
+    if (zeroBased) return zeroBased;
+  }
+  return null;
+}
 
 export type AiDailyInsightCardProps = {
   isPro: boolean;
@@ -58,14 +74,21 @@ export function AiDailyInsightCard({
     insight?.hotReason ??
     (expanded ? "AI 洞察生成中或資料不足，請稍後再試。" : "");
   const keywordTags = insight?.keywords ?? [];
-  const recommendedIds = insight?.recommendedNews ?? [];
+  const controversyTags = insight?.controversies ?? [];
+  const recommendedRefs = insight?.recommendedNews ?? [];
 
   const recommendedNews = useMemo(() => {
-    return recommendedIds
-      .map((id) => news.find((n) => n.id === id) || null)
-      .filter((n): n is NewsItem => !!n)
-      .slice(0, 3);
-  }, [news, recommendedIds]);
+    const seen = new Set<string>();
+    const out: NewsItem[] = [];
+    for (const ref of recommendedRefs) {
+      const item = resolveInsightNewsItem(news, ref);
+      if (!item || seen.has(item.id)) continue;
+      seen.add(item.id);
+      out.push(item);
+      if (out.length >= 3) break;
+    }
+    return out;
+  }, [news, recommendedRefs]);
 
   const previewBlur = !isPro;
 
@@ -123,16 +146,29 @@ export function AiDailyInsightCard({
             </div>
 
             <div style={styles.block}>
-              <div style={styles.blockTitle}>今天值得注意</div>
+              <div style={styles.blockTitle}>今日最值得注意</div>
               <p style={styles.blockBody}>{hotReason}</p>
             </div>
 
+            {controversyTags.length > 0 && (
+              <div style={styles.blockCompact}>
+                <div style={styles.blockTitle}>主要爭議</div>
+                <div style={styles.tagRow}>
+                  {controversyTags.slice(0, 5).map((tag) => (
+                    <span key={`c-${tag}`} style={styles.controversyTag}>
+                      #{tag}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {keywordTags.length > 0 && (
-              <div style={styles.block}>
+              <div style={styles.blockCompact}>
                 <div style={styles.blockTitle}>熱門關鍵字</div>
                 <div style={styles.tagRow}>
                   {keywordTags.slice(0, 5).map((tag) => (
-                    <span key={tag} style={styles.tag}>
+                    <span key={`k-${tag}`} style={styles.tag}>
                       #{tag}
                     </span>
                   ))}
@@ -141,21 +177,22 @@ export function AiDailyInsightCard({
             )}
 
             {recommendedNews.length > 0 && (
-              <div style={styles.block}>
+              <div style={styles.blockCompact}>
                 <div style={styles.blockTitle}>AI 建議先看</div>
-                <ul style={styles.recoList}>
-                  {recommendedNews.map((item) => (
-                    <li key={item.id} style={styles.recoItem}>
-                      <button
-                        type="button"
-                        onClick={() => onOpenNewsLink(item.id)}
-                        style={styles.recoLink}
-                      >
-                        {item.title}
-                      </button>
-                    </li>
+                <div style={styles.recoList}>
+                  {recommendedNews.map((item, index) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => onOpenNewsLink(item.id)}
+                      style={styles.recoChip}
+                      title={item.title}
+                    >
+                      <span style={styles.recoIndex}>{index + 1}</span>
+                      <span style={styles.recoTitle}>{item.title}</span>
+                    </button>
                   ))}
-                </ul>
+                </div>
               </div>
             )}
           </>
@@ -225,7 +262,7 @@ const styles: Record<string, CSSProperties> = {
     transition: "max-height 0.22s ease",
   },
   panelExpanded: {
-    maxHeight: 420,
+    maxHeight: 460,
   },
   body: {
     marginTop: 8,
@@ -275,6 +312,9 @@ const styles: Record<string, CSSProperties> = {
   block: {
     marginTop: 8,
   },
+  blockCompact: {
+    marginTop: 6,
+  },
   blockTitle: {
     fontSize: 11,
     fontWeight: 700,
@@ -294,33 +334,61 @@ const styles: Record<string, CSSProperties> = {
   },
   tag: {
     fontSize: 11,
-    padding: "4px 8px",
+    padding: "3px 8px",
     borderRadius: "999px",
     background: "rgba(15,23,42,.9)",
     border: "1px solid rgba(129,140,248,.6)",
     color: "#E5E7EB",
   },
+  controversyTag: {
+    fontSize: 11,
+    padding: "3px 8px",
+    borderRadius: "999px",
+    background: "rgba(30,27,75,.55)",
+    border: "1px solid rgba(251,191,36,.45)",
+    color: "#FDE68A",
+  },
   recoList: {
-    listStyle: "none",
-    padding: 0,
-    margin: 0,
     display: "flex",
     flexDirection: "column",
     gap: 4,
   },
-  recoItem: {
-    margin: 0,
-  },
-  recoLink: {
+  recoChip: {
     width: "100%",
+    display: "flex",
+    alignItems: "flex-start",
+    gap: 8,
     textAlign: "left",
-    border: "none",
-    background: "transparent",
-    padding: "4px 0",
-    fontSize: 12,
-    color: "#BFDBFE",
-    textDecoration: "underline",
+    border: "1px solid rgba(96,165,250,.35)",
+    borderRadius: "10px",
+    background: "rgba(30,58,138,.25)",
+    padding: "6px 8px",
     cursor: "pointer",
+  },
+  recoIndex: {
+    flexShrink: 0,
+    width: 18,
+    height: 18,
+    borderRadius: "999px",
+    background: "rgba(59,130,246,.35)",
+    color: "#BFDBFE",
+    fontSize: 10,
+    fontWeight: 800,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 1,
+  },
+  recoTitle: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 12,
+    lineHeight: 1.35,
+    color: "#E2E8F0",
+    display: "-webkit-box",
+    WebkitLineClamp: 2,
+    WebkitBoxOrient: "vertical",
+    overflow: "hidden",
   },
   freeHint: {
     marginTop: 6,
