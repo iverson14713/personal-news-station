@@ -22,6 +22,8 @@ import {
 } from "./pro";
 import { parseAiSummaryContent, warnScriptQuality } from "./aiSummaryParse";
 import { TOKENS, shortVoiceLabel } from "./theme";
+import type { AiDailyInsight } from "./AiDailyInsightCard";
+import { AiDailyInsightCard } from "./AiDailyInsightCard";
 
 type Tab = "home" | "player" | "video" | "favorites" | "settings";
 
@@ -282,6 +284,22 @@ function readAdSenseClientId(): string {
 
 const ADSENSE_HOME_SLOT_ID = "0000000000";
 const ADSENSE_PLAYER_BANNER_SLOT_ID = "0000000000";
+
+function extractKeywordsFromTitles(titles: string[]): string[] {
+  const text = titles.join(" ");
+  const words = text
+    .split(/[\s、，,。.!?！？：:「」\-\(\)\[\]]+/)
+    .map((w) => w.trim())
+    .filter((w) => w.length >= 2 && w.length <= 12);
+  const freq = new Map<string, number>();
+  for (const w of words) {
+    freq.set(w, (freq.get(w) ?? 0) + 1);
+  }
+  return Array.from(freq.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([w]) => w);
+}
 
 function readOnboardingSeen(): boolean {
   try {
@@ -857,6 +875,8 @@ export default function App() {
   const [promoModalOpen, setPromoModalOpen] = useState(false);
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState(() => !readOnboardingSeen());
+  const [dailyInsight, setDailyInsight] = useState<AiDailyInsight | null>(null);
+  const [dailyInsightLoading, setDailyInsightLoading] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [splashOpen, setSplashOpen] = useState(() => !readSplashSeenSession());
   const [aiHistory, setAiHistory] = useState<AiHistoryEntry[]>(() => readAiHistory());
@@ -912,6 +932,34 @@ export default function App() {
   }, [proStatus]);
 
   const adSenseClientId = useMemo(() => readAdSenseClientId(), []);
+
+  const handleRequestDailyInsight = useCallback(() => {
+    if (dailyInsightLoading || dailyInsight) return;
+    if (news.length === 0) return;
+    setDailyInsightLoading(true);
+    try {
+      const titles = news.slice(0, 20).map((n) => n.title);
+      const keywords = extractKeywordsFromTitles(titles);
+      const recommendedIds = news.slice(0, 3).map((n) => n.id);
+      const attentionLevel =
+        news.length >= 12 ? "高" : news.length >= 6 ? "中" : "低";
+      const sentiment: AiDailyInsight["sentiment"] =
+        Math.random() < 0.33 ? "偏正面" : Math.random() < 0.5 ? "偏負面" : "中立";
+
+      const viralReason =
+        "今天的討論集中在少數幾個關鍵主題，建議先快速掃過重點新聞掌握大方向。";
+
+      setDailyInsight({
+        attentionLevel,
+        sentiment,
+        viralReason,
+        hotKeywords: keywords,
+        recommendedIds,
+      });
+    } finally {
+      setDailyInsightLoading(false);
+    }
+  }, [dailyInsight, dailyInsightLoading, news]);
 
   useEffect(() => {
     if (!adSenseClientId) return;
@@ -2199,6 +2247,22 @@ ${newsText}
                 setTab("player");
               }}
               loadingNews={loading}
+            />
+
+            <AiDailyInsightCard
+              isPro={isPro}
+              proStatus={proStatus}
+              news={news}
+              aiLoading={aiLoading}
+              insight={dailyInsight}
+              loadingInsight={dailyInsightLoading}
+              onRequestInsight={handleRequestDailyInsight}
+              onOpenProModal={openProUpgrade}
+              onOpenNewsLink={(id) => {
+                const item = news.find((n) => n.id === id);
+                if (!item) return;
+                window.open(item.link, "_blank", "noopener,noreferrer");
+              }}
             />
 
             <HomePageAdSlot isPro={isPro} />
