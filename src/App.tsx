@@ -152,6 +152,7 @@ function buildSummaryApiItems(
 
   return items.map((n) => {
     const row: Record<string, string> = {
+      id: n.id,
       title: n.title,
       source: n.source,
     };
@@ -284,6 +285,17 @@ function readAdSenseClientId(): string {
 
 const ADSENSE_HOME_SLOT_ID = "0000000000";
 const ADSENSE_PLAYER_BANNER_SLOT_ID = "0000000000";
+
+const AI_INSIGHT_CACHE_KEY = "pns_ai_daily_insight_v1";
+
+function buildDailyInsightFingerprint(items: NewsItem[]): string {
+  const base = [...items]
+    .slice(0, 20)
+    .map((n) => `${normalizeKey(n.title)}|${n.source.trim()}|${normalizeKey(n.description || "")}`)
+    .sort()
+    .join("\0");
+  return base;
+}
 
 function extractKeywordsFromTitles(titles: string[]): string[] {
   const text = titles.join(" ");
@@ -493,12 +505,14 @@ function aiSummaryCacheFingerprint(
 
 type SummaryApiPayload = {
   ok?: boolean;
+  kind?: string;
   script?: string;
   highlights?: AiHighlight[];
   jsonFallback?: boolean;
   duration?: number;
   error?: string;
   code?: string;
+  insight?: AiDailyInsight;
 };
 
 async function readSummaryApiPayload(
@@ -933,33 +947,145 @@ export default function App() {
 
   const adSenseClientId = useMemo(() => readAdSenseClientId(), []);
 
-  const handleRequestDailyInsight = useCallback(() => {
+  const buildDailyInsightFallback = useCallback((): AiDailyInsight => {
+    const picked = news.slice(0, 20);
+    const titles = picked.map((n) => n.title);
+    const keywords = extractKeywordsFromTitles(titles);
+    const attentionLevel: AiDailyInsight["attentionLevel"] =
+      picked.length >= 12 ? "高" : picked.length >= 6 ? "中" : "低";
+    const sentiment: AiDailyInsight["sentiment"] = "中立";
+    const lead = picked[0]?.title?.trim();
+    const hotReason =
+      (lead ? `今天值得注意的焦點包含「${lead}」等議題。` : "今天有多則重要事件值得快速掌握。") +
+      (keywords.length > 0 ? ` 熱門關鍵字：${keywords.slice(0, 3).join("、")}。` : "");
+    return {
+      attentionLevel,
+      sentiment,
+      hotReason,
+      keywords: keywords.slice(0, 5),
+      recommendedNews: picked.slice(0, 3).map((n) => n.id),
+    };
+  }, [news]);
+
+  const handleRequestDailyInsight = useCallback(async () => {
+    if (!isProActive(proStatus)) return;
     if (dailyInsightLoading || dailyInsight) return;
-    if (news.length === 0) return;
+    const picked = news.slice(0, 20);
+    if (picked.length === 0) return;
+
+    const q = readAiDailyQuota();
+    const today = todayYmdLocal();
+    const normalized = q.date === today ? q : { date: today, used: 0 };
+    if (q.date !== normalized.date || q.used !== normalized.used) {
+      writeAiDailyQuota(normalized);
+    }
+    setAiQuota(normalized);
+    const remaining = Math.max(0, getAiDailyLimit(proStatus) - normalized.used);
+    if (remaining <= 0) {
+      setAiQuotaExhaustedMessage();
+      return;
+    }
+
+    const fp = buildDailyInsightFingerprint(picked);
+    try {
+      const raw = localStorage.getItem(AI_INSIGHT_CACHE_KEY);
+      if (raw) {
+        const cached = JSON.parse(raw) as {
+          date?: string;
+          fp?: string;
+          insight?: AiDailyInsight;
+        };
+        if (cached.date === today && cached.fp === fp && cached.insight) {
+          setDailyInsight(cached.insight);
+          return;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+
     setDailyInsightLoading(true);
     try {
-      const titles = news.slice(0, 20).map((n) => n.title);
-      const keywords = extractKeywordsFromTitles(titles);
-      const recommendedIds = news.slice(0, 3).map((n) => n.id);
-      const attentionLevel =
-        news.length >= 12 ? "高" : news.length >= 6 ? "中" : "低";
-      const sentiment: AiDailyInsight["sentiment"] =
-        Math.random() < 0.33 ? "偏正面" : Math.random() < 0.5 ? "偏負面" : "中立";
-
-      const viralReason =
-        "今天的討論集中在少數幾個關鍵主題，建議先快速掃過重點新聞掌握大方向。";
-
-      setDailyInsight({
-        attentionLevel,
-        sentiment,
-        viralReason,
-        hotKeywords: keywords,
-        recommendedIds,
+      const res = await fetch("/api/summary", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: "dailyInsight",
+          items: buildSummaryApiItems(picked, {
+            keyword: customKeyword,
+            topics: selectedTopics,
+          }),
+        }),
       });
+      const { data, error: parseError } = await readSummaryApiPayload(res);
+      if (parseError || !data) {
+        setDailyInsight(buildDailyInsightFallback());
+        return;
+      }
+      if (!data.ok) {
+        setDailyInsight(buildDailyInsightFallback());
+        return;
+      }
+      const insight = data.insight;
+      if (
+        !insight ||
+        (insight.attentionLevel !== "低" &&
+          insight.attentionLevel !== "中" &&
+          insight.attentionLevel !== "高") ||
+        (insight.sentiment !== "偏正面" &&
+          insight.sentiment !== "偏負面" &&
+          insight.sentiment !== "中立" &&
+          insight.sentiment !== "分歧") ||
+        typeof insight.hotReason !== "string" ||
+        !Array.isArray(insight.keywords) ||
+        !Array.isArray(insight.recommendedNews)
+      ) {
+        setDailyInsight(buildDailyInsightFallback());
+        return;
+      }
+      const normalizedInsight: AiDailyInsight = {
+        attentionLevel: insight.attentionLevel,
+        sentiment: insight.sentiment,
+        hotReason: insight.hotReason.slice(0, 180),
+        keywords: insight.keywords.filter((x) => typeof x === "string").slice(0, 5),
+        recommendedNews: insight.recommendedNews
+          .filter((x) => typeof x === "string")
+          .slice(0, 3),
+      };
+      setDailyInsight(normalizedInsight);
+
+      try {
+        localStorage.setItem(
+          AI_INSIGHT_CACHE_KEY,
+          JSON.stringify({ date: today, fp, insight: normalizedInsight })
+        );
+      } catch {
+        /* ignore */
+      }
+
+      setAiQuota((prev) => {
+        const base = prev.date === today ? prev : { date: today, used: 0 };
+        const next = { date: today, used: base.used + 1 };
+        writeAiDailyQuota(next);
+        return next;
+      });
+    } catch {
+      setDailyInsight(buildDailyInsightFallback());
     } finally {
       setDailyInsightLoading(false);
     }
-  }, [dailyInsight, dailyInsightLoading, news]);
+  }, [
+    buildDailyInsightFallback,
+    customKeyword,
+    dailyInsight,
+    dailyInsightLoading,
+    getAiDailyLimit,
+    news,
+    proStatus,
+    selectedTopics,
+    setAiQuota,
+    setAiQuotaExhaustedMessage,
+  ]);
 
   useEffect(() => {
     if (!adSenseClientId) return;
@@ -2251,9 +2377,7 @@ ${newsText}
 
             <AiDailyInsightCard
               isPro={isPro}
-              proStatus={proStatus}
               news={news}
-              aiLoading={aiLoading}
               insight={dailyInsight}
               loadingInsight={dailyInsightLoading}
               onRequestInsight={handleRequestDailyInsight}

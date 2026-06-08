@@ -1,20 +1,19 @@
+import { useEffect, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
 
-import type { NewsItem, ProStatus } from "./App";
+import type { NewsItem } from "./App";
 
 export type AiDailyInsight = {
   attentionLevel: "低" | "中" | "高";
   sentiment: "偏正面" | "偏負面" | "中立" | "分歧";
-  viralReason: string;
-  hotKeywords: string[];
-  recommendedIds: string[];
+  hotReason: string;
+  keywords: string[];
+  recommendedNews: string[];
 };
 
 export type AiDailyInsightCardProps = {
   isPro: boolean;
-  proStatus: ProStatus;
   news: NewsItem[];
-  aiLoading: boolean;
   insight: AiDailyInsight | null;
   loadingInsight: boolean;
   onRequestInsight: () => void;
@@ -32,31 +31,41 @@ export function AiDailyInsightCard({
   onOpenNewsLink,
 }: AiDailyInsightCardProps) {
   const hasNews = news.length > 0;
+  const [expanded, setExpanded] = useState(false);
 
   const handleToggle = () => {
     if (!hasNews) return;
     if (!isPro) {
       onOpenProModal();
-      if (!insight) {
-        onRequestInsight();
-      }
+      setExpanded(true); // 允許看到模糊 preview，但不呼叫 API
       return;
     }
-    if (!insight && !loadingInsight) {
-      onRequestInsight();
-    }
+    setExpanded((prev) => !prev);
   };
+
+  useEffect(() => {
+    if (!isPro) return;
+    if (!expanded) return;
+    if (insight) return;
+    if (loadingInsight) return;
+    // 只在 Pro 展開時才觸發請求，避免首頁載入就耗用成本
+    onRequestInsight();
+  }, [expanded, insight, isPro, loadingInsight, onRequestInsight]);
 
   const attentionText = insight?.attentionLevel ?? "—";
   const sentimentText = insight?.sentiment ?? "—";
-  const viralReason = insight?.viralReason ?? "需要更多新聞才能提供洞察。";
-  const keywordTags = insight?.hotKeywords ?? [];
-  const recommendedIds = insight?.recommendedIds ?? [];
+  const hotReason =
+    insight?.hotReason ??
+    (expanded ? "AI 洞察生成中或資料不足，請稍後再試。" : "");
+  const keywordTags = insight?.keywords ?? [];
+  const recommendedIds = insight?.recommendedNews ?? [];
 
-  const recommendedNews = recommendedIds
-    .map((id) => news.find((n) => n.id === id) || null)
-    .filter((n): n is NewsItem => !!n)
-    .slice(0, 3);
+  const recommendedNews = useMemo(() => {
+    return recommendedIds
+      .map((id) => news.find((n) => n.id === id) || null)
+      .filter((n): n is NewsItem => !!n)
+      .slice(0, 3);
+  }, [news, recommendedIds]);
 
   const previewBlur = !isPro;
 
@@ -77,16 +86,25 @@ export function AiDailyInsightCard({
           </p>
         </div>
         <div style={styles.chevronArea} aria-hidden>
-          <span style={styles.chevron}>▼</span>
+          <span
+            style={{
+              ...styles.chevron,
+              transform: expanded ? "rotate(180deg)" : "rotate(0deg)",
+            }}
+          >
+            ▼
+          </span>
         </div>
       </button>
 
-      <div
-        style={{
-          ...styles.body,
-          ...(previewBlur ? styles.bodyBlurred : {}),
-        }}
-      >
+      <div style={{ ...styles.panel, ...(expanded ? styles.panelExpanded : {}) }}>
+        <div
+          style={{
+            ...styles.body,
+            ...(previewBlur ? styles.bodyBlurred : {}),
+            ...(expanded ? styles.bodyExpanded : {}),
+          }}
+        >
         {loadingInsight && (
           <div style={styles.loadingRow}>AI 分析中，請稍候…</div>
         )}
@@ -105,8 +123,8 @@ export function AiDailyInsightCard({
             </div>
 
             <div style={styles.block}>
-              <div style={styles.blockTitle}>爆紅原因</div>
-              <p style={styles.blockBody}>{viralReason}</p>
+              <div style={styles.blockTitle}>今天值得注意</div>
+              <p style={styles.blockBody}>{hotReason}</p>
             </div>
 
             {keywordTags.length > 0 && (
@@ -142,6 +160,7 @@ export function AiDailyInsightCard({
             )}
           </>
         )}
+        </div>
       </div>
 
       {!isPro && (
@@ -198,6 +217,15 @@ const styles: Record<string, CSSProperties> = {
   chevron: {
     fontSize: 16,
     color: "#BFDBFE",
+    transition: "transform 0.18s ease",
+  },
+  panel: {
+    maxHeight: 0,
+    overflow: "hidden",
+    transition: "max-height 0.22s ease",
+  },
+  panelExpanded: {
+    maxHeight: 420,
   },
   body: {
     marginTop: 8,
@@ -206,6 +234,13 @@ const styles: Record<string, CSSProperties> = {
     background: "rgba(15,23,42,.9)",
     border: "1px solid rgba(148,163,184,.45)",
     overflow: "hidden",
+    opacity: 0,
+    transform: "translateY(-4px)",
+    transition: "opacity 0.18s ease, transform 0.18s ease",
+  },
+  bodyExpanded: {
+    opacity: 1,
+    transform: "translateY(0px)",
   },
   bodyBlurred: {
     filter: "blur(3px)",

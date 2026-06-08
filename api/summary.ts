@@ -2,6 +2,7 @@ const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
 const OPENAI_TIMEOUT_MS = 50000;
 
 type SummaryItem = {
+  id?: string;
   title: string;
   source: string;
   summary: string;
@@ -69,6 +70,7 @@ const OUTPUT_SELF_CHECK = `【輸出前自我檢查】
 function parseSummaryItem(o: Record<string, unknown>): SummaryItem | null {
   const title = String(o?.title ?? "").trim().slice(0, 500);
   if (!title) return null;
+  const id = String(o?.id ?? "").trim().slice(0, 120);
   const summary = String(o?.summary ?? o?.description ?? "")
     .trim()
     .slice(0, 800);
@@ -78,6 +80,7 @@ function parseSummaryItem(o: Record<string, unknown>): SummaryItem | null {
     .slice(0, 80);
   const topic = String(o?.topic ?? o?.keyword ?? "").trim().slice(0, 120);
   return {
+    id: id || undefined,
     title,
     source: String(o?.source ?? "").trim().slice(0, 200),
     summary,
@@ -96,6 +99,73 @@ function formatNewsListForPrompt(items: SummaryItem[]): string {
       if (it.url) lines.push(`連結：${it.url}`);
       if (it.publishedAt) lines.push(`時間：${it.publishedAt}`);
       if (it.topic) lines.push(`相關主題／關鍵字：${it.topic}`);
+      return lines.join("\n");
+    })
+    .join("\n\n");
+}
+
+type DailyInsightOut = {
+  attentionLevel: "低" | "中" | "高";
+  sentiment: "偏正面" | "偏負面" | "中立" | "分歧";
+  hotReason: string;
+  keywords: string[];
+  recommendedNews: string[];
+};
+
+function coerceDailyInsight(raw: unknown): DailyInsightOut | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  const attention = o.attentionLevel;
+  const sentiment = o.sentiment;
+  const hotReason =
+    typeof o.hotReason === "string" ? o.hotReason.trim().slice(0, 220) : "";
+  const attentionLevel =
+    attention === "低" || attention === "中" || attention === "高" ? attention : null;
+  const sentimentLevel =
+    sentiment === "偏正面" || sentiment === "偏負面" || sentiment === "中立" || sentiment === "分歧"
+      ? sentiment
+      : null;
+
+  const keywordsRaw = o.keywords;
+  const keywords = Array.isArray(keywordsRaw)
+    ? keywordsRaw
+        .filter((x) => typeof x === "string")
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .slice(0, 5)
+    : [];
+
+  const recoRaw = o.recommendedNews;
+  const recommendedNews = Array.isArray(recoRaw)
+    ? recoRaw
+        .map((x) => (typeof x === "string" ? x : typeof x === "number" ? String(x) : ""))
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .slice(0, 3)
+    : [];
+
+  if (!attentionLevel || !sentimentLevel || !hotReason) return null;
+  return {
+    attentionLevel,
+    sentiment: sentimentLevel,
+    hotReason,
+    keywords,
+    recommendedNews,
+  };
+}
+
+function formatNewsListForInsight(items: SummaryItem[]): string {
+  return items
+    .map((it, i) => {
+      const lines = [
+        `新聞 ${i + 1}：`,
+        it.id ? `id：${it.id}` : "",
+        `標題：${it.title}`,
+        `來源：${it.source}`,
+      ].filter(Boolean);
+      if (it.summary) lines.push(`摘要：${it.summary}`);
+      else lines.push("摘要：（無）");
+      if (it.url) lines.push(`連結：${it.url}`);
       return lines.join("\n");
     })
     .join("\n\n");
@@ -387,12 +457,14 @@ export default async function handler(req: any, res: any) {
   }
 
   const body = parseBody(req);
+  const kind = String(body.kind ?? "").trim();
   const duration = normalizeDuration(body.duration);
   const deepMode = body.deepMode === true || body.mode === "deep";
   const rawItems = body.items;
+  const itemLimit = kind === "dailyInsight" ? 20 : 5;
   const items: SummaryItem[] = Array.isArray(rawItems)
     ? rawItems
-        .slice(0, 5)
+        .slice(0, itemLimit)
         .map((x: unknown) => parseSummaryItem(x as Record<string, unknown>))
         .filter((x): x is SummaryItem => x !== null)
     : [];
@@ -405,6 +477,113 @@ export default async function handler(req: any, res: any) {
   }
 
   const n = items.length;
+
+  if (kind === "dailyInsight") {
+    const listText = formatNewsListForInsight(items);
+    const system = `你是「AI 個人新聞台」的洞察整理助理。
+使用者提供今日新聞（含 id、標題、摘要、來源、連結）。請根據輸入內容，給出今日整體洞察。
+輸出必須是 JSON（不要 markdown、不要任何多餘文字），且固定結構如下：
+{
+  "attentionLevel": "低" | "中" | "高",
+  "sentiment": "偏正面" | "偏負面" | "中立" | "分歧",
+  "hotReason": "一句話說明今天為什麼值得注意",
+  "keywords": ["關鍵字1", "關鍵字2", "關鍵字3"],
+  "recommendedNews": ["新聞id或index"]
+}
+
+規則：
+- attentionLevel：以「事件重要性 + 討論熱度」判斷，不要只看新聞數量。
+- sentiment：若正負並存或爭議大，用「分歧」。
+- hotReason：一句話（20～45 字為佳），不要口號，不要投資建議。
+- keywords：3～5 個、以名詞為主、每個 2～10 字。
+- recommendedNews：回傳 1～3 個「id」（若缺 id 才能用 index）；優先回傳 id。`;
+
+    const userMsg = `以下是今日新聞（最多 20 則）：\n\n${listText}`;
+
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const controller = new AbortController();
+    timeoutId = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
+    try {
+      const response = await fetch(OPENAI_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: "gpt-4.1-mini",
+          temperature: 0.35,
+          max_tokens: 450,
+          response_format: { type: "json_object" },
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: userMsg },
+          ],
+        }),
+      });
+
+      const rawOpenAi = await response.text();
+      let data: Record<string, unknown> = {};
+      try {
+        data = JSON.parse(rawOpenAi) as Record<string, unknown>;
+      } catch {
+        return sendJson(res, {
+          ok: false,
+          code: "OPENAI",
+          error: "AI 服務回傳異常，請稍後再試",
+        });
+      }
+
+      if (!response.ok) {
+        const errObj = data?.error as Record<string, unknown> | undefined;
+        const msg =
+          (typeof errObj?.message === "string" && errObj.message) ||
+          `OpenAI 請求失敗（HTTP ${response.status}）`;
+        return sendJson(res, { ok: false, error: msg });
+      }
+
+      const choices = data?.choices as unknown[] | undefined;
+      const first = choices?.[0] as Record<string, unknown> | undefined;
+      const message = first?.message as Record<string, unknown> | undefined;
+      const content =
+        typeof message?.content === "string" ? message.content.trim() : "";
+      if (!content) {
+        return sendJson(res, { ok: false, error: "AI 未回傳有效內容，請稍後再試" });
+      }
+
+      let parsed: unknown = null;
+      try {
+        parsed = JSON.parse(content) as unknown;
+      } catch {
+        return sendJson(res, { ok: false, error: "AI 回傳格式錯誤，請稍後再試" });
+      }
+
+      const insight = coerceDailyInsight(parsed);
+      if (!insight) {
+        return sendJson(res, { ok: false, error: "AI 回傳內容不完整，請稍後再試" });
+      }
+
+      return sendJson(res, { ok: true, kind: "dailyInsight", insight });
+    } catch (e) {
+      const aborted =
+        e instanceof Error &&
+        (e.name === "AbortError" || /aborted/i.test(e.message));
+      const msg = aborted
+        ? "AI 產生逾時，請稍後再試"
+        : e instanceof Error
+          ? e.message
+          : "連線或解析失敗";
+      return sendJson(res, {
+        ok: false,
+        code: aborted ? "TIMEOUT" : "OPENAI",
+        error: msg,
+      });
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
+  }
+
   const diveCount = deepDiveCount(duration, n);
   const alloc = buildDynamicAllocation(duration, n, deepMode);
   const financeDisclaimer = buildFinanceDisclaimerBlock(hasFinanceRelatedNews(items));
