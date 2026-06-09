@@ -226,12 +226,7 @@ export function AiDailyInsightCard({
   const showRecommendedSection = recommendedRefs.length > 0;
 
   return (
-    <section
-      style={{
-        ...styles.wrap,
-        ...(expanded ? styles.wrapExpanded : {}),
-      }}
-    >
+    <section style={styles.wrap}>
       <button
         type="button"
         style={styles.headerButton}
@@ -283,16 +278,18 @@ export function AiDailyInsightCard({
                 </div>
               </div>
 
-              <div style={styles.block}>
-                <div style={styles.blockTitle}>今日最值得注意</div>
-                <p style={styles.blockBody}>{hotReason}</p>
+              <div style={styles.leadBlock}>
+                <div style={styles.leadTitle}>今日最值得注意</div>
+                <p style={styles.leadBody}>{hotReason}</p>
               </div>
 
               {controversyTags.length > 0 && (
                 <div style={styles.blockCompact}>
-                  <div style={styles.sectionHeadTitle}>主要爭議</div>
-                  <div style={styles.tagRow}>
-                    {controversyTags.slice(0, 5).map((tag) => (
+                  <div style={styles.sectionHeadTitle}>
+                    主要爭議 ({Math.min(controversyTags.length, 3)})
+                  </div>
+                  <div style={styles.controversyTagRow}>
+                    {controversyTags.slice(0, 3).map((tag) => (
                       <span key={`c-${tag}`} style={styles.controversyTag}>
                         #{tag}
                       </span>
@@ -303,9 +300,11 @@ export function AiDailyInsightCard({
 
               {keywordTags.length > 0 && (
                 <div style={styles.blockCompact}>
-                  <div style={styles.sectionHeadTitle}>熱門關鍵字</div>
-                  <div style={styles.tagRow}>
-                    {keywordTags.slice(0, 5).map((tag) => (
+                  <div style={styles.sectionHeadTitle}>
+                    熱門關鍵字 ({Math.min(keywordTags.length, 3)})
+                  </div>
+                  <div style={styles.keywordTagRow}>
+                    {keywordTags.slice(0, 3).map((tag) => (
                       <span key={`k-${tag}`} style={styles.tag}>
                         #{tag}
                       </span>
@@ -357,10 +356,7 @@ export function AiDailyInsightCard({
 const styles: Record<string, CSSProperties> = {
   wrap: {
     marginTop: 12,
-    marginBottom: 8,
-  },
-  wrapExpanded: {
-    paddingBottom: "calc(130px + env(safe-area-inset-bottom, 0px))",
+    marginBottom: 4,
   },
   headerButton: {
     width: "100%",
@@ -410,12 +406,12 @@ const styles: Record<string, CSSProperties> = {
     transition: "max-height 0.22s ease",
   },
   panelExpanded: {
-    maxHeight: 1200,
+    maxHeight: 2000,
     overflow: "visible",
   },
   body: {
-    marginTop: 8,
-    padding: "10px 12px",
+    marginTop: 6,
+    padding: "10px 12px 8px",
     borderRadius: "16px",
     background: "rgba(15,23,42,.9)",
     border: "1px solid rgba(148,163,184,.45)",
@@ -439,7 +435,7 @@ const styles: Record<string, CSSProperties> = {
     display: "grid",
     gridTemplateColumns: "1fr 1fr",
     gap: 8,
-    marginBottom: 8,
+    marginBottom: 6,
   },
   metricCard: {
     borderRadius: "12px",
@@ -458,35 +454,45 @@ const styles: Record<string, CSSProperties> = {
     fontWeight: 800,
     color: "#E5E7EB",
   },
-  block: {
-    marginTop: 8,
+  leadBlock: {
+    marginTop: 4,
+    marginBottom: 4,
+    paddingBottom: 8,
+    borderBottom: "1px solid rgba(148,163,184,.18)",
+  },
+  leadTitle: {
+    fontSize: 22,
+    fontWeight: 800,
+    color: "#F8FAFC",
+    marginBottom: 6,
+    lineHeight: 1.2,
+  },
+  leadBody: {
+    fontSize: 17,
+    lineHeight: 1.55,
+    color: "#E2E8F0",
+    margin: 0,
   },
   blockCompact: {
-    marginTop: 6,
-  },
-  blockTitle: {
-    fontSize: 11,
-    fontWeight: 700,
-    color: "#94A3B8",
-    marginBottom: 4,
+    marginTop: 5,
   },
   sectionHeadTitle: {
     fontSize: 17,
     fontWeight: 800,
     color: "#CBD5E1",
-    marginBottom: 6,
+    marginBottom: 5,
     lineHeight: 1.25,
   },
-  blockBody: {
-    fontSize: 12,
-    lineHeight: 1.45,
-    color: "#E5E7EB",
-    margin: 0,
-  },
-  tagRow: {
+  controversyTagRow: {
     display: "flex",
-    flexWrap: "wrap",
+    flexDirection: "column",
+    gap: 6,
+  },
+  keywordTagRow: {
+    display: "flex",
+    flexWrap: "nowrap",
     gap: 8,
+    overflowX: "auto",
   },
   tag: {
     fontSize: 15,
@@ -496,20 +502,23 @@ const styles: Record<string, CSSProperties> = {
     border: "1px solid rgba(129,140,248,.6)",
     color: "#E5E7EB",
     lineHeight: 1.25,
+    flexShrink: 0,
   },
   controversyTag: {
     fontSize: 15,
-    padding: "6px 12px",
-    borderRadius: "999px",
+    padding: "7px 12px",
+    borderRadius: "10px",
     background: "rgba(30,27,75,.55)",
     border: "1px solid rgba(251,191,36,.45)",
     color: "#FDE68A",
-    lineHeight: 1.25,
+    lineHeight: 1.3,
+    width: "100%",
+    boxSizing: "border-box",
   },
   recoList: {
     display: "flex",
     flexDirection: "column",
-    gap: 6,
+    gap: 4,
   },
   recoChip: {
     width: "100%",
@@ -545,8 +554,8 @@ const styles: Record<string, CSSProperties> = {
     gap: 2,
   },
   recoTitle: {
-    fontSize: 16,
-    lineHeight: 1.4,
+    fontSize: 17,
+    lineHeight: 1.38,
     color: "#E2E8F0",
     display: "-webkit-box",
     WebkitLineClamp: 2,
@@ -554,7 +563,7 @@ const styles: Record<string, CSSProperties> = {
     overflow: "hidden",
   },
   recoReason: {
-    fontSize: 14,
+    fontSize: 15,
     lineHeight: 1.35,
     color: "#93C5FD",
   },

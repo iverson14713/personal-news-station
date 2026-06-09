@@ -2308,7 +2308,9 @@ ${newsText}
           ...styles.phone,
           paddingBottom: showFloatingPlayer
             ? "calc(132px + env(safe-area-inset-bottom, 0px))"
-            : styles.phone.paddingBottom,
+            : tab === "home"
+              ? "calc(120px + env(safe-area-inset-bottom, 0px))"
+              : styles.phone.paddingBottom,
         }}
       >
         {tab === "home" ? (
