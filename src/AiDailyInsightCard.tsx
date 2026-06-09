@@ -226,7 +226,12 @@ export function AiDailyInsightCard({
   const showRecommendedSection = recommendedRefs.length > 0;
 
   return (
-    <section style={styles.wrap}>
+    <section
+      style={{
+        ...styles.wrap,
+        ...(expanded ? styles.wrapExpanded : {}),
+      }}
+    >
       <button
         type="button"
         style={styles.headerButton}
@@ -285,7 +290,7 @@ export function AiDailyInsightCard({
 
               {controversyTags.length > 0 && (
                 <div style={styles.blockCompact}>
-                  <div style={styles.blockTitle}>主要爭議</div>
+                  <div style={styles.sectionHeadTitle}>主要爭議</div>
                   <div style={styles.tagRow}>
                     {controversyTags.slice(0, 5).map((tag) => (
                       <span key={`c-${tag}`} style={styles.controversyTag}>
@@ -298,7 +303,7 @@ export function AiDailyInsightCard({
 
               {keywordTags.length > 0 && (
                 <div style={styles.blockCompact}>
-                  <div style={styles.blockTitle}>熱門關鍵字</div>
+                  <div style={styles.sectionHeadTitle}>熱門關鍵字</div>
                   <div style={styles.tagRow}>
                     {keywordTags.slice(0, 5).map((tag) => (
                       <span key={`k-${tag}`} style={styles.tag}>
@@ -311,7 +316,7 @@ export function AiDailyInsightCard({
 
               {showRecommendedSection && (
                 <div style={styles.blockCompact}>
-                  <div style={styles.blockTitle}>AI 建議先看</div>
+                  <div style={styles.sectionHeadTitle}>AI 建議先看</div>
                   <div style={styles.recoList}>
                     {recommendedItems.map(({ title, reason, matchedItem }, index) => (
                       <button
@@ -353,6 +358,9 @@ const styles: Record<string, CSSProperties> = {
   wrap: {
     marginTop: 12,
     marginBottom: 8,
+  },
+  wrapExpanded: {
+    paddingBottom: "calc(130px + env(safe-area-inset-bottom, 0px))",
   },
   headerButton: {
     width: "100%",
@@ -402,7 +410,8 @@ const styles: Record<string, CSSProperties> = {
     transition: "max-height 0.22s ease",
   },
   panelExpanded: {
-    maxHeight: 500,
+    maxHeight: 1200,
+    overflow: "visible",
   },
   body: {
     marginTop: 8,
@@ -410,7 +419,7 @@ const styles: Record<string, CSSProperties> = {
     borderRadius: "16px",
     background: "rgba(15,23,42,.9)",
     border: "1px solid rgba(148,163,184,.45)",
-    overflow: "hidden",
+    overflow: "visible",
     opacity: 0,
     transform: "translateY(-4px)",
     transition: "opacity 0.18s ease, transform 0.18s ease",
@@ -461,6 +470,13 @@ const styles: Record<string, CSSProperties> = {
     color: "#94A3B8",
     marginBottom: 4,
   },
+  sectionHeadTitle: {
+    fontSize: 17,
+    fontWeight: 800,
+    color: "#CBD5E1",
+    marginBottom: 6,
+    lineHeight: 1.25,
+  },
   blockBody: {
     fontSize: 12,
     lineHeight: 1.45,
@@ -470,54 +486,56 @@ const styles: Record<string, CSSProperties> = {
   tagRow: {
     display: "flex",
     flexWrap: "wrap",
-    gap: 6,
+    gap: 8,
   },
   tag: {
-    fontSize: 11,
-    padding: "3px 8px",
+    fontSize: 15,
+    padding: "6px 12px",
     borderRadius: "999px",
     background: "rgba(15,23,42,.9)",
     border: "1px solid rgba(129,140,248,.6)",
     color: "#E5E7EB",
+    lineHeight: 1.25,
   },
   controversyTag: {
-    fontSize: 11,
-    padding: "3px 8px",
+    fontSize: 15,
+    padding: "6px 12px",
     borderRadius: "999px",
     background: "rgba(30,27,75,.55)",
     border: "1px solid rgba(251,191,36,.45)",
     color: "#FDE68A",
+    lineHeight: 1.25,
   },
   recoList: {
     display: "flex",
     flexDirection: "column",
-    gap: 4,
+    gap: 6,
   },
   recoChip: {
     width: "100%",
     display: "flex",
     alignItems: "flex-start",
-    gap: 8,
+    gap: 10,
     textAlign: "left",
     border: "1px solid rgba(96,165,250,.35)",
     borderRadius: "10px",
     background: "rgba(30,58,138,.25)",
-    padding: "6px 8px",
+    padding: "8px 10px",
     cursor: "pointer",
   },
   recoIndex: {
     flexShrink: 0,
-    width: 18,
-    height: 18,
+    width: 22,
+    height: 22,
     borderRadius: "999px",
     background: "rgba(59,130,246,.35)",
     color: "#BFDBFE",
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: 800,
     display: "inline-flex",
     alignItems: "center",
     justifyContent: "center",
-    marginTop: 1,
+    marginTop: 2,
   },
   recoTextCol: {
     flex: 1,
@@ -527,8 +545,8 @@ const styles: Record<string, CSSProperties> = {
     gap: 2,
   },
   recoTitle: {
-    fontSize: 12,
-    lineHeight: 1.35,
+    fontSize: 16,
+    lineHeight: 1.4,
     color: "#E2E8F0",
     display: "-webkit-box",
     WebkitLineClamp: 2,
@@ -536,8 +554,8 @@ const styles: Record<string, CSSProperties> = {
     overflow: "hidden",
   },
   recoReason: {
-    fontSize: 10,
-    lineHeight: 1.3,
+    fontSize: 14,
+    lineHeight: 1.35,
     color: "#93C5FD",
   },
   freeHint: {
