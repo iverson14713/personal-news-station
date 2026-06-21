@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
 
-import type { NewsItem } from "./App";
+import type { NewsItem } from "./newsFeed";
 
 export type AiDailyInsightRecommended = {
   title: string;
@@ -15,6 +15,15 @@ export type AiDailyInsight = {
   keywords: string[];
   controversies: string[];
   recommendedNews: AiDailyInsightRecommended[];
+};
+
+const FREE_INSIGHT_PREVIEW: AiDailyInsight = {
+  attentionLevel: "中",
+  sentiment: "中立",
+  hotReason: "今日多則重要事件交織，市場與輿論關注度升溫。",
+  keywords: ["國際", "財經", "科技"],
+  controversies: ["政策爭議", "市場分歧"],
+  recommendedNews: [{ title: "示例：今日頭條新聞標題", reason: "值得優先關注" }],
 };
 
 export type RecommendedDisplayItem = {
@@ -184,14 +193,17 @@ export function AiDailyInsightCard({
     onRequestInsight();
   }, [expanded, insight, isPro, loadingInsight, onRequestInsight]);
 
-  const attentionText = insight?.attentionLevel ?? "—";
-  const sentimentText = insight?.sentiment ?? "—";
+  const displayInsight =
+    insight ?? (!isPro && expanded ? FREE_INSIGHT_PREVIEW : null);
+
+  const attentionText = displayInsight?.attentionLevel ?? "—";
+  const sentimentText = displayInsight?.sentiment ?? "—";
   const hotReason =
-    insight?.hotReason ??
+    displayInsight?.hotReason ??
     (expanded ? "AI 洞察生成中或資料不足，請稍後再試。" : "");
-  const keywordTags = insight?.keywords ?? [];
-  const controversyTags = insight?.controversies ?? [];
-  const recommendedRefs = insight?.recommendedNews ?? [];
+  const keywordTags = displayInsight?.keywords ?? [];
+  const controversyTags = displayInsight?.controversies ?? [];
+  const recommendedRefs = displayInsight?.recommendedNews ?? [];
 
   const recommendedItems = useMemo((): RecommendedDisplayItem[] => {
     console.log("[AI Insight] recommendedNews from AI:", recommendedRefs);
@@ -346,7 +358,7 @@ export function AiDailyInsightCard({
 
       {!isPro && (
         <div style={styles.freeHint}>
-          升級 Pro 可解鎖完整 AI 洞察，現在點擊可試看模糊預覽。
+          升級 Pro 可解鎖完整 AI 今日洞察；現在點擊可試看模糊預覽。
         </div>
       )}
     </section>

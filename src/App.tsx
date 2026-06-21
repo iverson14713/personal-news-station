@@ -2,22 +2,25 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { Headphones, Home, Settings, Star } from "lucide-react";
 import {
-  AI_DAILY_LIMIT_PRO,
   canAddCustomKeyword,
   canAddFavorite,
   canAddTopic,
+  canUseDailyInsight,
   canUseDeepMode,
   canUseFiveMinuteScript,
+  clampTrackingToPlan,
   filterHistoryByPlan,
   formatProExpiresAt,
   getAiDailyLimit,
   getPlanLimits,
   getProStatus,
+  getTotalTrackingCount,
   isProActive,
   proSourceLabel,
   redeemPromoCode,
   resetProTestState,
   syncProDebugModeFromUrl,
+  isProDebugToolsVisible,
   type ProStatus,
 } from "./pro";
 import { parseAiSummaryContent, warnScriptQuality } from "./aiSummaryParse";
@@ -28,14 +31,32 @@ import {
   findClosestNewsByTitle,
   normalizeDailyInsight,
 } from "./AiDailyInsightCard";
+import { InternalPromotionBanner } from "./InternalPromotionBanner";
+import { restorePurchases } from "./iapRestore";
+import {
+  buildActiveNewsFeedSources,
+  buildSelectedTopicSummary,
+  mergeTopicNewsFeeds,
+  normalizeNewsKey,
+  parseNewsRssXml,
+  type NewsFeedSource,
+  type NewsItem,
+  type TopicNewsSection,
+} from "./newsFeed";
+import {
+  getTopicSectionDomId,
+  TopicQuickNavBar,
+} from "./TopicQuickNavBar";
+import { TestPlanModals } from "./TestPlanModals";
+import {
+  ONBOARDING_TOPIC_PICK_COUNT,
+  readOnboardingCompleted,
+  TopicOnboardingScreen,
+  writeOnboardingCompleted,
+} from "./TopicOnboardingScreen";
+import { getEffectivePlan } from "./testPlan";
 
 type Tab = "home" | "player" | "video" | "favorites" | "settings";
-
-declare global {
-  interface Window {
-    adsbygoogle?: unknown[];
-  }
-}
 
 /**
  * 設為 `true` 可再次顯示底部「影音」Tab 與影音分頁。
@@ -43,17 +64,6 @@ declare global {
  * 目前因影音 fallback 品質不穩，先關閉以維持產品專業感。
  */
 const ENABLE_VIDEO_NEWS_UI = false;
-
-type NewsItem = {
-  id: string;
-  title: string;
-  link: string;
-  source: string;
-  pubDate: string;
-  description: string;
-  selected: boolean;
-  favorite: boolean;
-};
 
 type AiDuration = 1 | 3 | 5;
 
@@ -125,22 +135,8 @@ const topics: Topic[] = [
   { label: "遊戲", query: "遊戲 OR Steam OR Switch OR PS5 OR 電競", icon: "🎮" },
 ];
 
-function cleanTitle(title: string) {
-  return title.replace(/\s-\s.*$/, "").trim();
-}
-
-function stripHtmlToText(html: string): string {
-  if (!html) return "";
-  return html
-    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, "$1")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/\s+/g, " ")
-    .trim();
+function normalizeKey(title: string) {
+  return normalizeNewsKey(title);
 }
 
 /** 傳入 summary API 的新聞欄位（含摘要，避免 AI 模糊改寫人名） */
@@ -164,7 +160,9 @@ function buildSummaryApiItems(
     if (summary) row.summary = summary.slice(0, 800);
     if (n.link) row.url = n.link;
     if (n.pubDate) row.publishedAt = n.pubDate;
-    if (topicHint) row.topic = topicHint;
+    const itemTopic =
+      n.matchedTopics.length > 0 ? n.matchedTopics.join("、") : n.topic || topicHint;
+    if (itemTopic) row.topic = itemTopic;
     return row;
   });
 }
@@ -211,21 +209,22 @@ type UpgradeModalKind =
   | "keyword"
   | "deep";
 
-const DEFAULT_TOPICS = ["NBA", "MLB", "大谷翔平", "Curry", "BTC"];
+const FREE_DEFAULT_TOPICS = ["NBA", "MLB", "BTC"];
+const PRO_DEFAULT_TOPICS = ["NBA", "MLB", "大谷翔平", "Curry", "BTC"];
 
 function readSelectedTopics(): string[] {
   try {
     const raw = localStorage.getItem(SELECTED_TOPICS_KEY);
-    if (!raw) return DEFAULT_TOPICS;
+    if (!raw) return FREE_DEFAULT_TOPICS;
     const arr = JSON.parse(raw) as unknown;
-    if (!Array.isArray(arr)) return DEFAULT_TOPICS;
+    if (!Array.isArray(arr)) return FREE_DEFAULT_TOPICS;
     const cleaned = arr
       .filter((x): x is string => typeof x === "string" && x.trim().length > 0)
       .map((s) => s.trim());
     // 避免空陣列造成首頁無內容
-    return cleaned.length > 0 ? cleaned : DEFAULT_TOPICS;
+    return cleaned.length > 0 ? cleaned : FREE_DEFAULT_TOPICS;
   } catch {
-    return DEFAULT_TOPICS;
+    return FREE_DEFAULT_TOPICS;
   }
 }
 
@@ -275,20 +274,6 @@ function writeSavedCustomKeywords(list: string[]) {
     /* ignore */
   }
 }
-
-function readAdSenseClientId(): string {
-  try {
-    const v = (import.meta as unknown as { env?: Record<string, unknown> })?.env?.[
-      "VITE_GOOGLE_ADSENSE_CLIENT_ID"
-    ];
-    return typeof v === "string" ? v.trim() : "";
-  } catch {
-    return "";
-  }
-}
-
-const ADSENSE_HOME_SLOT_ID = "0000000000";
-const ADSENSE_PLAYER_BANNER_SLOT_ID = "0000000000";
 
 const AI_INSIGHT_CACHE_KEY = "pns_ai_daily_insight_v2";
 const AI_INSIGHT_CACHE_KEY_LEGACY = "pns_ai_daily_insight_v1";
@@ -460,40 +445,6 @@ function formatRemainingTime(ms: number): string {
   return m > 0 ? `剩餘 ${m}:${String(s).padStart(2, "0")}` : `剩餘 ${sec} 秒`;
 }
 
-function normalizeKey(title: string) {
-  return title.replace(/[，。！？、\s\-｜|:：]/g, "").slice(0, 28);
-}
-
-/** 只顯示此時間內的新聞（預設 48 小時＝不含兩天前更早的稿件） */
-const NEWS_MAX_AGE_MS = 2 * 24 * 60 * 60 * 1000;
-/** 多抓一些 RSS 條目再過濾日期，避免過濾後筆數太少 */
-const NEWS_RSS_ITEM_SCAN = 280;
-/** 合併後最多顯示幾則 */
-const NEWS_LIST_MAX = 48;
-/** 首頁載入後預設勾選的新聞則數（供 AI 新聞稿與洞察） */
-const DEFAULT_HOME_SELECTED_COUNT = 10;
-/**
- * 選中主題數 ≥ 此值且無自訂關鍵字時，改為每主題各抓 RSS 再合併。
- * （一次用超長 OR 查 Google News 常只回極少筆或 URL 過長）
- */
-const NEWS_MULTI_TOPIC_MIN = 4;
-/** 多主題模式下，每個主題最多先取幾則 RSS item 再合併過濾 */
-const NEWS_PER_TOPIC_ITEM_SCAN = 130;
-
-function parseNewsPubDate(raw: string | null | undefined): Date | null {
-  if (!raw?.trim()) return null;
-  const d = new Date(raw.trim());
-  return Number.isNaN(d.getTime()) ? null : d;
-}
-
-function isNewsFreshEnough(pubDateRaw: string, nowMs: number): boolean {
-  const d = parseNewsPubDate(pubDateRaw);
-  if (!d) return false;
-  const age = nowMs - d.getTime();
-  return age >= 0 && age <= NEWS_MAX_AGE_MS;
-}
-
-/** 已選新聞（最多 5 則）+ 稿長 快取用 fingerprint */
 function aiSummaryCacheFingerprint(
   items: NewsItem[],
   duration: AiDuration,
@@ -845,9 +796,12 @@ async function parseVideosApiResponse(res: Response): Promise<
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("home");
-  const [selectedTopics, setSelectedTopics] = useState<string[]>(readSelectedTopics);
+  const [selectedTopics, setSelectedTopics] = useState<string[]>(() =>
+    readOnboardingCompleted() ? readSelectedTopics() : []
+  );
   const [customKeyword, setCustomKeyword] = useState(readCustomKeyword);
   const [news, setNews] = useState<NewsItem[]>([]);
+  const [topicNewsSections, setTopicNewsSections] = useState<TopicNewsSection[]>([]);
   const [videos, setVideos] = useState<VideoItem[]>([]);
   const [favoriteLinks, setFavoriteLinks] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -884,7 +838,11 @@ export default function App() {
   const [brokenVideoThumbIds, setBrokenVideoThumbIds] = useState<Record<string, true>>({});
   const [scriptFontSize, setScriptFontSize] = useState<ScriptFontSize>(readScriptFontSize);
   // v1 商業模式：免登入 + 廣告 + AI 次數限制（先固定 Free）
-  const [proStatus, setProStatus] = useState<ProStatus>(() => getProStatus());
+  const [realProStatus, setRealProStatus] = useState<ProStatus>(() => getProStatus());
+  const [testPlanRevision, setTestPlanRevision] = useState(0);
+  const [testPasswordOpen, setTestPasswordOpen] = useState(false);
+  const [testPanelOpen, setTestPanelOpen] = useState(false);
+  const titleTapRef = useRef({ count: 0, lastAt: 0 });
   const [showProDebugTools, setShowProDebugTools] = useState(() =>
     syncProDebugModeFromUrl()
   );
@@ -895,7 +853,10 @@ export default function App() {
   );
   const [promoModalOpen, setPromoModalOpen] = useState(false);
   const [authModalOpen, setAuthModalOpen] = useState(false);
-  const [onboardingOpen, setOnboardingOpen] = useState(() => !readOnboardingSeen());
+  const [topicOnboardingOpen, setTopicOnboardingOpen] = useState(
+    () => !readOnboardingCompleted()
+  );
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [dailyInsight, setDailyInsight] = useState<AiDailyInsight | null>(null);
   const [dailyInsightLoading, setDailyInsightLoading] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState(0);
@@ -923,17 +884,64 @@ export default function App() {
   const selectedNews = news.filter((n) => n.selected);
   const favoriteNews = news.filter((n) => n.favorite);
 
-  const isPro = isProActive(proStatus);
-  const planLimits = useMemo(() => getPlanLimits(proStatus), [proStatus]);
+  const effectivePlan = useMemo(() => {
+    void testPlanRevision;
+    void realProStatus;
+    return getEffectivePlan();
+  }, [testPlanRevision, realProStatus]);
+  const effectiveStatus = effectivePlan.effectiveStatus;
+  const isPro = effectivePlan.isPro;
+  const planLimits = useMemo(() => getPlanLimits(effectiveStatus), [effectiveStatus]);
   const aiDailyLimit = planLimits.aiDailyLimit;
   const aiQuotaRemaining = Math.max(0, aiDailyLimit - aiQuota.used);
   const visibleAiHistory = useMemo(
-    () => filterHistoryByPlan(aiHistory, proStatus),
-    [aiHistory, proStatus]
+    () => filterHistoryByPlan(aiHistory, effectiveStatus),
+    [aiHistory, effectiveStatus]
   );
 
   const refreshProStatus = useCallback(() => {
-    setProStatus(getProStatus());
+    setRealProStatus(getProStatus());
+    setTestPlanRevision((v) => v + 1);
+  }, []);
+
+  const handleRestorePurchases = useCallback(async () => {
+    const result = await restorePurchases();
+    if (result.ok) {
+      setRealProStatus(result.status);
+      setTestPlanRevision((v) => v + 1);
+    }
+    alert(result.message);
+  }, []);
+
+  const handleTestPlanChanged = useCallback(() => {
+    setTestPlanRevision((v) => v + 1);
+    const ep = getEffectivePlan();
+    const clamped = clampTrackingToPlan(
+      selectedTopics,
+      savedCustomKeywords,
+      ep.effectiveStatus
+    );
+    if (clamped.topics.join("\0") !== selectedTopics.join("\0")) {
+      setSelectedTopics(clamped.topics);
+      writeSelectedTopics(clamped.topics);
+    }
+    if (clamped.keywords.join("\0") !== savedCustomKeywords.join("\0")) {
+      setSavedCustomKeywords(clamped.keywords);
+      writeSavedCustomKeywords(clamped.keywords);
+    }
+  }, [savedCustomKeywords, selectedTopics]);
+
+  const handleBrandTitleTap = useCallback(() => {
+    const now = Date.now();
+    if (now - titleTapRef.current.lastAt > 2500) {
+      titleTapRef.current.count = 0;
+    }
+    titleTapRef.current.lastAt = now;
+    titleTapRef.current.count += 1;
+    if (titleTapRef.current.count >= 7) {
+      titleTapRef.current.count = 0;
+      setTestPasswordOpen(true);
+    }
   }, []);
 
   const openProUpgrade = useCallback(() => {
@@ -945,14 +953,12 @@ export default function App() {
   }, []);
 
   const setAiQuotaExhaustedMessage = useCallback(() => {
-    if (isProActive(proStatus)) {
+    if (isProActive(effectiveStatus)) {
       setAiError("今日 AI 次數已用完，明天會自動重置");
     } else {
       setUpgradeModal("quota");
     }
-  }, [proStatus]);
-
-  const adSenseClientId = useMemo(() => readAdSenseClientId(), []);
+  }, [effectiveStatus]);
 
   const buildDailyInsightFallback = useCallback((): AiDailyInsight => {
     const picked = news.slice(0, 20);
@@ -982,7 +988,7 @@ export default function App() {
   }, [news]);
 
   const handleRequestDailyInsight = useCallback(async () => {
-    if (!isProActive(proStatus)) return;
+    if (!canUseDailyInsight(effectiveStatus)) return;
     if (dailyInsightLoading || dailyInsight) return;
     const picked = news.slice(0, 20);
     if (picked.length === 0) return;
@@ -994,7 +1000,7 @@ export default function App() {
       writeAiDailyQuota(normalized);
     }
     setAiQuota(normalized);
-    const remaining = Math.max(0, getAiDailyLimit(proStatus) - normalized.used);
+    const remaining = Math.max(0, getAiDailyLimit(effectiveStatus) - normalized.used);
     if (remaining <= 0) {
       setAiQuotaExhaustedMessage();
       return;
@@ -1078,40 +1084,32 @@ export default function App() {
     dailyInsightLoading,
     getAiDailyLimit,
     news,
-    proStatus,
+    effectiveStatus,
     selectedTopics,
     setAiQuota,
     setAiQuotaExhaustedMessage,
   ]);
 
   useEffect(() => {
-    if (!adSenseClientId) return;
-    const existingTagged = document.querySelector(
-      `script[data-adsense-client="${adSenseClientId}"]`
-    ) as HTMLScriptElement | null;
-    if (existingTagged) return;
-
-    // index.html may already include the AdSense script (without data attributes).
-    const existingBySrc = Array.from(
-      document.querySelectorAll('script[src*="pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"]')
-    ) as HTMLScriptElement[];
-    if (existingBySrc.some((s) => (s.src ?? "").includes(`client=${encodeURIComponent(adSenseClientId)}`))) {
-      return;
-    }
-
-    const s = document.createElement("script");
-    s.async = true;
-    s.src = `https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${encodeURIComponent(
-      adSenseClientId
-    )}`;
-    s.crossOrigin = "anonymous";
-    s.setAttribute("data-adsense-client", adSenseClientId);
-    document.head.appendChild(s);
-  }, [adSenseClientId]);
-
-  useEffect(() => {
     refreshProStatus();
   }, [refreshProStatus]);
+
+  useEffect(() => {
+    const clamped = clampTrackingToPlan(selectedTopics, savedCustomKeywords, effectiveStatus);
+    const topicsChanged = clamped.topics.join("\0") !== selectedTopics.join("\0");
+    const keywordsChanged = clamped.keywords.join("\0") !== savedCustomKeywords.join("\0");
+    if (!topicsChanged && !keywordsChanged) return;
+    if (topicsChanged) {
+      setSelectedTopics(clamped.topics);
+      writeSelectedTopics(clamped.topics);
+    }
+    if (keywordsChanged) {
+      setSavedCustomKeywords(clamped.keywords);
+      writeSavedCustomKeywords(clamped.keywords);
+    }
+    // 僅在方案切換或初次載入時校正追蹤上限
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveStatus]);
 
   useEffect(() => {
     setShowProDebugTools(syncProDebugModeFromUrl());
@@ -1238,102 +1236,42 @@ export default function App() {
 
     const custom = customKeyword.trim();
     const topicObjs = selectedTopicObjects;
+    const feedSources = buildActiveNewsFeedSources(
+      topicObjs.map((t) => ({ label: t.label, query: t.query, icon: t.icon })),
+      savedCustomKeywords,
+      { extraSearch: custom || undefined }
+    );
+
+    if (import.meta.env.DEV || isProDebugToolsVisible()) {
+      console.log("updateNews activeTopics =", feedSources.map((s) => s.label));
+    }
 
     try {
-      const parser = new DOMParser();
       const nowMs = Date.now();
-      let rawItems: Element[] = [];
-
-      const usePerTopic = !custom && topicObjs.length >= NEWS_MULTI_TOPIC_MIN;
-
-      if (usePerTopic) {
-        const responseTexts = await Promise.all(
-          topicObjs.map((t) =>
-            fetch(`/api/news?q=${encodeURIComponent(t.query)}`).then((r) =>
-              r.text()
-            )
+      const responseTexts = await Promise.all(
+        feedSources.map((source) =>
+          fetch(`/api/news?q=${encodeURIComponent(source.query)}`).then((r) =>
+            r.text()
           )
-        );
-        for (const xmlText of responseTexts) {
-          const xml = parser.parseFromString(xmlText, "text/xml");
-          rawItems.push(
-            ...Array.from(xml.querySelectorAll("item")).slice(
-              0,
-              NEWS_PER_TOPIC_ITEM_SCAN
-            )
-          );
-        }
-      } else {
-        const query =
-          custom ||
-          (topicObjs.length > 0
-            ? topicObjs.map((t) => `(${t.query})`).join(" OR ")
-            : "今日熱門新聞");
-        const res = await fetch(`/api/news?q=${encodeURIComponent(query)}`);
-        const xmlText = await res.text();
-        const xml = parser.parseFromString(xmlText, "text/xml");
-        rawItems = Array.from(xml.querySelectorAll("item")).slice(
-          0,
-          NEWS_RSS_ITEM_SCAN
-        );
-      }
+        )
+      );
 
-      const items = rawItems.slice(0, 900);
+      const feeds = feedSources.map((source, index) => ({
+        source,
+        rows: parseNewsRssXml(
+          responseTexts[index] ?? "",
+          source.label,
+          nowMs,
+          favoriteLinks
+        ),
+      }));
 
-      type Row = NewsItem & { sortTime: number };
-      const dated: Row[] = items
-        .map((item, index) => {
-          const rawTitle = item.querySelector("title")?.textContent || "無標題";
-          const title = cleanTitle(rawTitle);
-          const link = item.querySelector("link")?.textContent || "";
-          const source =
-            item.querySelector("source")?.textContent ||
-            rawTitle.split(" - ").pop() ||
-            "Google News";
-          const pubDate = item.querySelector("pubDate")?.textContent || "";
-          const description = stripHtmlToText(
-            item.querySelector("description")?.textContent || ""
-          );
-          const t = parseNewsPubDate(pubDate)?.getTime() ?? 0;
+      setNews((prev) => {
+        const merged = mergeTopicNewsFeeds(feeds, prev);
+        setTopicNewsSections(merged.sections);
+        return merged.news;
+      });
 
-          return {
-            id: link || `${title}-${index}`,
-            title,
-            link,
-            source,
-            pubDate,
-            description,
-            selected: false,
-            favorite: favoriteLinks.includes(link),
-            sortTime: t,
-          };
-        })
-        .filter((row) => isNewsFreshEnough(row.pubDate, nowMs))
-        .sort((a, b) => b.sortTime - a.sortTime);
-
-      const seenTitles = new Set<string>();
-      const seenLinks = new Set<string>();
-      const parsedNews: NewsItem[] = [];
-      for (const row of dated) {
-        if (row.link && seenLinks.has(row.link)) continue;
-        const key = normalizeKey(row.title);
-        if (!key || seenTitles.has(key)) continue;
-        seenTitles.add(key);
-        if (row.link) seenLinks.add(row.link);
-        parsedNews.push({
-          id: row.id,
-          title: row.title,
-          link: row.link,
-          source: row.source,
-          pubDate: row.pubDate,
-          description: row.description,
-          selected: parsedNews.length < DEFAULT_HOME_SELECTED_COUNT,
-          favorite: row.favorite,
-        });
-        if (parsedNews.length >= NEWS_LIST_MAX) break;
-      }
-
-      setNews(parsedNews);
       setAiScript("");
       setAiHighlights([]);
       setAiJsonFallback(false);
@@ -1347,6 +1285,7 @@ export default function App() {
       );
     } catch (error) {
       setNews([]);
+      setTopicNewsSections([]);
       setLastUpdated("");
       setNewsBanner("暫時無法載入新聞，請檢查網路後再試一次。");
       console.error(error);
@@ -1456,10 +1395,13 @@ export default function App() {
   );
 
   useEffect(() => {
+    if (topicOnboardingOpen) return;
     void fetchNews();
   }, []);
 
   useEffect(() => {
+    if (topicOnboardingOpen) return;
+
     const key = [...selectedTopics].sort().join("\0");
 
     if (topicSelectionKeyRef.current === null) {
@@ -1478,7 +1420,7 @@ export default function App() {
     }, 450);
 
     return () => window.clearTimeout(timer);
-  }, [selectedTopics]);
+  }, [selectedTopics, topicOnboardingOpen]);
 
   useEffect(() => {
     if (!ENABLE_VIDEO_NEWS_UI && tab === "video") {
@@ -1496,6 +1438,28 @@ export default function App() {
     void fetchNews();
   };
 
+  const handleTopicOnboardingComplete = (topics: string[]) => {
+    const key = [...topics].sort().join("\0");
+    topicSelectionKeyRef.current = key;
+    setSelectedTopics(topics);
+    writeSelectedTopics(topics);
+    writeOnboardingCompleted(true);
+    writeOnboardingSeen(true);
+    setTopicOnboardingOpen(false);
+    setTab("home");
+    void fetchNews();
+  };
+
+  const resetTopicOnboarding = () => {
+    writeOnboardingCompleted(false);
+    writeOnboardingSeen(false);
+    setSelectedTopics([]);
+    writeSelectedTopics([]);
+    topicSelectionKeyRef.current = null;
+    setTopicOnboardingOpen(true);
+    setTab("home");
+  };
+
   const updateVideos = () => {
     if (!ENABLE_VIDEO_NEWS_UI) return;
     setTab("video");
@@ -1507,9 +1471,9 @@ export default function App() {
       if (prev.includes(label)) {
         return prev.filter((t) => t !== label);
       }
-      if (!canAddTopic(prev.length, proStatus)) {
-        if (isProActive(proStatus)) {
-          alert("已達 Pro 主題追蹤上限");
+      if (!canAddTopic(prev.length, effectiveStatus, savedCustomKeywords.length)) {
+        if (isProActive(effectiveStatus)) {
+          alert("已達 Pro 追蹤上限");
         } else {
           setUpgradeModal("topic");
         }
@@ -1520,8 +1484,10 @@ export default function App() {
   };
 
   const selectAllTopics = () => {
-    const limit = getPlanLimits(proStatus).topicLimit;
-    setSelectedTopics(topics.map((t) => t.label).slice(0, limit));
+    const limits = getPlanLimits(effectiveStatus);
+    const maxByTotal = limits.totalTrackingLimit - savedCustomKeywords.length;
+    const cap = Math.min(limits.topicLimit, maxByTotal);
+    setSelectedTopics(topics.map((t) => t.label).slice(0, Math.max(0, cap)));
   };
 
   const clearTopics = () => {
@@ -1529,7 +1495,10 @@ export default function App() {
   };
 
   const resetDefaultTopics = () => {
-    setSelectedTopics(DEFAULT_TOPICS);
+    const limits = getPlanLimits(effectiveStatus);
+    const defaults = isProActive(effectiveStatus) ? PRO_DEFAULT_TOPICS : FREE_DEFAULT_TOPICS;
+    const maxByTotal = limits.totalTrackingLimit - savedCustomKeywords.length;
+    setSelectedTopics(defaults.slice(0, Math.min(limits.topicLimit, Math.max(0, maxByTotal))));
   };
 
   const toggleNews = (id: string) => {
@@ -1542,8 +1511,8 @@ export default function App() {
 
   const toggleFavorite = (item: NewsItem) => {
     if (!item.favorite && !favoriteLinks.includes(item.link)) {
-      if (!canAddFavorite(favoriteLinks.length, proStatus)) {
-        if (isProActive(proStatus)) {
+      if (!canAddFavorite(favoriteLinks.length, effectiveStatus)) {
+        if (isProActive(effectiveStatus)) {
           alert("已達 Pro 收藏上限");
         } else {
           setUpgradeModal("favorite");
@@ -1573,9 +1542,9 @@ export default function App() {
       alert("此關鍵字已在清單中");
       return;
     }
-    if (!canAddCustomKeyword(savedCustomKeywords.length, proStatus)) {
-      if (isProActive(proStatus)) {
-        alert("已達 Pro 自訂關鍵字上限");
+    if (!canAddCustomKeyword(savedCustomKeywords.length, effectiveStatus, selectedTopics.length)) {
+      if (isProActive(effectiveStatus)) {
+        alert("已達 Pro 自訂關鍵字或總追蹤上限");
       } else {
         setUpgradeModal("keyword");
       }
@@ -1938,7 +1907,7 @@ export default function App() {
     } else {
       setAiQuota(q);
     }
-    const remaining = Math.max(0, getAiDailyLimit(proStatus) - q.used);
+    const remaining = Math.max(0, getAiDailyLimit(effectiveStatus) - q.used);
     if (remaining <= 0) {
       setAiQuotaExhaustedMessage();
       return;
@@ -1947,12 +1916,12 @@ export default function App() {
   };
 
   const runAiAnalysisWithDuration = (duration: AiDuration) => {
-    if (duration === 5 && !canUseFiveMinuteScript(proStatus)) {
+    if (duration === 5 && !canUseFiveMinuteScript(effectiveStatus)) {
       setAiDurationSheetOpen(false);
       setUpgradeModal("five_minute");
       return;
     }
-    if (aiAnalysisMode === "deep" && !canUseDeepMode(proStatus)) {
+    if (aiAnalysisMode === "deep" && !canUseDeepMode(effectiveStatus)) {
       setAiDurationSheetOpen(false);
       setUpgradeModal("deep");
       return;
@@ -2031,11 +2000,11 @@ ${newsText}
 
     const duration = durationOverride ?? aiDuration;
 
-    if (duration === 5 && !canUseFiveMinuteScript(proStatus)) {
+    if (duration === 5 && !canUseFiveMinuteScript(effectiveStatus)) {
       setUpgradeModal("five_minute");
       return;
     }
-    if (aiAnalysisMode === "deep" && !canUseDeepMode(proStatus)) {
+    if (aiAnalysisMode === "deep" && !canUseDeepMode(effectiveStatus)) {
       setUpgradeModal("deep");
       return;
     }
@@ -2048,13 +2017,13 @@ ${newsText}
       writeAiDailyQuota(normalized);
     }
     setAiQuota(normalized);
-    const remaining = Math.max(0, getAiDailyLimit(proStatus) - normalized.used);
+    const remaining = Math.max(0, getAiDailyLimit(effectiveStatus) - normalized.used);
     if (remaining <= 0) {
       setAiQuotaExhaustedMessage();
       return;
     }
     setAiError(null);
-    const deepMode = aiAnalysisMode === "deep" && canUseDeepMode(proStatus);
+    const deepMode = aiAnalysisMode === "deep" && canUseDeepMode(effectiveStatus);
     const fp = aiSummaryCacheFingerprint(picked, duration, deepMode);
 
     try {
@@ -2316,7 +2285,18 @@ ${newsText}
         {tab === "home" ? (
           <header style={styles.homeHeader}>
             <div style={{ minWidth: 0 }}>
-              <h1 style={styles.homeBrand}>今日 AI 新聞台</h1>
+              <h1
+                style={styles.homeBrand}
+                onClick={handleBrandTitleTap}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") handleBrandTitleTap();
+                }}
+                aria-label="今日 AI 新聞台"
+              >
+                今日 AI 新聞台
+              </h1>
               <p style={styles.homeStats}>
                 追蹤 <span style={styles.homeStatNum}>{selectedTopics.length}</span> 個主題｜
                 <span style={styles.homeStatNum}>{news.length}</span> 則新聞
@@ -2330,7 +2310,17 @@ ${newsText}
         ) : (
           <header style={styles.headerOther}>
             <div>
-              <div style={styles.kicker}>AI個人新聞台</div>
+              <div
+                style={styles.kicker}
+                onClick={handleBrandTitleTap}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") handleBrandTitleTap();
+                }}
+              >
+                AI個人新聞台
+              </div>
               <h1 style={styles.titleOther}>{pageTitle}</h1>
             </div>
             <div style={styles.logoOther}>🎙️</div>
@@ -2399,13 +2389,14 @@ ${newsText}
               }}
             />
 
-            <HomePageAdSlot isPro={isPro} />
+            <InternalPromotionBanner isPro={isPro} variant="home" />
 
             <NewsList
               title="今日新聞"
               compact
               denseCards
               isPro={isPro}
+              topicSections={topicNewsSections}
               homeToolbar={{
                 selectAll,
                 clearAll,
@@ -2474,14 +2465,7 @@ ${newsText}
               aiLoading={aiLoading}
             />
 
-            {!isPro ? (
-              <AdSenseSlot
-                clientId={readAdSenseClientId()}
-                slotId={ADSENSE_PLAYER_BANNER_SLOT_ID}
-                format="horizontal"
-                placement="playerBanner"
-              />
-            ) : null}
+            <InternalPromotionBanner isPro={isPro} variant="player" />
 
             <AiSummaryPanel
               variant="player"
@@ -2653,19 +2637,31 @@ ${newsText}
               topicLimit={planLimits.topicLimit}
               keywordCount={savedCustomKeywords.length}
               keywordLimit={planLimits.customKeywordLimit}
+              totalTrackingCount={getTotalTrackingCount(
+                selectedTopics.length,
+                savedCustomKeywords.length
+              )}
+              totalTrackingLimit={planLimits.totalTrackingLimit}
               historyDays={planLimits.historyDays}
               voiceLabel={shortVoiceLabel(voiceName)}
               speed={speed}
             />
 
             <SettingsCollapsible title="Pro 方案詳情" subtitle={isPro ? "Pro 已啟用" : "升級解鎖完整功能"}>
-              <ProStatusCard proStatus={proStatus} showDebugTools={showProDebugTools} />
+              <ProStatusCard
+                proStatus={effectiveStatus}
+                realProStatus={realProStatus}
+                testOverride={effectivePlan.hasTestOverride}
+                showDebugTools={showProDebugTools}
+                onRestore={handleRestorePurchases}
+              />
               {!isPro ? (
                 <ProUpgradeCard
                   variant="settings"
-                  proStatus={proStatus}
+                  proStatus={effectiveStatus}
                   onUpgrade={openProUpgrade}
                   onRedeem={() => setPromoModalOpen(true)}
+                  onRestore={handleRestorePurchases}
                 />
               ) : null}
             </SettingsCollapsible>
@@ -2685,7 +2681,7 @@ ${newsText}
 
             <SettingsCollapsible
               title="我的追蹤主題"
-              subtitle={`已選 ${selectedTopics.length} / ${planLimits.topicLimit}`}
+              subtitle={`已選 ${selectedTopics.length} / ${planLimits.topicLimit} · 總追蹤 ${getTotalTrackingCount(selectedTopics.length, savedCustomKeywords.length)} / ${planLimits.totalTrackingLimit}`}
               defaultOpen
             >
               <div style={styles.settingHint}>
@@ -2723,7 +2719,7 @@ ${newsText}
 
             <SettingsCollapsible
               title="自訂關鍵字"
-              subtitle={`已儲存 ${savedCustomKeywords.length} / ${planLimits.customKeywordLimit}`}
+              subtitle={`已儲存 ${savedCustomKeywords.length} / ${planLimits.customKeywordLimit} · 總追蹤 ${getTotalTrackingCount(selectedTopics.length, savedCustomKeywords.length)} / ${planLimits.totalTrackingLimit}`}
             >
               <input
                 value={customKeyword}
@@ -2864,6 +2860,15 @@ ${newsText}
               >
                 重新觀看新手教學
               </button>
+              {showProDebugTools ? (
+                <button
+                  type="button"
+                  onClick={resetTopicOnboarding}
+                  style={{ ...styles.toolbarBtnNeutral, width: "100%", marginTop: "8px" }}
+                >
+                  重置 Onboarding（主題選擇）
+                </button>
+              ) : null}
             </SettingsCollapsible>
 
             <SettingsCollapsible title="法律與隱私" subtitle="隱私權與服務條款">
@@ -2879,7 +2884,7 @@ ${newsText}
           </>
         )}
 
-        <BottomNav tab={tab} setTab={setTab} />
+        <BottomNav tab={tab} setTab={setTab} hidden={topicOnboardingOpen} />
 
         {showFloatingPlayer ? (
           <FloatingPlayerBar
@@ -2918,6 +2923,7 @@ ${newsText}
               setPromoModalOpen(true);
             }}
             onUpgrade={showProPaymentComingSoon}
+            onRestore={handleRestorePurchases}
           />
         ) : null}
 
@@ -2925,7 +2931,8 @@ ${newsText}
           <PromoRedeemModal
             onClose={() => setPromoModalOpen(false)}
             onRedeemed={(status, message) => {
-              setProStatus(status);
+              setRealProStatus(status);
+              setTestPlanRevision((v) => v + 1);
               setPromoModalOpen(false);
               alert(message);
             }}
@@ -2938,7 +2945,7 @@ ${newsText}
           <AuthComingSoonModal onClose={() => setAuthModalOpen(false)} />
         ) : null}
 
-        {onboardingOpen && !splashOpen ? (
+        {onboardingOpen && !splashOpen && !topicOnboardingOpen ? (
           <OnboardingModal
             step={onboardingStep}
             onPrev={() => setOnboardingStep((s) => Math.max(0, s - 1))}
@@ -2953,6 +2960,24 @@ ${newsText}
             }}
           />
         ) : null}
+
+        {topicOnboardingOpen && !splashOpen ? (
+          <TopicOnboardingScreen
+            topics={topics.map((t) => ({ label: t.label, icon: t.icon }))}
+            requiredCount={ONBOARDING_TOPIC_PICK_COUNT}
+            onComplete={handleTopicOnboardingComplete}
+          />
+        ) : null}
+
+        <TestPlanModals
+          passwordOpen={testPasswordOpen}
+          panelOpen={testPanelOpen}
+          effectivePlan={effectivePlan}
+          onClosePassword={() => setTestPasswordOpen(false)}
+          onOpenPanel={() => setTestPanelOpen(true)}
+          onClosePanel={() => setTestPanelOpen(false)}
+          onPlanChanged={handleTestPlanChanged}
+        />
       </div>
     </div>
   );
@@ -3359,24 +3384,58 @@ function CollapsibleHighlightsSection({ highlights }: { highlights: AiHighlight[
 }
 
 const PRO_SELL_POINTS = [
-  "解鎖 5 分鐘深度 AI 新聞稿",
-  "每日 20 次 AI 產生額度",
-  "追蹤更多主題與自訂關鍵字",
+  "解鎖 5 分鐘深度主播稿",
+  "每日 10 次 AI 產生額度",
+  "最多 10 個追蹤主題（含自訂關鍵字）",
+  "AI 今日洞察",
+  "無廣告閱讀體驗",
+  "移除推薦 App 與廣告版位",
   "收藏與 AI 歷史保留更久",
-  "移除所有廣告",
-  "即將支援每日 AI 早報 / 晚報",
 ] as const;
+
+function RestorePurchasesButton({
+  label,
+  onRestore,
+  variant = "link",
+}: {
+  label: string;
+  onRestore: () => void | Promise<void>;
+  variant?: "link" | "secondary";
+}) {
+  const [busy, setBusy] = useState(false);
+
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={async () => {
+        if (busy) return;
+        setBusy(true);
+        try {
+          await onRestore();
+        } finally {
+          setBusy(false);
+        }
+      }}
+      style={variant === "link" ? styles.proRestoreLinkBtn : styles.proRestoreSecondaryBtn}
+    >
+      {busy ? "恢復中…" : label}
+    </button>
+  );
+}
 
 function ProUpgradeCard({
   variant,
   proStatus,
   onUpgrade,
   onRedeem,
+  onRestore,
 }: {
   variant: "compact" | "settings";
   proStatus: ProStatus;
   onUpgrade: () => void;
   onRedeem: () => void;
+  onRestore: () => void | Promise<void>;
 }) {
   if (isProActive(proStatus)) return null;
 
@@ -3387,11 +3446,11 @@ function ProUpgradeCard({
       role="note"
       aria-label="升級 Pro"
     >
-      <div style={styles.proUpgradeTitle}>升級 Pro，打造你的完整 AI 新聞台</div>
+      <div style={styles.proUpgradeTitle}>升級 Pro，打造你的個人 AI 情報台</div>
       {!compact ? (
         <>
           <p style={styles.proUpgradeSubtitle}>
-            更多主題、更長新聞稿、深度解析、無廣告播放。
+            解鎖 5 分鐘深度主播稿、10 個追蹤主題、AI 今日洞察與無廣告閱讀體驗。
           </p>
           <ul style={styles.proUpgradeList}>
             {PRO_SELL_POINTS.map((p) => (
@@ -3401,7 +3460,7 @@ function ProUpgradeCard({
         </>
       ) : (
         <p style={styles.proUpgradeCompactSub}>
-          無廣告 · 5 分鐘深度稿 · 每日 {AI_DAILY_LIMIT_PRO} 次 AI
+          解鎖 5 分鐘深度主播稿、10 個追蹤主題、AI 今日洞察與無廣告閱讀體驗
         </p>
       )}
       <div style={styles.proUpgradePriceRow}>
@@ -3423,16 +3482,23 @@ function ProUpgradeCard({
         </button>
       </div>
       <p style={styles.proUpgradeFootnote}>正式付款即將開放（App Store / Google Play）</p>
+      <RestorePurchasesButton label="已購買？恢復購買" onRestore={onRestore} variant="link" />
     </div>
   );
 }
 
 function ProStatusCard({
   proStatus,
+  realProStatus,
+  testOverride = false,
   showDebugTools,
+  onRestore,
 }: {
   proStatus: ProStatus;
+  realProStatus: ProStatus;
+  testOverride?: boolean;
   showDebugTools: boolean;
+  onRestore: () => void | Promise<void>;
 }) {
   const active = isProActive(proStatus);
   const source = proSourceLabel(proStatus.proSource);
@@ -3441,6 +3507,11 @@ function ProStatusCard({
   return (
     <section style={styles.controlPanel}>
       <div style={styles.controlTitle}>Pro 方案</div>
+      {testOverride ? (
+        <div style={styles.settingHint}>
+          測試覆蓋中 · 正式訂閱：{realProStatus.isPro ? "Pro" : "Free"}
+        </div>
+      ) : null}
       {active ? (
         <>
           <div style={styles.proStatusLine}>
@@ -3463,13 +3534,26 @@ function ProStatusCard({
             {limits.customKeywordLimit} 個
           </div>
           <div style={styles.proStatusLine}>
+            <strong>總追蹤上限：</strong>
+            {limits.totalTrackingLimit} 個
+          </div>
+          <div style={styles.proStatusLine}>
+            <strong>AI 今日洞察：</strong>
+            已開放
+          </div>
+          <div style={styles.proStatusLine}>
             <strong>收藏上限：</strong>
             {limits.favoriteLimit} 則
           </div>
           <div style={styles.proStatusLine}>
             <strong>AI 歷史：</strong>最近 {limits.historyDays} 天
           </div>
-          <div style={styles.proStatusLine}>已移除廣告</div>
+          <div style={styles.proStatusLine}>
+            <strong>推薦 App / 廣告：</strong>已移除
+          </div>
+          <div style={styles.proStatusLine}>
+            <strong>閱讀體驗：</strong>無廣告
+          </div>
           {source ? (
             <div style={styles.proStatusLine}>
               <strong>來源：</strong>
@@ -3495,17 +3579,32 @@ function ProStatusCard({
             {limits.customKeywordLimit} 個
           </div>
           <div style={styles.proStatusLine}>
+            <strong>總追蹤上限：</strong>
+            {limits.totalTrackingLimit} 個
+          </div>
+          <div style={styles.proStatusLine}>
+            <strong>AI 今日洞察：</strong>
+            Pro 專屬
+          </div>
+          <div style={styles.proStatusLine}>
             <strong>收藏上限：</strong>
             {limits.favoriteLimit} 則
           </div>
           <div style={styles.proStatusLine}>
             <strong>AI 歷史：</strong>最近 {limits.historyDays} 天
           </div>
+          <div style={styles.proStatusLine}>
+            <strong>推薦 App / 廣告：</strong>顯示中
+          </div>
           <div style={styles.settingHint}>
-            升級 Pro 可解鎖 5 分鐘新聞稿、更多主題、更多收藏與無廣告體驗
+            升級 Pro，打造你的個人 AI 情報台：解鎖 5 分鐘深度主播稿、10 個追蹤主題、AI 今日洞察與無廣告閱讀體驗
           </div>
         </>
       )}
+
+      <div style={styles.proRestoreRow}>
+        <RestorePurchasesButton label="恢復購買" onRestore={onRestore} variant="secondary" />
+      </div>
 
       {showDebugTools ? (
         <div style={styles.proDebugToolsBox}>
@@ -3540,11 +3639,13 @@ function UpgradeModal({
   onClose,
   onRedeem,
   onUpgrade,
+  onRestore,
 }: {
   kind: UpgradeModalKind;
   onClose: () => void;
   onRedeem: () => void;
   onUpgrade: () => void;
+  onRestore: () => void | Promise<void>;
 }) {
   const renderLimitBody = () => {
     switch (kind) {
@@ -3552,10 +3653,11 @@ function UpgradeModal({
         return (
           <>
             <div style={styles.proModalFocusTitle}>
-              免費版最多追蹤 {getPlanLimits().topicLimit} 個主題
+              免費版最多追蹤 {getPlanLimits().topicLimit} 個主題（總追蹤上限{" "}
+              {getPlanLimits().totalTrackingLimit} 個）
             </div>
             <p style={styles.proModalFocusBody}>
-              升級 Pro 可追蹤更多主題，打造更完整的個人新聞台
+              升級 Pro 可追蹤最多 10 個主題與自訂關鍵字，並解鎖 AI 今日洞察
             </p>
           </>
         );
@@ -3574,7 +3676,8 @@ function UpgradeModal({
         return (
           <>
             <div style={styles.proModalFocusTitle}>
-              免費版最多新增 {getPlanLimits().customKeywordLimit} 個自訂關鍵字
+              免費版最多新增 {getPlanLimits().customKeywordLimit} 個自訂關鍵字（總追蹤上限{" "}
+              {getPlanLimits().totalTrackingLimit} 個）
             </div>
             <p style={styles.proModalFocusBody}>
               升級 Pro 可追蹤更多人物、球隊、股票、幣種與事件
@@ -3596,7 +3699,7 @@ function UpgradeModal({
             <div style={styles.proModalFocusTitle}>今日免費 AI 次數已用完</div>
             <p style={styles.proModalFocusBody}>明天會自動重置</p>
             <p style={styles.proModalFocusBody}>
-              升級 Pro 可獲得每日 20 次 AI 額度、5 分鐘深度稿與無廣告體驗
+              升級 Pro 可獲得每日 10 次 AI 額度、5 分鐘深度主播稿與 AI 今日洞察
             </p>
           </>
         );
@@ -3608,7 +3711,7 @@ function UpgradeModal({
               適合通勤、開車、運動時完整收聽今日重點。
             </p>
             <p style={styles.proModalFocusBody}>
-              升級 Pro 可解鎖 5 分鐘新聞稿、每日 20 次 AI 額度、更多主題追蹤與無廣告體驗。
+              升級 Pro 可解鎖 5 分鐘深度主播稿、每日 10 次 AI 額度、10 個追蹤主題與 AI 今日洞察。
             </p>
           </>
         );
@@ -3644,6 +3747,7 @@ function UpgradeModal({
             proStatus={{ isPro: false, proExpiresAt: null, proSource: null }}
             onUpgrade={onUpgrade}
             onRedeem={onRedeem}
+            onRestore={onRestore}
           />
         ) : (
           <div style={styles.proUpgradeBtnRow}>
@@ -3758,7 +3862,7 @@ function ProPaywall({
 
           <section style={styles.paywallFeatureGrid} aria-label="功能亮點">
             {[
-              { title: "每日 30 次 AI 分析", desc: "隨時更新重點，不怕用完。" },
+              { title: "每日 10 次 AI 分析", desc: "隨時更新重點，不怕用完。" },
               { title: "3 / 5 分鐘 AI 主播稿", desc: "更完整、更像真正新聞台。" },
               { title: "AI 歷史紀錄", desc: "回放、複製、整理你的日常重點。" },
               { title: "更多收藏", desc: "更長的收藏清單（即將開放）。" },
@@ -4272,6 +4376,8 @@ function SettingsSummaryGrid({
   topicLimit,
   keywordCount,
   keywordLimit,
+  totalTrackingCount,
+  totalTrackingLimit,
   historyDays,
   voiceLabel,
   speed,
@@ -4283,6 +4389,8 @@ function SettingsSummaryGrid({
   topicLimit: number;
   keywordCount: number;
   keywordLimit: number;
+  totalTrackingCount: number;
+  totalTrackingLimit: number;
   historyDays: number;
   voiceLabel: string;
   speed: number;
@@ -4292,13 +4400,17 @@ function SettingsSummaryGrid({
       title: "Pro 方案",
       lines: [
         isPro ? "目前 Pro" : "Free 方案",
-        `今日 AI ${aiQuotaRemaining} / ${aiDailyLimit}`,
-        isPro ? "已移除廣告" : "含廣告",
+        `今日剩餘 ${aiQuotaRemaining} / ${aiDailyLimit} 次`,
+        isPro ? "無廣告閱讀體驗" : "顯示推薦 App / 廣告",
       ],
     },
     {
       title: "追蹤主題",
-      lines: [`已選 ${topicCount} / ${topicLimit}`, `自訂關鍵字 ${keywordCount} / ${keywordLimit}`],
+      lines: [
+        `主題 ${topicCount} / ${topicLimit}`,
+        `自訂關鍵字 ${keywordCount} / ${keywordLimit}`,
+        `總追蹤 ${totalTrackingCount} / ${totalTrackingLimit}`,
+      ],
     },
     {
       title: "AI 歷史",
@@ -4744,10 +4856,14 @@ type BottomNavTab = Tab;
 function BottomNav({
   tab,
   setTab,
+  hidden = false,
 }: {
   tab: BottomNavTab;
   setTab: (t: BottomNavTab) => void;
+  hidden?: boolean;
 }) {
+  if (hidden) return null;
+
   const items: {
     id: BottomNavTab;
     label: string;
@@ -4905,104 +5021,6 @@ function SiteFooter() {
   );
 }
 
-/** 首頁：主狀態卡與新聞列表之間的低干擾橫幅（Free only） */
-function HomePageAdSlot({ isPro }: { isPro: boolean }) {
-  if (isPro) return null;
-  return (
-    <div style={styles.homeAdSlotWrap} role="complementary" aria-label="Advertisement">
-      <AdSenseSlot
-        clientId={readAdSenseClientId()}
-        slotId={ADSENSE_HOME_SLOT_ID}
-        format="horizontal"
-        placement="homeBanner"
-      />
-    </div>
-  );
-}
-
-function AdSenseSlot({
-  clientId,
-  slotId,
-  format,
-  placement = "banner",
-}: {
-  clientId: string;
-  slotId: string;
-  format: "auto" | "horizontal" | "rectangle";
-  placement?: "homeBanner" | "playerBanner" | "native";
-}) {
-  const isHomeBanner = placement === "homeBanner";
-  const isPlayerBanner = placement === "playerBanner";
-  const isBannerLike = isHomeBanner || isPlayerBanner || placement === "banner";
-
-  useEffect(() => {
-    if (!clientId) return;
-    try {
-      window.adsbygoogle = window.adsbygoogle || [];
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (window.adsbygoogle as any[]).push({});
-    } catch {
-      /* ignore */
-    }
-  }, [clientId, slotId]);
-
-  const labelRow = (
-    <div style={styles.adLabelRow}>
-      <span style={styles.adTag}>Advertisement</span>
-      <span style={styles.adBannerText}>贊助內容 · Banner</span>
-    </div>
-  );
-
-  if (!clientId) {
-    if (isHomeBanner) {
-      return (
-        <div style={styles.adHomeBannerPlaceholder} role="note">
-          {labelRow}
-          <div style={styles.adHomeBannerPlaceholderBody}>廣告版位（待 AdSense 設定）</div>
-        </div>
-      );
-    }
-    if (isBannerLike) {
-      return (
-        <div style={styles.adBannerPlaceholder} role="note">
-          {labelRow}
-        </div>
-      );
-    }
-    return (
-      <div style={styles.adNative} role="note" aria-label="Advertisement">
-        {labelRow}
-        <div style={styles.adBody}>此位置將展示贊助內容。</div>
-      </div>
-    );
-  }
-
-  const frameStyle = isHomeBanner
-    ? styles.adHomeBannerFrame
-    : isBannerLike
-      ? styles.adBannerFrame
-      : styles.adNativeFrame;
-
-  return (
-    <div style={frameStyle} role="note" aria-label="Advertisement">
-      {labelRow}
-      <ins
-        className="adsbygoogle"
-        style={{
-          display: "block",
-          width: "100%",
-          minHeight: isHomeBanner ? 48 : 50,
-          maxHeight: isHomeBanner ? 56 : undefined,
-        }}
-        data-ad-client={clientId}
-        data-ad-slot={slotId}
-        data-ad-format={format}
-        data-full-width-responsive="true"
-      />
-    </div>
-  );
-}
-
 function NewsList({
   title,
   news,
@@ -5013,6 +5031,7 @@ function NewsList({
   compact = false,
   denseCards = false,
   isPro = false,
+  topicSections,
   homeToolbar,
   playingIndex = -1,
   emptyHint,
@@ -5026,6 +5045,7 @@ function NewsList({
   compact?: boolean;
   denseCards?: boolean;
   isPro?: boolean;
+  topicSections?: TopicNewsSection[];
   homeToolbar?: {
     selectAll: () => void;
     clearAll: () => void;
@@ -5037,6 +5057,81 @@ function NewsList({
   const headerMerged = !!homeToolbar;
   const selectedCount = news.filter((n) => n.selected).length;
   const allSelected = news.length > 0 && selectedCount === news.length;
+  const newsById = useMemo(() => new Map(news.map((n) => [n.id, n])), [news]);
+  const selectedBreakdown =
+    topicSections && topicSections.length > 0
+      ? buildSelectedTopicSummary(topicSections, news)
+      : "";
+  const groupedMode = topicSections != null && topicSections.length > 0;
+  const topicNavItems = useMemo(() => {
+    if (!topicSections || topicSections.length === 0) return [];
+    return topicSections.map((section) => ({
+      label: section.label,
+      count: section.itemIds.filter((id) => newsById.has(id)).length,
+    }));
+  }, [topicSections, newsById]);
+
+  const renderNewsCard = (item: NewsItem, index: number) => (
+    <article
+      key={item.id}
+      onClick={() => toggleNews(item.id)}
+      style={{
+        ...styles.newsCard,
+        ...(denseCards ? styles.newsCardDense : {}),
+        ...(item.selected ? styles.newsCardActive : {}),
+        ...(playingIndex === index ? styles.newsCardPlaying : {}),
+      }}
+    >
+      <div style={styles.newsIndex}>{String(index + 1).padStart(2, "0")}</div>
+
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={styles.newsTopicBadgeRow}>
+          {!groupedMode
+            ? item.matchedTopics.slice(0, 3).map((tag) => (
+                <span key={`${item.id}-${tag}`} style={styles.newsTopicBadge}>
+                  {tag}
+                </span>
+              ))
+            : null}
+        </div>
+        <div
+          style={{
+            ...styles.newsTitle,
+            ...(denseCards ? styles.newsTitleClamp : {}),
+          }}
+        >
+          {item.title}
+        </div>
+
+        <div style={styles.newsMeta}>
+          <span style={styles.newsSource}>{item.source}</span>
+
+          <div style={styles.newsMetaActions}>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleFavorite(item);
+              }}
+              style={styles.favoriteButton}
+              aria-label={item.favorite ? "取消收藏" : "收藏"}
+            >
+              {item.favorite ? "★" : "☆"}
+            </button>
+
+            <a
+              href={item.link}
+              target="_blank"
+              rel="noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              style={styles.newsLinkSubtle}
+            >
+              原文
+            </a>
+          </div>
+        </div>
+      </div>
+    </article>
+  );
 
   return (
     <>
@@ -5071,7 +5166,10 @@ function NewsList({
               </button>
             </div>
             <div style={styles.homeNewsToolbarRight}>
-              <span style={styles.homeNewsSelected}>已選 {selectedCount} 則</span>
+              <span style={styles.homeNewsSelected}>已選 {selectedCount} 則新聞</span>
+              {selectedBreakdown ? (
+                <span style={styles.homeNewsSelectedBreakdown}>{selectedBreakdown}</span>
+              ) : null}
               <span style={styles.homeNewsCount}>{news.length} 則</span>
               <span style={styles.homeNewsUpdated}>
                 {homeToolbar.lastUpdated
@@ -5095,6 +5193,10 @@ function NewsList({
         )}
       </div>
 
+      {!loading && groupedMode && topicNavItems.length > 0 ? (
+        <TopicQuickNavBar items={topicNavItems} />
+      ) : null}
+
       {loading && (
         <div style={homeToolbar ? styles.loadingSlim : styles.loading}>新聞讀取中...</div>
       )}
@@ -5106,67 +5208,50 @@ function NewsList({
         </div>
       )}
 
-      <div style={denseCards ? styles.newsListDense : styles.newsList}>
-        {(() => {
-          const blocks: JSX.Element[] = [];
-
-          news.forEach((item, index) => {
-            blocks.push(
-              <article
-                key={item.id}
-                onClick={() => toggleNews(item.id)}
+      {!loading && groupedMode ? (
+        <div style={homeToolbar ? styles.topicNewsGroupsHome : styles.topicNewsGroups}>
+          {topicSections!.map((section) => {
+            const sectionItems = section.itemIds
+              .map((id) => newsById.get(id))
+              .filter((item): item is NewsItem => item != null);
+            return (
+              <section
+                key={section.label}
+                id={getTopicSectionDomId(section.label)}
+                data-topic-label={section.label}
                 style={{
-                  ...styles.newsCard,
-                  ...(denseCards ? styles.newsCardDense : {}),
-                  ...(item.selected ? styles.newsCardActive : {}),
-                  ...(playingIndex === index ? styles.newsCardPlaying : {}),
+                  ...styles.topicNewsGroup,
+                  scrollMarginTop: "var(--pns-topic-scroll-margin, 96px)",
                 }}
               >
-                <div style={styles.newsIndex}>{String(index + 1).padStart(2, "0")}</div>
-
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div
-                    style={{
-                      ...styles.newsTitle,
-                      ...(denseCards ? styles.newsTitleClamp : {}),
-                    }}
-                  >
-                    {item.title}
-                  </div>
-
-                  <div style={styles.newsMeta}>
-                    <span style={styles.newsSource}>{item.source}</span>
-
-                    <div style={styles.newsMetaActions}>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          toggleFavorite(item);
-                        }}
-                        style={styles.favoriteButton}
-                        aria-label={item.favorite ? "取消收藏" : "收藏"}
-                      >
-                        {item.favorite ? "★" : "☆"}
-                      </button>
-
-                      <a
-                        href={item.link}
-                        target="_blank"
-                        rel="noreferrer"
-                        onClick={(e) => e.stopPropagation()}
-                        style={styles.newsLinkSubtle}
-                      >
-                        原文
-                      </a>
-                    </div>
-                  </div>
+                <div style={styles.topicNewsGroupHeader}>
+                  <span style={styles.topicNewsGroupTitle}>
+                    {section.icon ? `${section.icon} ` : ""}
+                    {section.label}
+                  </span>
+                  <span style={styles.topicNewsGroupCount}>{sectionItems.length} 則</span>
                 </div>
-              </article>
+                {sectionItems.length === 0 ? (
+                  <div style={styles.topicNewsGroupEmpty}>
+                    目前沒有找到與此主題相關的新新聞
+                  </div>
+                ) : (
+                  <div style={denseCards ? styles.newsListDense : styles.newsList}>
+                    {sectionItems.map((item) => {
+                      const globalIndex = news.findIndex((n) => n.id === item.id);
+                      return renderNewsCard(item, globalIndex >= 0 ? globalIndex : 0);
+                    })}
+                  </div>
+                )}
+              </section>
             );
-          });
-          return blocks;
-        })()}
-      </div>
+          })}
+        </div>
+      ) : (
+        <div style={denseCards ? styles.newsListDense : styles.newsList}>
+          {news.map((item, index) => renderNewsCard(item, index))}
+        </div>
+      )}
     </>
   );
 }
@@ -5429,6 +5514,78 @@ const styles: Record<string, CSSProperties> = {
     fontSize: "12px",
     fontWeight: 800,
     color: "#A7F3D0",
+  },
+  homeNewsSelectedBreakdown: {
+    fontSize: "11px",
+    fontWeight: 600,
+    color: "#94A3B8",
+    lineHeight: 1.35,
+    textAlign: "right",
+    maxWidth: "100%",
+    wordBreak: "break-word",
+  },
+  topicNewsGroups: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "14px",
+    marginTop: "4px",
+  },
+  topicNewsGroupsHome: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "14px",
+    marginTop: "4px",
+    paddingBottom: "calc(96px + env(safe-area-inset-bottom, 0px))",
+  },
+  topicNewsGroup: {
+    borderRadius: "14px",
+    padding: "10px 10px 8px",
+    background: "rgba(15,23,42,.35)",
+    border: "1px solid rgba(148,163,184,.14)",
+  },
+  topicNewsGroupHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "8px",
+    marginBottom: "8px",
+    padding: "0 2px",
+  },
+  topicNewsGroupTitle: {
+    fontSize: "13px",
+    fontWeight: 800,
+    color: "#E2E8F0",
+  },
+  topicNewsGroupCount: {
+    fontSize: "11px",
+    fontWeight: 700,
+    color: "#64748B",
+    flexShrink: 0,
+  },
+  topicNewsGroupEmpty: {
+    fontSize: "12px",
+    lineHeight: 1.45,
+    color: "#64748B",
+    padding: "10px 8px",
+    borderRadius: "10px",
+    background: "rgba(255,255,255,.03)",
+    border: "1px dashed rgba(148,163,184,.18)",
+  },
+  newsTopicBadgeRow: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: "4px",
+    marginBottom: "4px",
+  },
+  newsTopicBadge: {
+    fontSize: "10px",
+    fontWeight: 800,
+    color: "#BFDBFE",
+    background: "rgba(59,130,246,.16)",
+    border: "1px solid rgba(96,165,250,.28)",
+    borderRadius: "999px",
+    padding: "2px 7px",
+    lineHeight: 1.3,
   },
   aiSummaryWrapPlayer: {
     marginTop: "8px",
@@ -5944,79 +6101,6 @@ const styles: Record<string, CSSProperties> = {
     background: "rgba(255,255,255,.06)",
     border: "1px solid rgba(255,255,255,.12)",
   },
-  homeAdSlotWrap: {
-    marginTop: "14px",
-    marginBottom: "14px",
-  },
-  adHomeBannerPlaceholder: {
-    borderRadius: "12px",
-    padding: "10px 12px 12px",
-    background: "rgba(15,23,42,.55)",
-    border: "1px dashed rgba(148,163,184,.28)",
-    maxHeight: 88,
-    overflow: "hidden",
-  },
-  adHomeBannerPlaceholderBody: {
-    marginTop: "6px",
-    fontSize: "12px",
-    color: "#64748B",
-    fontWeight: 600,
-    textAlign: "center",
-  },
-  adHomeBannerFrame: {
-    borderRadius: "12px",
-    padding: "8px 12px 10px",
-    background: "rgba(15,23,42,.55)",
-    border: "1px dashed rgba(148,163,184,.28)",
-    maxHeight: 88,
-    overflow: "hidden",
-  },
-  adBannerPlaceholder: {
-    marginTop: "12px",
-    borderRadius: "12px",
-    padding: "10px 12px",
-    background: "rgba(15,23,42,.55)",
-    border: "1px dashed rgba(148,163,184,.28)",
-    minHeight: 48,
-    maxHeight: 72,
-  },
-  adNative: {
-    borderRadius: "12px",
-    padding: "12px 14px",
-    background: "rgba(15,23,42,.45)",
-    border: "1px dashed rgba(148,163,184,.22)",
-  },
-  adNativeFrame: {
-    borderRadius: "12px",
-    padding: "8px 12px",
-    background: "rgba(15,23,42,.45)",
-    border: "1px dashed rgba(148,163,184,.22)",
-  },
-  adBannerFrame: {
-    marginTop: "12px",
-    borderRadius: "12px",
-    padding: "8px 12px 10px",
-    background: "rgba(15,23,42,.55)",
-    border: "1px dashed rgba(148,163,184,.28)",
-    maxHeight: 80,
-    overflow: "hidden",
-  },
-  adLabelRow: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: "8px",
-    marginBottom: "4px",
-  },
-  adTag: {
-    fontSize: "10px",
-    fontWeight: 900,
-    letterSpacing: "0.12em",
-    textTransform: "uppercase",
-    color: "rgba(148,163,184,.85)",
-  },
-  adBody: { marginTop: "6px", fontSize: "12px", lineHeight: 1.4, color: "#64748B" },
-  adBannerText: { fontSize: "11px", fontWeight: 700, color: "#64748B" },
   controlPanel: {
     marginTop: "18px",
     background: "rgba(15,23,42,.82)",
@@ -7599,6 +7683,33 @@ const styles: Record<string, CSSProperties> = {
     fontSize: "11px",
     color: "#64748B",
     lineHeight: 1.35,
+  },
+  proRestoreRow: {
+    marginTop: "12px",
+  },
+  proRestoreLinkBtn: {
+    margin: "10px 0 0",
+    padding: "8px 0",
+    width: "100%",
+    border: "none",
+    background: "transparent",
+    color: "#94A3B8",
+    fontSize: "13px",
+    fontWeight: 700,
+    cursor: "pointer",
+    textDecoration: "underline",
+    textUnderlineOffset: "3px",
+  },
+  proRestoreSecondaryBtn: {
+    width: "100%",
+    borderRadius: "12px",
+    padding: "10px 14px",
+    fontSize: "13px",
+    fontWeight: 800,
+    color: "#CBD5E1",
+    background: "rgba(255,255,255,.06)",
+    border: "1px solid rgba(255,255,255,.12)",
+    cursor: "pointer",
   },
   proStatusLine: {
     fontSize: "14px",

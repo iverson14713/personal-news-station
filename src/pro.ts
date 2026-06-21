@@ -14,10 +14,12 @@ export type PlanLimits = {
   aiDailyLimit: number;
   topicLimit: number;
   customKeywordLimit: number;
+  totalTrackingLimit: number;
   favoriteLimit: number;
   historyDays: number;
   fiveMinuteEnabled: boolean;
   deepModeEnabled: boolean;
+  dailyInsightEnabled: boolean;
 };
 
 const PRO_STORAGE_KEY = "pns_pro_status_v1";
@@ -25,23 +27,27 @@ const LEGACY_PLAN_TIER_KEY = "pns_plan_tier_v1";
 export const DEBUG_MODE_KEY = "pns_debug_mode";
 
 const FREE_LIMITS: PlanLimits = {
-  aiDailyLimit: 3,
-  topicLimit: 5,
-  customKeywordLimit: 2,
+  aiDailyLimit: 2,
+  topicLimit: 3,
+  customKeywordLimit: 1,
+  totalTrackingLimit: 4,
   favoriteLimit: 20,
   historyDays: 7,
   fiveMinuteEnabled: false,
   deepModeEnabled: false,
+  dailyInsightEnabled: false,
 };
 
 const PRO_LIMITS: PlanLimits = {
-  aiDailyLimit: 20,
-  topicLimit: 30,
-  customKeywordLimit: 20,
+  aiDailyLimit: 10,
+  topicLimit: 5,
+  customKeywordLimit: 5,
+  totalTrackingLimit: 10,
   favoriteLimit: 500,
   historyDays: 180,
   fiveMinuteEnabled: true,
   deepModeEnabled: true,
+  dailyInsightEnabled: true,
 };
 
 /** @deprecated 請改用 getPlanLimits */
@@ -163,12 +169,72 @@ export function canUseFiveMinuteScript(status?: ProStatus): boolean {
   return getPlanLimits(status).fiveMinuteEnabled;
 }
 
-export function canAddTopic(currentCount: number, status?: ProStatus): boolean {
-  return currentCount < getPlanLimits(status).topicLimit;
+export function getTotalTrackingCount(topicCount: number, keywordCount: number): number {
+  return topicCount + keywordCount;
 }
 
-export function canAddCustomKeyword(currentCount: number, status?: ProStatus): boolean {
-  return currentCount < getPlanLimits(status).customKeywordLimit;
+export function canAddTrackingTopic(
+  topicCount: number,
+  keywordCount: number,
+  status?: ProStatus
+): boolean {
+  const limits = getPlanLimits(status);
+  return (
+    topicCount < limits.topicLimit &&
+    topicCount + keywordCount < limits.totalTrackingLimit
+  );
+}
+
+export function canAddTrackingKeyword(
+  topicCount: number,
+  keywordCount: number,
+  status?: ProStatus
+): boolean {
+  const limits = getPlanLimits(status);
+  return (
+    keywordCount < limits.customKeywordLimit &&
+    topicCount + keywordCount < limits.totalTrackingLimit
+  );
+}
+
+export function canAddTopic(
+  currentCount: number,
+  status?: ProStatus,
+  keywordCount = 0
+): boolean {
+  return canAddTrackingTopic(currentCount, keywordCount, status);
+}
+
+export function canAddCustomKeyword(
+  currentCount: number,
+  status?: ProStatus,
+  topicCount = 0
+): boolean {
+  return canAddTrackingKeyword(topicCount, currentCount, status);
+}
+
+export function clampTrackingToPlan(
+  topics: string[],
+  keywords: string[],
+  status?: ProStatus
+): { topics: string[]; keywords: string[] } {
+  const limits = getPlanLimits(status);
+  let nextTopics = topics.slice(0, limits.topicLimit);
+  let nextKeywords = keywords.slice(0, limits.customKeywordLimit);
+  while (nextTopics.length + nextKeywords.length > limits.totalTrackingLimit) {
+    if (nextTopics.length >= nextKeywords.length && nextTopics.length > 0) {
+      nextTopics = nextTopics.slice(0, -1);
+    } else if (nextKeywords.length > 0) {
+      nextKeywords = nextKeywords.slice(0, -1);
+    } else {
+      break;
+    }
+  }
+  return { topics: nextTopics, keywords: nextKeywords };
+}
+
+export function canUseDailyInsight(status?: ProStatus): boolean {
+  return getPlanLimits(status).dailyInsightEnabled;
 }
 
 export function canAddFavorite(currentCount: number, status?: ProStatus): boolean {
@@ -190,6 +256,35 @@ export function filterHistoryByPlan<T extends { savedAt: number }>(
 
 export function canUseDeepMode(status?: ProStatus): boolean {
   return getPlanLimits(status).deepModeEnabled;
+}
+
+/** 由 iOS 內購恢復或正式訂閱寫入 Pro 狀態（不影響測試模式覆蓋） */
+export function applyRestoredPurchase(options?: {
+  expiresAtIso?: string | null;
+  expiresAtMs?: number;
+}): ProStatus {
+  let expiresAt: string | null = null;
+
+  if (options?.expiresAtIso) {
+    expiresAt = options.expiresAtIso;
+  } else if (options?.expiresAtMs != null && options.expiresAtMs > 0) {
+    expiresAt = endOfLocalDayIso(new Date(options.expiresAtMs));
+  } else {
+    const current = getProStatus();
+    if (current.isPro && current.proExpiresAt) {
+      expiresAt = current.proExpiresAt;
+    } else {
+      expiresAt = endOfLocalDayIso(new Date(Date.now() + 35 * 86400000));
+    }
+  }
+
+  const next: ProStatus = {
+    isPro: true,
+    proExpiresAt: expiresAt,
+    proSource: "purchase",
+  };
+  writeProStatus(next);
+  return getProStatus();
 }
 
 export function setPromoPro(days: number, source: ProSource = "promo"): ProStatus {
