@@ -10,22 +10,37 @@ export type OnboardingTopicOption = {
   icon: string;
 };
 
+export const SELECTED_TOPICS_STORAGE_KEY = "pns_selected_topics_v1";
+
+export function readStoredSelectedTopics(): string[] {
+  try {
+    const raw = localStorage.getItem(SELECTED_TOPICS_STORAGE_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw) as unknown;
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+      .map((s) => s.trim());
+  } catch {
+    return [];
+  }
+}
+
+/** 沒有已存主題時一律顯示主題選擇（不因 onboarding 旗標略過） */
+export function shouldShowTopicOnboarding(storedTopics?: string[]): boolean {
+  const topics = storedTopics ?? readStoredSelectedTopics();
+  return topics.length === 0;
+}
+
 export function readOnboardingCompleted(): boolean {
   try {
-    if (localStorage.getItem(ONBOARDING_COMPLETED_KEY) === "true") {
+    if (readStoredSelectedTopics().length > 0) {
       return true;
     }
-    const raw = localStorage.getItem("pns_selected_topics_v1");
-    if (raw) {
-      const arr = JSON.parse(raw) as unknown;
-      if (Array.isArray(arr) && arr.length > 0) {
-        return true;
-      }
-    }
+    return localStorage.getItem(ONBOARDING_COMPLETED_KEY) === "true";
   } catch {
-    /* ignore */
+    return false;
   }
-  return false;
 }
 
 export function writeOnboardingCompleted(completed: boolean): void {

@@ -20,7 +20,7 @@ function measureSafeAreaTopPx(): number {
   return inset + STICKY_TOP_EXTRA_PX;
 }
 
-export function getTopicScrollMarginPx(barHeightPx = 48): number {
+export function getTopicScrollMarginPx(barHeightPx = 52): number {
   return measureSafeAreaTopPx() + barHeightPx + 8;
 }
 
@@ -39,7 +39,7 @@ type TopicQuickNavBarProps = {
 export function TopicQuickNavBar({ items }: TopicQuickNavBarProps) {
   const [activeLabel, setActiveLabel] = useState(items[0]?.label ?? "");
   const [pinned, setPinned] = useState(false);
-  const [barHeight, setBarHeight] = useState(48);
+  const [barHeight, setBarHeight] = useState(52);
   const [stickyTopPx, setStickyTopPx] = useState(STICKY_TOP_EXTRA_PX);
 
   const anchorRef = useRef<HTMLDivElement>(null);
@@ -71,7 +71,7 @@ export function TopicQuickNavBar({ items }: TopicQuickNavBarProps) {
     setStickyTopPx(topPx);
 
     const measureBar = () => {
-      const h = barRef.current?.offsetHeight ?? 48;
+      const h = barRef.current?.offsetHeight ?? 52;
       setBarHeight(h);
       syncLayoutVars(h, topPx);
     };
@@ -270,50 +270,59 @@ const navStyles: Record<string, CSSProperties> = {
     zIndex: 40,
   },
   bar: {
-    minHeight: "44px",
-    maxHeight: "52px",
+    minHeight: "48px",
+    maxHeight: "56px",
     display: "flex",
     alignItems: "center",
-    paddingTop: "4px",
-    paddingBottom: "4px",
+    paddingTop: "6px",
+    paddingBottom: "6px",
     background:
       "linear-gradient(180deg, rgba(2,6,23,.98) 0%, rgba(15,23,42,.96) 100%)",
     backdropFilter: "blur(12px)",
     WebkitBackdropFilter: "blur(12px)",
-    borderBottom: "1px solid rgba(148,163,184,.18)",
-    boxShadow: "0 6px 18px rgba(2,6,23,.5)",
+    borderBottom: "1px solid rgba(148,163,184,.22)",
+    boxShadow: "0 8px 22px rgba(2,6,23,.55)",
   },
   scroller: {
     display: "flex",
-    gap: "6px",
+    gap: "10px",
     overflowX: "auto",
     overflowY: "hidden",
     flexWrap: "nowrap",
     width: "100%",
-    minHeight: "36px",
+    minHeight: "44px",
     alignItems: "center",
-    padding: "0 1px",
+    padding: "0 2px",
     WebkitOverflowScrolling: "touch",
   },
   chip: {
     flexShrink: 0,
-    border: "1px solid rgba(148,163,184,.22)",
+    border: "1px solid rgba(148,163,184,.28)",
     borderRadius: TOKENS.radiusPill,
-    padding: "6px 11px",
-    fontSize: "12px",
-    fontWeight: 800,
-    lineHeight: 1.15,
-    color: TOKENS.textSecondary,
-    background: "rgba(255,255,255,.05)",
+    padding: "11px 20px",
+    minHeight: "44px",
+    fontSize: "15px",
+    fontWeight: 700,
+    lineHeight: 1.2,
+    color: "#CBD5E1",
+    background: "rgba(255,255,255,.06)",
     cursor: "pointer",
     whiteSpace: "nowrap",
+    boxSizing: "border-box",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
     transition:
-      "background 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease",
+      "background 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, transform 0.12s ease",
   },
   chipActive: {
-    color: "#E0E7FF",
-    background: "linear-gradient(135deg, rgba(37,99,235,.32), rgba(99,102,241,.28))",
-    border: "1px solid rgba(129,140,248,.55)",
-    boxShadow: "0 0 0 1px rgba(99,102,241,.18), 0 4px 12px rgba(37,99,235,.2)",
+    color: "#FFFFFF",
+    fontWeight: 800,
+    fontSize: "16px",
+    background: "linear-gradient(135deg, rgba(37,99,235,.62), rgba(99,102,241,.52))",
+    border: "2px solid rgba(147,197,253,.75)",
+    boxShadow:
+      "0 0 0 1px rgba(99,102,241,.28), 0 6px 18px rgba(37,99,235,.38), inset 0 1px 0 rgba(255,255,255,.12)",
+    transform: "scale(1.02)",
   },
 };

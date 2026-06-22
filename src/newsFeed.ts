@@ -53,10 +53,6 @@ export function buildActiveNewsFeedSources(
     addSource(extraSearch, extraSearch);
   }
 
-  if (sources.length === 0) {
-    addSource("今日熱門", "今日熱門新聞");
-  }
-
   return sources;
 }
 

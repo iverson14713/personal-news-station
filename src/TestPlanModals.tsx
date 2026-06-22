@@ -17,6 +17,9 @@ type TestPlanModalsProps = {
   onOpenPanel: () => void;
   onClosePanel: () => void;
   onPlanChanged: () => void;
+  onResetProTestState: () => void;
+  onResetOnboarding: () => void;
+  onResetAiQuota: () => void;
 };
 
 export function TestPlanModals({
@@ -27,6 +30,9 @@ export function TestPlanModals({
   onOpenPanel,
   onClosePanel,
   onPlanChanged,
+  onResetProTestState,
+  onResetOnboarding,
+  onResetAiQuota,
 }: TestPlanModalsProps) {
   const [password, setPassword] = useState("");
   const [passwordError, setPasswordError] = useState("");
@@ -156,6 +162,19 @@ export function TestPlanModals({
                 清除測試覆蓋（恢復正式狀態）
               </button>
             ) : null}
+
+            <div style={styles.advancedBox}>
+              <div style={styles.advancedLabel}>進階測試</div>
+              <button type="button" onClick={onResetProTestState} style={styles.advancedBtn}>
+                重置 Pro 測試狀態
+              </button>
+              <button type="button" onClick={onResetOnboarding} style={styles.advancedBtn}>
+                重置 Onboarding（主題選擇）
+              </button>
+              <button type="button" onClick={onResetAiQuota} style={styles.advancedBtn}>
+                重置 AI 次數
+              </button>
+            </div>
 
             <button type="button" onClick={onClosePanel} style={styles.closeBtn}>
               關閉
@@ -313,6 +332,31 @@ const styles: Record<string, CSSProperties> = {
     color: "#94A3B8",
     background: "transparent",
     border: "1px dashed rgba(148,163,184,.28)",
+    cursor: "pointer",
+  },
+  advancedBox: {
+    marginBottom: "10px",
+    paddingTop: "10px",
+    borderTop: "1px dashed rgba(148,163,184,.2)",
+  },
+  advancedLabel: {
+    fontSize: "10px",
+    fontWeight: 800,
+    letterSpacing: "0.06em",
+    color: "#64748B",
+    textTransform: "uppercase",
+    marginBottom: "8px",
+  },
+  advancedBtn: {
+    width: "100%",
+    marginBottom: "6px",
+    borderRadius: "10px",
+    padding: "8px 12px",
+    fontSize: "12px",
+    fontWeight: 700,
+    color: "#CBD5E1",
+    background: "rgba(255,255,255,.04)",
+    border: "1px solid rgba(148,163,184,.16)",
     cursor: "pointer",
   },
   closeBtn: {

@@ -622,7 +622,7 @@ function ScreenPro() {
           ))}
         </ul>
         <div style={{ marginTop: 24, fontSize: TYPE.mockupPrice, fontWeight: 900, color: "#A7F3D0" }}>
-          NT$49 / 月
+          NT$60 / 月
         </div>
       </div>
       <span

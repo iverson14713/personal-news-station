@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
 
 import type { NewsItem } from "./newsFeed";
+import { TOKENS } from "./theme";
 
 export type AiDailyInsightRecommended = {
   title: string;
@@ -15,15 +16,6 @@ export type AiDailyInsight = {
   keywords: string[];
   controversies: string[];
   recommendedNews: AiDailyInsightRecommended[];
-};
-
-const FREE_INSIGHT_PREVIEW: AiDailyInsight = {
-  attentionLevel: "中",
-  sentiment: "中立",
-  hotReason: "今日多則重要事件交織，市場與輿論關注度升溫。",
-  keywords: ["國際", "財經", "科技"],
-  controversies: ["政策爭議", "市場分歧"],
-  recommendedNews: [{ title: "示例：今日頭條新聞標題", reason: "值得優先關注" }],
 };
 
 export type RecommendedDisplayItem = {
@@ -93,7 +85,6 @@ export function coerceInsightRecommendedNews(raw: unknown): AiDailyInsightRecomm
   for (const row of raw.slice(0, 3)) {
     if (typeof row === "string") {
       const text = row.trim();
-      // 舊版 id/index 字串通常很短或無中文，略過
       if (text.length >= 6 && /[\u4e00-\u9fffA-Za-z]/.test(text)) {
         out.push({ title: text.slice(0, 300), reason: "值得優先關注" });
       }
@@ -109,7 +100,6 @@ export function coerceInsightRecommendedNews(raw: unknown): AiDailyInsightRecomm
           : "";
     const reason =
       typeof o.reason === "string" ? o.reason.trim().slice(0, 40) : "值得優先關注";
-    // 忽略舊版僅含 id 的格式
     if (title) {
       out.push({ title: title.slice(0, 300), reason: reason || "值得優先關注" });
     }
@@ -153,6 +143,13 @@ export function normalizeDailyInsight(raw: unknown): AiDailyInsight | null {
   };
 }
 
+const FREE_UPGRADE_BULLETS = [
+  "今日最重要事件",
+  "市場情緒方向",
+  "關鍵趨勢變化",
+  "風險與機會提醒",
+] as const;
+
 export type AiDailyInsightCardProps = {
   isPro: boolean;
   news: NewsItem[];
@@ -177,11 +174,6 @@ export function AiDailyInsightCard({
 
   const handleToggle = () => {
     if (!hasNews) return;
-    if (!isPro) {
-      onOpenProModal();
-      setExpanded(true);
-      return;
-    }
     setExpanded((prev) => !prev);
   };
 
@@ -193,19 +185,11 @@ export function AiDailyInsightCard({
     onRequestInsight();
   }, [expanded, insight, isPro, loadingInsight, onRequestInsight]);
 
-  const displayInsight =
-    insight ?? (!isPro && expanded ? FREE_INSIGHT_PREVIEW : null);
-
-  const attentionText = displayInsight?.attentionLevel ?? "—";
-  const sentimentText = displayInsight?.sentiment ?? "—";
-  const hotReason =
-    displayInsight?.hotReason ??
-    (expanded ? "AI 洞察生成中或資料不足，請稍後再試。" : "");
-  const keywordTags = displayInsight?.keywords ?? [];
-  const controversyTags = displayInsight?.controversies ?? [];
-  const recommendedRefs = displayInsight?.recommendedNews ?? [];
+  const recommendedRefs = insight?.recommendedNews ?? [];
 
   const recommendedItems = useMemo((): RecommendedDisplayItem[] => {
+    if (!isPro || !insight) return [];
+
     console.log("[AI Insight] recommendedNews from AI:", recommendedRefs);
 
     const seen = new Set<string>();
@@ -232,9 +216,8 @@ export function AiDailyInsightCard({
 
     console.log("[AI Insight] recommended mapping matched:", matched, "/", out.length);
     return out;
-  }, [news, recommendedRefs]);
+  }, [insight, isPro, news, recommendedRefs]);
 
-  const previewBlur = !isPro;
   const showRecommendedSection = recommendedRefs.length > 0;
 
   return (
@@ -247,7 +230,9 @@ export function AiDailyInsightCard({
       >
         <div>
           <div style={styles.kickerRow}>
-            <span style={styles.kicker}>AI 今日洞察（Pro）</span>
+            <span style={styles.kicker}>
+              {isPro ? "AI 今日洞察（Pro）" : "AI 今日洞察"}
+            </span>
           </div>
           <p style={styles.subtitle}>
             AI 幫你快速理解今天最值得注意的事件與風向
@@ -266,101 +251,127 @@ export function AiDailyInsightCard({
       </button>
 
       <div style={{ ...styles.panel, ...(expanded ? styles.panelExpanded : {}) }}>
-        <div
-          style={{
-            ...styles.body,
-            ...(previewBlur ? styles.bodyBlurred : {}),
-            ...(expanded ? styles.bodyExpanded : {}),
-          }}
-        >
-          {loadingInsight && (
-            <div style={styles.loadingRow}>AI 分析中，請稍候…</div>
-          )}
+        {!isPro ? (
+          <div
+            style={{
+              ...styles.freeUpgradePanel,
+              ...(expanded ? styles.freeUpgradePanelExpanded : {}),
+            }}
+          >
+            <div style={styles.freeUpgradeTitle}>🔒 AI 今日洞察（Pro 專屬）</div>
+            <p style={styles.freeUpgradeLead}>AI 幫你從所有新聞中快速找出：</p>
+            <ul style={styles.freeUpgradeList}>
+              {FREE_UPGRADE_BULLETS.map((item) => (
+                <li key={item} style={styles.freeUpgradeItem}>
+                  ✓ {item}
+                </li>
+              ))}
+            </ul>
+            <button
+              type="button"
+              style={styles.freeUpgradeButton}
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpenProModal();
+              }}
+            >
+              立即升級 Pro
+            </button>
+          </div>
+        ) : (
+          <div
+            style={{
+              ...styles.body,
+              ...(expanded ? styles.bodyExpanded : {}),
+            }}
+          >
+            {loadingInsight && (
+              <div style={styles.loadingRow}>AI 分析中，請稍候…</div>
+            )}
 
-          {!loadingInsight && (
-            <>
-              <div style={styles.rowGrid}>
-                <div style={styles.metricCard}>
-                  <div style={styles.metricLabel}>今日關注度</div>
-                  <div style={styles.metricValue}>{attentionText}</div>
-                </div>
-                <div style={styles.metricCard}>
-                  <div style={styles.metricLabel}>今日風向</div>
-                  <div style={styles.metricValue}>{sentimentText}</div>
-                </div>
-              </div>
-
-              <div style={styles.leadBlock}>
-                <div style={styles.leadTitle}>今日最值得注意</div>
-                <p style={styles.leadBody}>{hotReason}</p>
-              </div>
-
-              {controversyTags.length > 0 && (
-                <div style={styles.blockCompact}>
-                  <div style={styles.sectionHeadTitle}>
-                    主要爭議 ({Math.min(controversyTags.length, 3)})
+            {!loadingInsight && insight && (
+              <>
+                <div style={styles.rowGrid}>
+                  <div style={styles.metricCard}>
+                    <div style={styles.metricLabel}>今日關注度</div>
+                    <div style={styles.metricValue}>{insight.attentionLevel}</div>
                   </div>
-                  <div style={styles.controversyTagRow}>
-                    {controversyTags.slice(0, 3).map((tag) => (
-                      <span key={`c-${tag}`} style={styles.controversyTag}>
-                        #{tag}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {keywordTags.length > 0 && (
-                <div style={styles.blockCompact}>
-                  <div style={styles.sectionHeadTitle}>
-                    熱門關鍵字 ({Math.min(keywordTags.length, 3)})
-                  </div>
-                  <div style={styles.keywordTagRow}>
-                    {keywordTags.slice(0, 3).map((tag) => (
-                      <span key={`k-${tag}`} style={styles.tag}>
-                        #{tag}
-                      </span>
-                    ))}
+                  <div style={styles.metricCard}>
+                    <div style={styles.metricLabel}>今日風向</div>
+                    <div style={styles.metricValue}>{insight.sentiment}</div>
                   </div>
                 </div>
-              )}
 
-              {showRecommendedSection && (
-                <div style={styles.blockCompact}>
-                  <div style={styles.sectionHeadTitle}>AI 建議先看</div>
-                  <div style={styles.recoList}>
-                    {recommendedItems.map(({ title, reason, matchedItem }, index) => (
-                      <button
-                        key={`reco-${normalizeInsightTitleKey(title)}-${index}`}
-                        type="button"
-                        onClick={() =>
-                          onOpenRecommendedNews(title, matchedItem?.id ?? null)
-                        }
-                        style={styles.recoChip}
-                        title={matchedItem?.title ?? title}
-                      >
-                        <span style={styles.recoIndex}>{index + 1}</span>
-                        <span style={styles.recoTextCol}>
-                          <span style={styles.recoTitle}>
-                            {matchedItem?.title ?? title}
-                          </span>
-                          <span style={styles.recoReason}>{reason}</span>
+                <div style={styles.leadBlock}>
+                  <div style={styles.leadTitle}>今日最值得注意</div>
+                  <p style={styles.leadBody}>{insight.hotReason}</p>
+                </div>
+
+                {insight.controversies.length > 0 && (
+                  <div style={styles.blockCompact}>
+                    <div style={styles.sectionHeadTitle}>
+                      主要爭議 ({Math.min(insight.controversies.length, 3)})
+                    </div>
+                    <div style={styles.controversyTagRow}>
+                      {insight.controversies.slice(0, 3).map((tag) => (
+                        <span key={`c-${tag}`} style={styles.controversyTag}>
+                          #{tag}
                         </span>
-                      </button>
-                    ))}
+                      ))}
+                    </div>
                   </div>
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      </div>
+                )}
 
-      {!isPro && (
-        <div style={styles.freeHint}>
-          升級 Pro 可解鎖完整 AI 今日洞察；現在點擊可試看模糊預覽。
-        </div>
-      )}
+                {insight.keywords.length > 0 && (
+                  <div style={styles.blockCompact}>
+                    <div style={styles.sectionHeadTitle}>
+                      熱門關鍵字 ({Math.min(insight.keywords.length, 3)})
+                    </div>
+                    <div style={styles.keywordTagRow}>
+                      {insight.keywords.slice(0, 3).map((tag) => (
+                        <span key={`k-${tag}`} style={styles.tag}>
+                          #{tag}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {showRecommendedSection && (
+                  <div style={styles.blockCompact}>
+                    <div style={styles.sectionHeadTitle}>AI 建議先看</div>
+                    <div style={styles.recoList}>
+                      {recommendedItems.map(({ title, reason, matchedItem }, index) => (
+                        <button
+                          key={`reco-${normalizeInsightTitleKey(title)}-${index}`}
+                          type="button"
+                          onClick={() =>
+                            onOpenRecommendedNews(title, matchedItem?.id ?? null)
+                          }
+                          style={styles.recoChip}
+                          title={matchedItem?.title ?? title}
+                        >
+                          <span style={styles.recoIndex}>{index + 1}</span>
+                          <span style={styles.recoTextCol}>
+                            <span style={styles.recoTitle}>
+                              {matchedItem?.title ?? title}
+                            </span>
+                            <span style={styles.recoReason}>{reason}</span>
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+
+            {!loadingInsight && !insight && (
+              <div style={styles.loadingRow}>AI 洞察生成中或資料不足，請稍後再試。</div>
+            )}
+          </div>
+        )}
+      </div>
     </section>
   );
 }
@@ -421,6 +432,58 @@ const styles: Record<string, CSSProperties> = {
     maxHeight: 2000,
     overflow: "visible",
   },
+  freeUpgradePanel: {
+    marginTop: 6,
+    padding: "12px 14px",
+    borderRadius: "14px",
+    background: "rgba(15,23,42,.92)",
+    border: "1px solid rgba(148,163,184,.35)",
+    opacity: 0,
+    transform: "translateY(-4px)",
+    transition: "opacity 0.18s ease, transform 0.18s ease",
+  },
+  freeUpgradePanelExpanded: {
+    opacity: 1,
+    transform: "translateY(0px)",
+  },
+  freeUpgradeTitle: {
+    fontSize: 15,
+    fontWeight: 800,
+    color: "#F8FAFC",
+    marginBottom: 6,
+    lineHeight: 1.3,
+  },
+  freeUpgradeLead: {
+    margin: "0 0 6px",
+    fontSize: 13,
+    color: "#CBD5E1",
+    lineHeight: 1.4,
+  },
+  freeUpgradeList: {
+    margin: "0 0 10px",
+    padding: 0,
+    listStyle: "none",
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+  },
+  freeUpgradeItem: {
+    fontSize: 13,
+    lineHeight: 1.35,
+    color: "#E2E8F0",
+  },
+  freeUpgradeButton: {
+    width: "100%",
+    border: "none",
+    borderRadius: TOKENS.radiusPill,
+    padding: "11px 16px",
+    fontSize: 14,
+    fontWeight: 800,
+    color: "#FFFFFF",
+    background: TOKENS.primaryGradient,
+    cursor: "pointer",
+    boxShadow: "0 6px 18px rgba(37,99,235,.35)",
+  },
   body: {
     marginTop: 6,
     padding: "10px 12px 8px",
@@ -435,9 +498,6 @@ const styles: Record<string, CSSProperties> = {
   bodyExpanded: {
     opacity: 1,
     transform: "translateY(0px)",
-  },
-  bodyBlurred: {
-    filter: "blur(3px)",
   },
   loadingRow: {
     fontSize: 12,
@@ -578,10 +638,5 @@ const styles: Record<string, CSSProperties> = {
     fontSize: 15,
     lineHeight: 1.35,
     color: "#93C5FD",
-  },
-  freeHint: {
-    marginTop: 6,
-    fontSize: 11,
-    color: "#94A3B8",
   },
 };

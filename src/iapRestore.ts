@@ -3,17 +3,27 @@
  * Web 與本機瀏覽器僅顯示提示，不寫入正式 Pro 狀態。
  */
 
-import { applyRestoredPurchase, type ProStatus } from "./pro";
+import { applyRestoredPurchase, getProStatus, isProActive, type ProStatus } from "./pro";
+import { PRO_IAP_PRODUCT_IDS, type ProPlanTier } from "./proPricing";
+import { clearTestPlan, getTestPlan } from "./testPlan";
 
 export const RESTORE_WEB_MESSAGE = "此功能會在 iOS App 內啟用";
+export const PURCHASE_WEB_MESSAGE = "正式付款將在 iOS App 內啟用";
+export const PURCHASE_CANCELLED_MESSAGE = "已取消訂閱";
+export const PURCHASE_PRODUCT_NOT_FOUND_MESSAGE =
+  "找不到訂閱商品，請確認 App Store Connect 商品 ID 是否正確";
+const PURCHASE_FAILED_MESSAGE = "訂閱失敗，請稍後再試";
 const NO_PURCHASES_MESSAGE = "找不到可恢復的購買紀錄";
 const RESTORE_FAILED_MESSAGE = "恢復購買失敗，請稍後再試";
 const RESTORE_SUCCESS_MESSAGE = "已成功恢復 Pro 訂閱";
+const PURCHASE_SYNC_FAILED_MESSAGE =
+  "訂閱已完成，但狀態同步失敗，請點擊恢復購買";
+const PRO_STORAGE_KEY = "pns_pro_status_v1";
 
 /** App Store 訂閱 product id（與 iOS 專案一致） */
 export const PRO_SUBSCRIPTION_PRODUCT_IDS = [
-  "com.wayne.personalnews.pro.monthly",
-  "com.wayne.personalnews.pro.yearly",
+  PRO_IAP_PRODUCT_IDS.monthly,
+  PRO_IAP_PRODUCT_IDS.yearly,
 ] as const;
 
 export type RestorePurchasesResult =
@@ -35,6 +45,7 @@ type CapacitorIapPlugin = {
 type RestorePayload = {
   expiresAtMs?: number;
   expiresAtIso?: string | null;
+  productId?: string;
 };
 
 type PurchaseRecord = {
@@ -102,6 +113,7 @@ function pickActiveProPurchase(purchases: PurchaseRecord[]): RestorePayload | nu
     const payload: RestorePayload = {
       expiresAtMs,
       expiresAtIso: expiresAtMs != null ? new Date(expiresAtMs).toISOString() : null,
+      productId,
     };
 
     const rank = expiresAtMs ?? Number.MAX_SAFE_INTEGER;
@@ -114,37 +126,164 @@ function pickActiveProPurchase(purchases: PurchaseRecord[]): RestorePayload | nu
 }
 
 function isEmptyPurchasesError(error: unknown): boolean {
-  const msg = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  const msg = extractErrorMessage(error).toLowerCase();
   return (
     msg.includes("no purchase") ||
     msg.includes("no purchases") ||
-    msg.includes("not found") ||
     msg.includes("empty") ||
     msg.includes("nothing to restore")
   );
 }
 
-async function tryCapGoNativePurchases(): Promise<RestorePayload | null> {
-  try {
-    const mod = await import("@capgo/native-purchases");
-    const { NativePurchases, PURCHASE_TYPE } = mod;
-
-    if (typeof NativePurchases.isBillingSupported === "function") {
-      const billing = await NativePurchases.isBillingSupported();
-      if (!billing.isBillingSupported) return null;
+function extractErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === "object") {
+    const o = error as { message?: unknown; errorMessage?: unknown };
+    if (typeof o.message === "string" && o.message.trim()) return o.message;
+    if (typeof o.errorMessage === "string" && o.errorMessage.trim()) {
+      return o.errorMessage;
     }
+  }
+  return String(error);
+}
 
-    await NativePurchases.restorePurchases();
+function isProductNotFoundPurchaseError(message: string): boolean {
+  const m = message.toLowerCase();
+  return (
+    m.includes("cannot find product") ||
+    m.includes("product not found") ||
+    (m.includes("product") && m.includes("not found"))
+  );
+}
 
-    const { purchases } = await NativePurchases.getPurchases({
-      productType: PURCHASE_TYPE.SUBS,
-      onlyCurrentEntitlements: true,
-    });
+function isUserCancelledPurchaseError(message: string): boolean {
+  const m = message.toLowerCase();
+  return (
+    m.includes("user cancelled") ||
+    m.includes("user canceled") ||
+    m.includes("payment cancelled") ||
+    m.includes("payment canceled") ||
+    (m.includes("cancel") && m.includes("purchase"))
+  );
+}
 
-    return pickActiveProPurchase(purchases ?? []);
+function resolvePurchaseFailureMessage(error: unknown): string {
+  const errMsg = extractErrorMessage(error);
+  if (isProductNotFoundPurchaseError(errMsg)) {
+    return PURCHASE_PRODUCT_NOT_FOUND_MESSAGE;
+  }
+  if (isUserCancelledPurchaseError(errMsg)) {
+    return PURCHASE_CANCELLED_MESSAGE;
+  }
+  return PURCHASE_FAILED_MESSAGE;
+}
+
+type StoredProSnapshot = {
+  proExpiresAt: string | null;
+  proSource: ProStatus["proSource"];
+};
+
+function parseLocalProSnapshot(raw: string | null): StoredProSnapshot | null {
+  if (!raw) return null;
+  try {
+    const o = JSON.parse(raw) as {
+      proExpiresAt?: unknown;
+      proSource?: unknown;
+    };
+    const proExpiresAt =
+      typeof o.proExpiresAt === "string" ? o.proExpiresAt : o.proExpiresAt === null ? null : null;
+    const src = o.proSource;
+    const proSource: ProStatus["proSource"] =
+      src === "purchase" || src === "promo" || src === "manual" ? src : null;
+    if (proExpiresAt == null && proSource == null) return null;
+    return { proExpiresAt, proSource };
   } catch {
     return null;
   }
+}
+
+function readLocalSubscriptionSnapshot(): StoredProSnapshot | null {
+  return parseLocalProSnapshot(readProStorageRaw());
+}
+
+function isLocalProStillActive(status: ProStatus): boolean {
+  if (!status.isPro || !status.proExpiresAt) return false;
+  return new Date(status.proExpiresAt).getTime() > Date.now();
+}
+
+function isLocalSubscriptionExpired(snapshot: StoredProSnapshot): boolean {
+  if (!snapshot.proExpiresAt) return false;
+  return new Date(snapshot.proExpiresAt).getTime() <= Date.now();
+}
+
+function logIapDebug(label: string, payload: unknown): void {
+  if (!import.meta.env.DEV) return;
+  console.log(`[IAP] ${label}:`, payload);
+}
+
+function logIapInfo(message: string, payload?: unknown): void {
+  if (payload !== undefined) {
+    console.log(`[IAP] ${message}`, payload);
+    return;
+  }
+  console.log(`[IAP] ${message}`);
+}
+
+function readProStorageRaw(): string | null {
+  try {
+    return localStorage.getItem(PRO_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/** StoreKit 寫入 Pro 後清除測試覆蓋，並確認 effective Pro 狀態 */
+function commitRestoredProStatus(
+  apply: () => ProStatus,
+  logContext: string
+): { ok: true; status: ProStatus } | { ok: false; status: ProStatus } {
+  const testPlanBefore = getTestPlan();
+  logIapDebug(`${logContext} news_station_test_plan before`, testPlanBefore);
+
+  const applied = apply();
+  clearTestPlan();
+  const status = getProStatus();
+
+  logIapDebug(`${logContext} result.status`, status);
+  logIapDebug(`${logContext} news_station_test_plan after`, getTestPlan());
+  logIapDebug(`${logContext} pns_pro_status_v1 after`, readProStorageRaw());
+
+  if (!isProActive(status)) {
+    console.warn("[IAP] Pro status sync failed after StoreKit apply", {
+      context: logContext,
+      applied,
+      status,
+      testPlanBefore,
+      pns_pro_status_v1: readProStorageRaw(),
+    });
+    return { ok: false, status };
+  }
+
+  return { ok: true, status };
+}
+
+async function tryCapGoNativePurchases(): Promise<RestorePayload | null> {
+  const mod = await import("@capgo/native-purchases");
+  const { NativePurchases, PURCHASE_TYPE } = mod;
+
+  if (typeof NativePurchases.isBillingSupported === "function") {
+    const billing = await NativePurchases.isBillingSupported();
+    if (!billing.isBillingSupported) return null;
+  }
+
+  await NativePurchases.restorePurchases();
+
+  const { purchases } = await NativePurchases.getPurchases({
+    productType: PURCHASE_TYPE.SUBS,
+    onlyCurrentEntitlements: true,
+  });
+
+  return pickActiveProPurchase(purchases ?? []);
 }
 
 async function tryCapacitorPlugin(
@@ -177,16 +316,116 @@ function normalizePurchaseList(result: unknown): PurchaseRecord[] {
 }
 
 async function restorePurchasesOnIosNative(): Promise<RestorePayload | null> {
-  const fromCapGo = await tryCapGoNativePurchases();
-  if (fromCapGo) return fromCapGo;
+  let lastError: unknown = null;
 
-  const fromNativePurchases = await tryCapacitorPlugin("NativePurchases");
-  if (fromNativePurchases) return fromNativePurchases;
+  try {
+    const fromCapGo = await tryCapGoNativePurchases();
+    if (fromCapGo) return fromCapGo;
+  } catch (error) {
+    lastError = error;
+  }
 
-  const fromProStoreKit = await tryCapacitorPlugin("ProStoreKit");
-  if (fromProStoreKit) return fromProStoreKit;
+  try {
+    const fromNativePurchases = await tryCapacitorPlugin("NativePurchases");
+    if (fromNativePurchases) return fromNativePurchases;
+  } catch (error) {
+    lastError = error;
+  }
 
+  try {
+    const fromProStoreKit = await tryCapacitorPlugin("ProStoreKit");
+    if (fromProStoreKit) return fromProStoreKit;
+  } catch (error) {
+    lastError = error;
+  }
+
+  if (lastError) throw lastError;
   return null;
+}
+
+export type SyncPurchasesOnLaunchResult = {
+  ran: boolean;
+  synced: boolean;
+  productId?: string;
+  status?: ProStatus;
+  skippedReason?:
+    | "not_ios"
+    | "local_pro_active"
+    | "not_required"
+    | "restore_required";
+};
+
+let launchSyncStarted = false;
+let launchSyncPromise: Promise<SyncPurchasesOnLaunchResult> | null = null;
+
+async function runSyncPurchasesOnLaunch(): Promise<SyncPurchasesOnLaunchResult> {
+  const onIos = isCapacitorIos();
+  logIapDebug("launch sync isCapacitorIos", onIos);
+
+  if (!onIos) {
+    logIapInfo("launch sync skipped (not required)");
+    return { ran: false, synced: false, skippedReason: "not_ios" };
+  }
+
+  const localStatus = getProStatus();
+  const localSnapshot = readLocalSubscriptionSnapshot();
+
+  logIapDebug("launch sync local status", localStatus);
+  logIapDebug("launch sync pns_pro_status_v1", readProStorageRaw());
+  logIapDebug("launch sync news_station_test_plan", getTestPlan());
+
+  if (isLocalProStillActive(localStatus)) {
+    logIapInfo("launch sync skipped (local pro active)", {
+      proExpiresAt: localStatus.proExpiresAt,
+      proSource: localStatus.proSource,
+    });
+    return {
+      ran: true,
+      synced: false,
+      status: localStatus,
+      skippedReason: "local_pro_active",
+    };
+  }
+
+  const noLocalData = localSnapshot == null;
+  const expired =
+    localSnapshot != null && isLocalSubscriptionExpired(localSnapshot);
+
+  if (noLocalData || expired) {
+    logIapInfo("launch restore required", {
+      noLocalData,
+      expired,
+      proExpiresAt: localSnapshot?.proExpiresAt ?? null,
+      proSource: localSnapshot?.proSource ?? null,
+    });
+    return {
+      ran: true,
+      synced: false,
+      status: localStatus,
+      skippedReason: "restore_required",
+    };
+  }
+
+  logIapInfo("launch sync skipped (not required)", {
+    proExpiresAt: localStatus.proExpiresAt,
+    proSource: localStatus.proSource,
+  });
+  return {
+    ran: true,
+    synced: false,
+    status: localStatus,
+    skippedReason: "not_required",
+  };
+}
+
+/** App 啟動時靜默讀取本機訂閱狀態（不呼叫 StoreKit restore / 不觸發 Apple 登入） */
+export async function syncPurchasesOnLaunch(): Promise<SyncPurchasesOnLaunchResult> {
+  if (launchSyncStarted && launchSyncPromise) {
+    return launchSyncPromise;
+  }
+  launchSyncStarted = true;
+  launchSyncPromise = runSyncPurchasesOnLaunch();
+  return launchSyncPromise;
 }
 
 export async function restorePurchases(): Promise<RestorePurchasesResult> {
@@ -194,22 +433,117 @@ export async function restorePurchases(): Promise<RestorePurchasesResult> {
     return { ok: false, message: RESTORE_WEB_MESSAGE };
   }
 
+  logIapInfo("manual restore requested");
+
   try {
     const payload = await restorePurchasesOnIosNative();
     if (!payload) {
       return { ok: false, message: NO_PURCHASES_MESSAGE };
     }
 
-    const status = applyRestoredPurchase({
-      expiresAtIso: payload.expiresAtIso,
-      expiresAtMs: payload.expiresAtMs,
-    });
+    const committed = commitRestoredProStatus(
+      () =>
+        applyRestoredPurchase({
+          expiresAtIso: payload.expiresAtIso,
+          expiresAtMs: payload.expiresAtMs,
+        }),
+      "restore"
+    );
 
-    return { ok: true, message: RESTORE_SUCCESS_MESSAGE, status };
+    if (!committed.ok) {
+      return { ok: false, message: PURCHASE_SYNC_FAILED_MESSAGE };
+    }
+
+    return { ok: true, message: RESTORE_SUCCESS_MESSAGE, status: committed.status };
   } catch (error) {
     if (isEmptyPurchasesError(error)) {
       return { ok: false, message: NO_PURCHASES_MESSAGE };
     }
     return { ok: false, message: RESTORE_FAILED_MESSAGE };
+  }
+}
+
+/** 使用者手動重新驗證訂閱（等同 restorePurchases，會觸發 StoreKit） */
+export async function reverifyProSubscription(): Promise<RestorePurchasesResult> {
+  return restorePurchases();
+}
+
+export type PurchaseProResult =
+  | { ok: true; message: string; status: ProStatus }
+  | { ok: false; message: string };
+
+export async function purchaseProSubscription(plan: ProPlanTier): Promise<PurchaseProResult> {
+  const productId = PRO_IAP_PRODUCT_IDS[plan];
+  const onIos = isCapacitorIos();
+
+  logIapDebug("selected plan", plan);
+  logIapDebug("productId", productId);
+  logIapDebug("isCapacitorIos", onIos);
+
+  if (!onIos) {
+    const result: PurchaseProResult = { ok: false, message: PURCHASE_WEB_MESSAGE };
+    logIapDebug("purchase result", result);
+    return result;
+  }
+
+  try {
+    const mod = await import("@capgo/native-purchases");
+    const { NativePurchases, PURCHASE_TYPE } = mod;
+
+    if (typeof NativePurchases.isBillingSupported === "function") {
+      const billing = await NativePurchases.isBillingSupported();
+      if (!billing.isBillingSupported) {
+        const result: PurchaseProResult = { ok: false, message: PURCHASE_WEB_MESSAGE };
+        logIapDebug("purchase result", result);
+        return result;
+      }
+    }
+
+    const transaction = await NativePurchases.purchaseProduct({
+      productIdentifier: productId,
+      productType: PURCHASE_TYPE.SUBS,
+    });
+
+    logIapDebug("purchase transaction", {
+      productIdentifier: transaction.productIdentifier,
+      expirationDate: transaction.expirationDate,
+      isActive: transaction.isActive,
+      environment: transaction.environment,
+    });
+
+    let expiresAtIso: string | null = null;
+    if (transaction.expirationDate) {
+      expiresAtIso = transaction.expirationDate;
+    }
+
+    const committed = commitRestoredProStatus(
+      () => applyRestoredPurchase({ expiresAtIso }),
+      "purchase"
+    );
+
+    if (!committed.ok) {
+      const result: PurchaseProResult = {
+        ok: false,
+        message: PURCHASE_SYNC_FAILED_MESSAGE,
+      };
+      logIapDebug("purchase result", result);
+      return result;
+    }
+
+    const result: PurchaseProResult = {
+      ok: true,
+      message: "訂閱成功",
+      status: committed.status,
+    };
+    logIapDebug("purchase result", result);
+    return result;
+  } catch (error) {
+    const message = resolvePurchaseFailureMessage(error);
+    const result: PurchaseProResult = { ok: false, message };
+    logIapDebug("purchase result", result);
+    if (import.meta.env.DEV) {
+      console.log("[IAP] purchase error:", extractErrorMessage(error), error);
+    }
+    return result;
   }
 }

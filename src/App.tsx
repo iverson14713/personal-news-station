@@ -19,7 +19,6 @@ import {
   proSourceLabel,
   redeemPromoCode,
   resetProTestState,
-  syncProDebugModeFromUrl,
   isProDebugToolsVisible,
   type ProStatus,
 } from "./pro";
@@ -32,7 +31,13 @@ import {
   normalizeDailyInsight,
 } from "./AiDailyInsightCard";
 import { InternalPromotionBanner } from "./InternalPromotionBanner";
-import { restorePurchases } from "./iapRestore";
+import { apiUrl } from "./apiBase";
+import { restorePurchases, purchaseProSubscription, syncPurchasesOnLaunch } from "./iapRestore";
+import {
+  getProUpgradeButtonLabel,
+  PRO_PRICING,
+  type ProPlanTier,
+} from "./proPricing";
 import {
   buildActiveNewsFeedSources,
   buildSelectedTopicSummary,
@@ -51,6 +56,9 @@ import { TestPlanModals } from "./TestPlanModals";
 import {
   ONBOARDING_TOPIC_PICK_COUNT,
   readOnboardingCompleted,
+  readStoredSelectedTopics,
+  SELECTED_TOPICS_STORAGE_KEY,
+  shouldShowTopicOnboarding,
   TopicOnboardingScreen,
   writeOnboardingCompleted,
 } from "./TopicOnboardingScreen";
@@ -185,16 +193,11 @@ const AI_DAILY_QUOTA_KEY = "pns_ai_daily_quota_v1";
 type ScriptFontSize = "sm" | "md" | "lg" | "xl";
 type PlaybackMode = "ai" | "news" | null;
 
-const PRO_PRICING = {
-  monthly: { price: 49, label: "NT$49 / 月" },
-  yearly: { price: 390, label: "NT$390 / 年", saveLabel: "約省 34%" },
-} as const;
-
 const ONBOARDING_SEEN_KEY = "pns_onboarding_seen_v1";
 const SPLASH_SEEN_SESSION_KEY = "pns_splash_seen_session_v1";
 const SPLASH_DURATION_MS = 1500;
 
-const SELECTED_TOPICS_KEY = "pns_selected_topics_v1";
+const SELECTED_TOPICS_KEY = SELECTED_TOPICS_STORAGE_KEY;
 const CUSTOM_KEYWORD_KEY = "pns_custom_keyword_v1";
 const CUSTOM_KEYWORDS_LIST_KEY = "pns_custom_keywords_v1";
 
@@ -212,28 +215,30 @@ type UpgradeModalKind =
 const FREE_DEFAULT_TOPICS = ["NBA", "MLB", "BTC"];
 const PRO_DEFAULT_TOPICS = ["NBA", "MLB", "大谷翔平", "Curry", "BTC"];
 
-function readSelectedTopics(): string[] {
-  try {
-    const raw = localStorage.getItem(SELECTED_TOPICS_KEY);
-    if (!raw) return FREE_DEFAULT_TOPICS;
-    const arr = JSON.parse(raw) as unknown;
-    if (!Array.isArray(arr)) return FREE_DEFAULT_TOPICS;
-    const cleaned = arr
-      .filter((x): x is string => typeof x === "string" && x.trim().length > 0)
-      .map((s) => s.trim());
-    // 避免空陣列造成首頁無內容
-    return cleaned.length > 0 ? cleaned : FREE_DEFAULT_TOPICS;
-  } catch {
-    return FREE_DEFAULT_TOPICS;
-  }
-}
-
 function writeSelectedTopics(topics: string[]) {
   try {
+    if (topics.length === 0) {
+      localStorage.removeItem(SELECTED_TOPICS_KEY);
+      return;
+    }
     localStorage.setItem(SELECTED_TOPICS_KEY, JSON.stringify(topics));
   } catch {
     /* ignore */
   }
+}
+
+function logTopicBootstrapState(args: {
+  loadedTopics: string[];
+  loadedKeywords: string[];
+  fallbackToOnboarding: boolean;
+  activeTopicLabels: string[];
+}) {
+  if (!import.meta.env.DEV && !isProDebugToolsVisible()) return;
+  console.log("[Topics] onboarding_completed", readOnboardingCompleted());
+  console.log("[Topics] loaded selectedTopics", args.loadedTopics);
+  console.log("[Topics] loaded customKeywords", args.loadedKeywords);
+  console.log("[Topics] final activeTopics", args.activeTopicLabels);
+  console.log("[Topics] fallback to onboarding", args.fallbackToOnboarding);
 }
 
 function readCustomKeyword(): string {
@@ -406,6 +411,16 @@ function splitSpeechChunks(text: string): string[] {
 
 function estimateChunkDurationMs(text: string, rate: number): number {
   return Math.max(650, Math.round((text.length * 92) / rate));
+}
+
+function estimatePlaybackSafeFallbackMs(text: string, rate: number): number {
+  const estimated = estimateChunkDurationMs(text, rate);
+  return Math.max(180_000, Math.round(estimated * 2.5));
+}
+
+function isSpeechSynthesisActive(): boolean {
+  const synth = window.speechSynthesis;
+  return synth.speaking || synth.pending || synth.paused;
 }
 
 function findResumeIndex(text: string, approxIndex: number): number {
@@ -795,10 +810,12 @@ async function parseVideosApiResponse(res: Response): Promise<
 }
 
 export default function App() {
+  const initialStoredTopics = readStoredSelectedTopics();
+  const initialStoredKeywords = readSavedCustomKeywords();
+  const initialTopicOnboardingOpen = shouldShowTopicOnboarding(initialStoredTopics);
+
   const [tab, setTab] = useState<Tab>("home");
-  const [selectedTopics, setSelectedTopics] = useState<string[]>(() =>
-    readOnboardingCompleted() ? readSelectedTopics() : []
-  );
+  const [selectedTopics, setSelectedTopics] = useState<string[]>(() => initialStoredTopics);
   const [customKeyword, setCustomKeyword] = useState(readCustomKeyword);
   const [news, setNews] = useState<NewsItem[]>([]);
   const [topicNewsSections, setTopicNewsSections] = useState<TopicNewsSection[]>([]);
@@ -833,6 +850,8 @@ export default function App() {
   const [playbackProgress, setPlaybackProgress] = useState(0);
   const [currentChunkIndex, setCurrentChunkIndex] = useState(-1);
   const [playbackMode, setPlaybackMode] = useState<PlaybackMode>(null);
+  const [playbackCompleted, setPlaybackCompleted] = useState(false);
+  const [playbackError, setPlaybackError] = useState<string | null>(null);
   const [remainingMs, setRemainingMs] = useState(0);
   const [totalChunks, setTotalChunks] = useState(0);
   const [brokenVideoThumbIds, setBrokenVideoThumbIds] = useState<Record<string, true>>({});
@@ -843,9 +862,6 @@ export default function App() {
   const [testPasswordOpen, setTestPasswordOpen] = useState(false);
   const [testPanelOpen, setTestPanelOpen] = useState(false);
   const titleTapRef = useRef({ count: 0, lastAt: 0 });
-  const [showProDebugTools, setShowProDebugTools] = useState(() =>
-    syncProDebugModeFromUrl()
-  );
   const [upgradeModal, setUpgradeModal] = useState<UpgradeModalKind | null>(null);
   const [aiAnalysisMode, setAiAnalysisMode] = useState<AiAnalysisMode>("normal");
   const [savedCustomKeywords, setSavedCustomKeywords] = useState<string[]>(() =>
@@ -854,7 +870,7 @@ export default function App() {
   const [promoModalOpen, setPromoModalOpen] = useState(false);
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [topicOnboardingOpen, setTopicOnboardingOpen] = useState(
-    () => !readOnboardingCompleted()
+    () => initialTopicOnboardingOpen
   );
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [dailyInsight, setDailyInsight] = useState<AiDailyInsight | null>(null);
@@ -880,6 +896,20 @@ export default function App() {
   const progressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastTtsErrorAtRef = useRef(0);
   const isManualStopRef = useRef(false);
+  const isPausedRef = useRef(false);
+  const isSpeakingRef = useRef(false);
+  const playbackFullTextRef = useRef("");
+  const playbackFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const playbackPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const stopPlaybackRef = useRef<() => void>(() => {});
+
+  useEffect(() => {
+    isPausedRef.current = isPaused;
+  }, [isPaused]);
+
+  useEffect(() => {
+    isSpeakingRef.current = isSpeaking;
+  }, [isSpeaking]);
 
   const selectedNews = news.filter((n) => n.selected);
   const favoriteNews = news.filter((n) => n.favorite);
@@ -948,8 +978,14 @@ export default function App() {
     setUpgradeModal("general");
   }, []);
 
-  const showProPaymentComingSoon = useCallback(() => {
-    alert("Pro 訂閱即將開放，請稍後再試或使用兌換碼。");
+  const handleUpgradePro = useCallback(async (plan: ProPlanTier) => {
+    const result = await purchaseProSubscription(plan);
+    if (result.ok) {
+      setRealProStatus(result.status);
+      setTestPlanRevision((v) => v + 1);
+      setUpgradeModal(null);
+    }
+    alert(result.message);
   }, []);
 
   const setAiQuotaExhaustedMessage = useCallback(() => {
@@ -1029,7 +1065,7 @@ export default function App() {
 
     setDailyInsightLoading(true);
     try {
-      const res = await fetch("/api/summary", {
+      const res = await fetch(apiUrl("summary"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1095,6 +1131,34 @@ export default function App() {
   }, [refreshProStatus]);
 
   useEffect(() => {
+    logTopicBootstrapState({
+      loadedTopics: initialStoredTopics,
+      loadedKeywords: initialStoredKeywords,
+      fallbackToOnboarding: initialTopicOnboardingOpen,
+      activeTopicLabels: buildActiveNewsFeedSources(
+        topics
+          .filter((t) => initialStoredTopics.includes(t.label))
+          .map((t) => ({ label: t.label, query: t.query, icon: t.icon })),
+        initialStoredKeywords
+      ).map((s) => s.label),
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const result = await syncPurchasesOnLaunch();
+      if (cancelled || !result.status) return;
+      setRealProStatus(result.status);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (topicOnboardingOpen) return;
     const clamped = clampTrackingToPlan(selectedTopics, savedCustomKeywords, effectiveStatus);
     const topicsChanged = clamped.topics.join("\0") !== selectedTopics.join("\0");
     const keywordsChanged = clamped.keywords.join("\0") !== savedCustomKeywords.join("\0");
@@ -1110,10 +1174,6 @@ export default function App() {
     // 僅在方案切換或初次載入時校正追蹤上限
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveStatus]);
-
-  useEffect(() => {
-    setShowProDebugTools(syncProDebugModeFromUrl());
-  }, [tab]);
 
   useEffect(() => {
     if (onboardingOpen) {
@@ -1180,6 +1240,12 @@ export default function App() {
       if (progressTimerRef.current != null) {
         clearInterval(progressTimerRef.current);
       }
+      if (playbackPollTimerRef.current != null) {
+        clearInterval(playbackPollTimerRef.current);
+      }
+      if (playbackFallbackTimerRef.current != null) {
+        clearTimeout(playbackFallbackTimerRef.current);
+      }
       window.speechSynthesis.cancel();
     };
   }, []);
@@ -1231,9 +1297,6 @@ export default function App() {
   }, []);
 
   const fetchNews = async () => {
-    setLoading(true);
-    setNewsBanner(null);
-
     const custom = customKeyword.trim();
     const topicObjs = selectedTopicObjects;
     const feedSources = buildActiveNewsFeedSources(
@@ -1243,17 +1306,30 @@ export default function App() {
     );
 
     if (import.meta.env.DEV || isProDebugToolsVisible()) {
-      console.log("updateNews activeTopics =", feedSources.map((s) => s.label));
+      console.log("[Topics] fetchNews activeTopics =", feedSources.map((s) => s.label));
+      console.log("updateNews apiUrl =", apiUrl(`news?q=${encodeURIComponent(feedSources[0]?.query ?? "")}`));
     }
+
+    if (feedSources.length === 0) {
+      setTopicOnboardingOpen(true);
+      setLoading(false);
+      setNewsBanner(null);
+      return;
+    }
+
+    setLoading(true);
+    setNewsBanner(null);
 
     try {
       const nowMs = Date.now();
       const responseTexts = await Promise.all(
-        feedSources.map((source) =>
-          fetch(`/api/news?q=${encodeURIComponent(source.query)}`).then((r) =>
-            r.text()
-          )
-        )
+        feedSources.map(async (source) => {
+          const res = await fetch(apiUrl(`news?q=${encodeURIComponent(source.query)}`));
+          if (!res.ok) {
+            throw new Error(`news fetch failed: ${res.status}`);
+          }
+          return res.text();
+        })
       );
 
       const feeds = feedSources.map((source, index) => ({
@@ -1273,6 +1349,7 @@ export default function App() {
       });
 
       setAiScript("");
+      stopPlaybackRef.current();
       setAiHighlights([]);
       setAiJsonFallback(false);
       setSelectedScriptDuration(null);
@@ -1287,7 +1364,7 @@ export default function App() {
       setNews([]);
       setTopicNewsSections([]);
       setLastUpdated("");
-      setNewsBanner("暫時無法載入新聞，請檢查網路後再試一次。");
+      setNewsBanner("新聞更新失敗，請確認網路連線後再試一次。");
       console.error(error);
     }
 
@@ -1325,7 +1402,7 @@ export default function App() {
         const topicsParam = encodeURIComponent(labels.join(","));
         const customParam = encodeURIComponent(custom);
         const res = await fetch(
-          `/api/videos?pack=1&topics=${topicsParam}&custom=${customParam}`
+          apiUrl(`videos?pack=1&topics=${topicsParam}&custom=${customParam}`)
         );
         const parsed = await parseVideosApiResponse(res);
 
@@ -1396,7 +1473,16 @@ export default function App() {
 
   useEffect(() => {
     if (topicOnboardingOpen) return;
+    if (
+      selectedTopics.length === 0 &&
+      savedCustomKeywords.length === 0 &&
+      !customKeyword.trim()
+    ) {
+      setTopicOnboardingOpen(true);
+      return;
+    }
     void fetchNews();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -1448,6 +1534,25 @@ export default function App() {
     setTopicOnboardingOpen(false);
     setTab("home");
     void fetchNews();
+  };
+
+  const resetAiDailyQuota = () => {
+    try {
+      localStorage.removeItem(AI_DAILY_QUOTA_KEY);
+    } catch {
+      /* ignore */
+    }
+    setAiQuota({ date: todayYmdLocal(), used: 0 });
+    alert("已重置今日 AI 次數");
+  };
+
+  const handleResetProTestState = () => {
+    const ok = window.confirm(
+      "確定要重置 Pro 測試狀態嗎？這只會清除本機 Pro 狀態，不會影響收藏、主題與 AI 歷史。"
+    );
+    if (!ok) return;
+    resetProTestState();
+    window.location.reload();
   };
 
   const resetTopicOnboarding = () => {
@@ -1574,6 +1679,17 @@ export default function App() {
     setNews((prev) => prev.map((item) => ({ ...item, favorite: false })));
   };
 
+  const clearPlaybackTimers = useCallback(() => {
+    if (playbackFallbackTimerRef.current != null) {
+      clearTimeout(playbackFallbackTimerRef.current);
+      playbackFallbackTimerRef.current = null;
+    }
+    if (playbackPollTimerRef.current != null) {
+      clearInterval(playbackPollTimerRef.current);
+      playbackPollTimerRef.current = null;
+    }
+  }, []);
+
   const clearProgressTimer = () => {
     if (progressTimerRef.current != null) {
       clearInterval(progressTimerRef.current);
@@ -1581,10 +1697,156 @@ export default function App() {
     }
   };
 
+  const finishPlaybackNaturally = useCallback(() => {
+    if (isManualStopRef.current) return;
+    currentUtteranceRef.current = null;
+    clearPlaybackTimers();
+    try {
+      window.speechSynthesis.cancel();
+    } catch {
+      /* ignore */
+    }
+    currentSpeakTextRef.current = "";
+    playbackFullTextRef.current = "";
+    setIsSpeaking(false);
+    setIsPaused(false);
+    isPausedRef.current = false;
+    setCurrentChunkIndex(-1);
+    setPlaybackProgress(1);
+    setRemainingMs(0);
+    setPlaybackMode(null);
+    setTotalChunks(0);
+    setPlaybackCompleted(true);
+    setPlaybackError(null);
+  }, [clearPlaybackTimers]);
+
+  const handlePlaybackError = useCallback(
+    (message = "播放發生錯誤，請稍後再試") => {
+      if (isManualStopRef.current) return;
+      clearPlaybackTimers();
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        /* ignore */
+      }
+      currentUtteranceRef.current = null;
+      currentSpeakTextRef.current = "";
+      playbackFullTextRef.current = "";
+      setIsSpeaking(false);
+      setIsPaused(false);
+      isPausedRef.current = false;
+      setCurrentChunkIndex(-1);
+      setPlaybackProgress(0);
+      setRemainingMs(0);
+      setPlaybackMode(null);
+      setTotalChunks(0);
+      setPlaybackCompleted(false);
+      setPlaybackError(message);
+    },
+    [clearPlaybackTimers]
+  );
+
+  const runFallbackSafetyCheck = useCallback(
+    (utterance: SpeechSynthesisUtterance, speakText: string, rate: number) => {
+      if (currentUtteranceRef.current !== utterance) return;
+      if (isManualStopRef.current) return;
+      if (isPausedRef.current) {
+        playbackFallbackTimerRef.current = window.setTimeout(() => {
+          runFallbackSafetyCheck(utterance, speakText, rate);
+        }, 30_000);
+        return;
+      }
+      if (isSpeechSynthesisActive()) {
+        playbackFallbackTimerRef.current = window.setTimeout(() => {
+          runFallbackSafetyCheck(utterance, speakText, rate);
+        }, 30_000);
+        return;
+      }
+      if (!isSpeakingRef.current && !isPausedRef.current) return;
+      finishPlaybackNaturally();
+    },
+    [finishPlaybackNaturally]
+  );
+
+  const startPlaybackWatchdog = useCallback(
+    (
+      utterance: SpeechSynthesisUtterance,
+      speakText: string,
+      fullText: string,
+      rate: number
+    ) => {
+      clearPlaybackTimers();
+      const totalChars = Math.max(1, fullText.length || speakText.length);
+
+      setRemainingMs(estimateChunkDurationMs(speakText, rate));
+
+      playbackPollTimerRef.current = window.setInterval(() => {
+        if (currentUtteranceRef.current !== utterance) return;
+        if (isManualStopRef.current) return;
+        if (isPausedRef.current) return;
+
+        const boundaryIdx = lastBoundaryCharIndexRef.current;
+        if (boundaryIdx > 0) {
+          const progress = Math.min(1, boundaryIdx / totalChars);
+          setPlaybackProgress(progress);
+          const remainChars = Math.max(0, totalChars - boundaryIdx);
+          setRemainingMs(
+            estimateChunkDurationMs("一".repeat(Math.max(1, remainChars)), rate)
+          );
+        }
+      }, 400);
+
+      playbackFallbackTimerRef.current = window.setTimeout(() => {
+        runFallbackSafetyCheck(utterance, speakText, rate);
+      }, estimatePlaybackSafeFallbackMs(speakText, rate));
+    },
+    [clearPlaybackTimers, runFallbackSafetyCheck]
+  );
+
+  const attachUtteranceHandlers = useCallback(
+    (
+      utterance: SpeechSynthesisUtterance,
+      speakText: string,
+      fullText: string,
+      rate: number
+    ) => {
+      utterance.onboundary = (ev) => {
+        if (currentUtteranceRef.current !== utterance) return;
+        const idx =
+          typeof (ev as unknown as { charIndex?: unknown }).charIndex === "number"
+            ? Number((ev as unknown as { charIndex: number }).charIndex)
+            : NaN;
+        if (!Number.isNaN(idx) && idx >= 0) {
+          lastBoundaryCharIndexRef.current = idx;
+          lastBoundaryAtRef.current = Date.now();
+        }
+      };
+
+      utterance.onend = () => {
+        if (currentUtteranceRef.current !== utterance) return;
+        if (isManualStopRef.current) return;
+        if (isPausedRef.current) return;
+        finishPlaybackNaturally();
+      };
+
+      utterance.onerror = () => {
+        if (currentUtteranceRef.current !== utterance) return;
+        if (isManualStopRef.current) return;
+        handlePlaybackError();
+      };
+
+      startPlaybackWatchdog(utterance, speakText, fullText, rate);
+    },
+    [finishPlaybackNaturally, handlePlaybackError, startPlaybackWatchdog]
+  );
+
   const stopPlayback = useCallback(() => {
     isManualStopRef.current = true;
     currentUtteranceRef.current = null;
+    currentSpeakTextRef.current = "";
+    playbackFullTextRef.current = "";
 
+    clearPlaybackTimers();
     try {
       window.speechSynthesis.cancel();
     } catch {
@@ -1594,12 +1856,25 @@ export default function App() {
     clearProgressTimer();
     setIsSpeaking(false);
     setIsPaused(false);
+    isPausedRef.current = false;
     setCurrentChunkIndex(-1);
     setPlaybackProgress(0);
     setRemainingMs(0);
     setPlaybackMode(null);
     setTotalChunks(0);
-  }, []);
+    setPlaybackCompleted(false);
+    setPlaybackError(null);
+  }, [clearPlaybackTimers]);
+
+  useEffect(() => {
+    stopPlaybackRef.current = stopPlayback;
+  }, [stopPlayback]);
+
+  useEffect(() => {
+    if (aiLoading) {
+      stopPlayback();
+    }
+  }, [aiLoading, stopPlayback]);
 
   const pausePlayback = useCallback(() => {
     try {
@@ -1607,6 +1882,7 @@ export default function App() {
     } catch {
       /* ignore */
     }
+    isPausedRef.current = true;
     setIsPaused(true);
   }, []);
 
@@ -1616,90 +1892,74 @@ export default function App() {
     } catch {
       /* ignore */
     }
+    isPausedRef.current = false;
     setIsPaused(false);
   }, []);
 
-  const startPlayback = useCallback((scriptOverride?: string) => {
-    const scriptText = (scriptOverride ?? aiScript).trim();
-    const hasAi = scriptText.length > 0;
-    if (!hasAi && selectedNews.length === 0) {
-      alert("請先選擇要播放的新聞，或先產生 AI 新聞稿");
-      return;
-    }
-
-    isManualStopRef.current = false;
-
-    const mode: PlaybackMode = hasAi ? "ai" : "news";
-    const textToSpeak = hasAi
-      ? scriptText
-      : selectedNews.map((n, i) => `第 ${i + 1} 則新聞，${n.title}`).join("。");
-
-    setPlaybackMode(mode);
-    setTab("player");
-    // 先顯示「準備播放」狀態，避免使用者覺得沒反應
-    setIsSpeaking(true);
-    setIsPaused(false);
-    setPlaybackProgress(0);
-    setRemainingMs(0);
-    setCurrentChunkIndex(0);
-    setTotalChunks(0);
-
-    try {
-      window.speechSynthesis.cancel();
-    } catch {
-      /* ignore */
-    }
-
-    const selectedVoice = voices.find((v) => v.name === voiceName);
-    const u = new SpeechSynthesisUtterance(textToSpeak);
-    u.lang = "zh-TW";
-    u.rate = speed;
-    if (selectedVoice) u.voice = selectedVoice;
-    currentUtteranceRef.current = u;
-    currentSpeakTextRef.current = textToSpeak;
-    speakStartedAtRef.current = Date.now();
-    lastBoundaryCharIndexRef.current = 0;
-    lastBoundaryAtRef.current = Date.now();
-
-    u.onboundary = (ev) => {
-      if (currentUtteranceRef.current !== u) return;
-      const idx =
-        typeof (ev as unknown as { charIndex?: unknown }).charIndex === "number"
-          ? Number((ev as unknown as { charIndex: number }).charIndex)
-          : NaN;
-      if (!Number.isNaN(idx) && idx >= 0) {
-        lastBoundaryCharIndexRef.current = idx;
-        lastBoundaryAtRef.current = Date.now();
+  const startPlayback = useCallback(
+    (scriptOverride?: string) => {
+      const scriptText = (scriptOverride ?? aiScript).trim();
+      const hasAi = scriptText.length > 0;
+      if (!hasAi && selectedNews.length === 0) {
+        alert("請先選擇要播放的新聞，或先產生 AI 新聞稿");
+        return;
       }
-    };
 
-    u.onend = () => {
-      if (currentUtteranceRef.current !== u) return;
-      setIsSpeaking(false);
-      setIsPaused(false);
-      setPlaybackMode(null);
-      currentUtteranceRef.current = null;
-    };
+      isManualStopRef.current = false;
 
-    u.onerror = () => {
-      if (currentUtteranceRef.current !== u) return;
-      if (isManualStopRef.current) return;
-      setIsSpeaking(false);
+      const mode: PlaybackMode = hasAi ? "ai" : "news";
+      const textToSpeak = hasAi
+        ? scriptText
+        : selectedNews.map((n, i) => `第 ${i + 1} 則新聞，${n.title}`).join("。");
+
+      playbackFullTextRef.current = textToSpeak;
+      setPlaybackMode(mode);
+      setTab("player");
+      setIsSpeaking(true);
       setIsPaused(false);
-      currentUtteranceRef.current = null;
-      const now = Date.now();
-      if (now - lastTtsErrorAtRef.current > 2500) {
-        lastTtsErrorAtRef.current = now;
-        alert("無法啟動語音朗讀。請確認裝置音量、靜音模式與瀏覽器語音權限。");
+      isPausedRef.current = false;
+      setPlaybackProgress(0);
+      setRemainingMs(estimateChunkDurationMs(textToSpeak, speed));
+      setCurrentChunkIndex(0);
+      setTotalChunks(0);
+      setPlaybackCompleted(false);
+      setPlaybackError(null);
+
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        /* ignore */
       }
-    };
 
-    try {
-      window.speechSynthesis.speak(u);
-    } catch {
-      u.onerror?.(new Event("error"));
-    }
-  }, [aiScript, selectedNews, speed, voices, voiceName]);
+      const selectedVoice = voices.find((v) => v.name === voiceName);
+      const u = new SpeechSynthesisUtterance(textToSpeak);
+      u.lang = "zh-TW";
+      u.rate = speed;
+      if (selectedVoice) u.voice = selectedVoice;
+      currentUtteranceRef.current = u;
+      currentSpeakTextRef.current = textToSpeak;
+      speakStartedAtRef.current = Date.now();
+      lastBoundaryCharIndexRef.current = 0;
+      lastBoundaryAtRef.current = Date.now();
+
+      attachUtteranceHandlers(u, textToSpeak, textToSpeak, speed);
+
+      try {
+        window.speechSynthesis.speak(u);
+      } catch {
+        handlePlaybackError();
+      }
+    },
+    [
+      aiScript,
+      attachUtteranceHandlers,
+      handlePlaybackError,
+      selectedNews,
+      speed,
+      voices,
+      voiceName,
+    ]
+  );
 
   const togglePlayPause = useCallback(() => {
     if (isPaused) {
@@ -1717,23 +1977,23 @@ export default function App() {
     const next = persistPlaybackSpeed(newSpeed);
     if (!isSpeaking && !isPaused) return;
 
-    // 播放中調速：從目前位置附近續播（cancel 屬正常行為，不顯示錯誤）
+    const fullText = playbackFullTextRef.current || currentSpeakTextRef.current;
     const currentText = currentSpeakTextRef.current;
     if (!currentText.trim()) return;
 
-    // 若 onboundary 有回報就用；否則用時間估算
     const boundaryIdx = lastBoundaryCharIndexRef.current;
     let approxIdx = boundaryIdx;
     if (!approxIdx || approxIdx <= 0) {
       const elapsedMs = Math.max(0, Date.now() - speakStartedAtRef.current);
-      const estCharsPerMs = 1 / Math.max(1, estimateChunkDurationMs("一".repeat(100), speed) / 100);
+      const estCharsPerMs =
+        1 / Math.max(1, estimateChunkDurationMs("一".repeat(100), speed) / 100);
       approxIdx = Math.floor(elapsedMs * estCharsPerMs);
     }
 
     const resumeAt = findResumeIndex(currentText, approxIdx);
     const remain = currentText.slice(resumeAt).trim();
     if (!remain) {
-      stopPlayback();
+      finishPlaybackNaturally();
       return;
     }
 
@@ -1743,60 +2003,30 @@ export default function App() {
     u.rate = next;
     if (selectedVoice) u.voice = selectedVoice;
 
-    // 進度 ref 更新，避免後續再次調速仍從頭
-    currentUtteranceRef.current = u;
-    currentSpeakTextRef.current = remain;
-    speakStartedAtRef.current = Date.now();
-    lastBoundaryCharIndexRef.current = 0;
-    lastBoundaryAtRef.current = Date.now();
-
-    u.onboundary = (ev) => {
-      if (currentUtteranceRef.current !== u) return;
-      const idx =
-        typeof (ev as unknown as { charIndex?: unknown }).charIndex === "number"
-          ? Number((ev as unknown as { charIndex: number }).charIndex)
-          : NaN;
-      if (!Number.isNaN(idx) && idx >= 0) {
-        lastBoundaryCharIndexRef.current = idx;
-        lastBoundaryAtRef.current = Date.now();
-      }
-    };
-    u.onend = () => {
-      if (currentUtteranceRef.current !== u) return;
-      setIsSpeaking(false);
-      setIsPaused(false);
-      setPlaybackMode(null);
-      currentUtteranceRef.current = null;
-      currentSpeakTextRef.current = "";
-    };
-    u.onerror = () => {
-      if (currentUtteranceRef.current !== u) return;
-      if (isManualStopRef.current) return;
-      setIsSpeaking(false);
-      setIsPaused(false);
-      currentUtteranceRef.current = null;
-      currentSpeakTextRef.current = "";
-      const now = Date.now();
-      if (now - lastTtsErrorAtRef.current > 2500) {
-        lastTtsErrorAtRef.current = now;
-        alert("無法啟動語音朗讀。請確認裝置音量、靜音模式與瀏覽器語音權限。");
-      }
-    };
-
-    // 調速的 cancel 是正常行為，避免誤報
     isManualStopRef.current = true;
+    clearPlaybackTimers();
     try {
       window.speechSynthesis.cancel();
     } catch {
       /* ignore */
     }
     isManualStopRef.current = false;
+
+    currentUtteranceRef.current = u;
+    currentSpeakTextRef.current = remain;
+    speakStartedAtRef.current = Date.now();
+    lastBoundaryCharIndexRef.current = 0;
+    lastBoundaryAtRef.current = Date.now();
+
+    attachUtteranceHandlers(u, remain, fullText, next);
+
     setIsPaused(false);
+    isPausedRef.current = false;
     setIsSpeaking(true);
     try {
       window.speechSynthesis.speak(u);
     } catch {
-      u.onerror?.(new Event("error"));
+      handlePlaybackError();
     }
   };
 
@@ -2073,11 +2303,12 @@ ${newsText}
     }
 
     setAiLoading(true);
+    stopPlayback();
     setAiScript("");
     setAiHighlights([]);
     setAiJsonFallback(false);
     try {
-      const res = await fetch("/api/summary", {
+      const res = await fetch(apiUrl("summary"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2446,6 +2677,8 @@ ${newsText}
             <PlayerDeck
               isSpeaking={isSpeaking}
               isPaused={isPaused}
+              playbackCompleted={playbackCompleted}
+              playbackError={playbackError}
               playbackProgress={playbackProgress}
               remainingMs={remainingMs}
               speed={speed}
@@ -2650,16 +2883,13 @@ ${newsText}
             <SettingsCollapsible title="Pro 方案詳情" subtitle={isPro ? "Pro 已啟用" : "升級解鎖完整功能"}>
               <ProStatusCard
                 proStatus={effectiveStatus}
-                realProStatus={realProStatus}
-                testOverride={effectivePlan.hasTestOverride}
-                showDebugTools={showProDebugTools}
                 onRestore={handleRestorePurchases}
               />
               {!isPro ? (
                 <ProUpgradeCard
                   variant="settings"
                   proStatus={effectiveStatus}
-                  onUpgrade={openProUpgrade}
+                  onUpgrade={handleUpgradePro}
                   onRedeem={() => setPromoModalOpen(true)}
                   onRestore={handleRestorePurchases}
                 />
@@ -2788,23 +3018,6 @@ ${newsText}
                   </div>
                 </div>
               </div>
-              {showProDebugTools ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    try {
-                      localStorage.removeItem("pns_ai_daily_quota_v1");
-                    } catch {
-                      /* ignore */
-                    }
-                    setAiQuota({ date: todayYmdLocal(), used: 0 });
-                    alert("已重置今日 AI 次數");
-                  }}
-                  style={styles.dangerFullButton}
-                >
-                  重置 AI 次數
-                </button>
-              ) : null}
             </SettingsCollapsible>
 
             <SettingsCollapsible
@@ -2860,15 +3073,6 @@ ${newsText}
               >
                 重新觀看新手教學
               </button>
-              {showProDebugTools ? (
-                <button
-                  type="button"
-                  onClick={resetTopicOnboarding}
-                  style={{ ...styles.toolbarBtnNeutral, width: "100%", marginTop: "8px" }}
-                >
-                  重置 Onboarding（主題選擇）
-                </button>
-              ) : null}
             </SettingsCollapsible>
 
             <SettingsCollapsible title="法律與隱私" subtitle="隱私權與服務條款">
@@ -2922,7 +3126,7 @@ ${newsText}
               setUpgradeModal(null);
               setPromoModalOpen(true);
             }}
-            onUpgrade={showProPaymentComingSoon}
+            onUpgrade={handleUpgradePro}
             onRestore={handleRestorePurchases}
           />
         ) : null}
@@ -2977,6 +3181,9 @@ ${newsText}
           onOpenPanel={() => setTestPanelOpen(true)}
           onClosePanel={() => setTestPanelOpen(false)}
           onPlanChanged={handleTestPlanChanged}
+          onResetProTestState={handleResetProTestState}
+          onResetOnboarding={resetTopicOnboarding}
+          onResetAiQuota={resetAiDailyQuota}
         />
       </div>
     </div>
@@ -3086,6 +3293,8 @@ function WaveformBars({ active }: { active: boolean }) {
 function PlayerDeck({
   isSpeaking,
   isPaused,
+  playbackCompleted,
+  playbackError,
   playbackProgress,
   remainingMs,
   speed,
@@ -3106,6 +3315,8 @@ function PlayerDeck({
 }: {
   isSpeaking: boolean;
   isPaused: boolean;
+  playbackCompleted: boolean;
+  playbackError: string | null;
   playbackProgress: number;
   remainingMs: number;
   speed: number;
@@ -3127,13 +3338,17 @@ function PlayerDeck({
   const [voiceOpen, setVoiceOpen] = useState(false);
   const active = isSpeaking || isPaused;
   const canPlay = aiScript.trim().length > 0 || selectedNewsCount > 0;
-  const statusLabel = isPaused
-    ? "已暫停"
-    : isSpeaking
-      ? playbackMode === "ai"
-        ? "AI 主播稿播放中"
-        : "新聞播放中"
-      : "待播放";
+  const statusLabel = playbackError
+    ? playbackError
+    : isPaused
+      ? "已暫停"
+      : isSpeaking
+        ? playbackMode === "ai"
+          ? "AI 主播稿播放中"
+          : "新聞播放中"
+        : playbackCompleted
+          ? "已播放完成"
+          : "待播放";
 
   return (
     <section style={styles.playerDeck}>
@@ -3424,6 +3639,47 @@ function RestorePurchasesButton({
   );
 }
 
+function ProPlanPicker({
+  selectedPlan,
+  onSelectPlan,
+}: {
+  selectedPlan: ProPlanTier;
+  onSelectPlan: (plan: ProPlanTier) => void;
+}) {
+  const plans: ProPlanTier[] = ["monthly", "yearly"];
+
+  return (
+    <div style={styles.proPlanPicker} role="radiogroup" aria-label="Pro 方案">
+      {plans.map((plan) => {
+        const active = selectedPlan === plan;
+        const pricing = PRO_PRICING[plan];
+        return (
+          <button
+            key={plan}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            onClick={() => onSelectPlan(plan)}
+            style={{
+              ...styles.proPlanCard,
+              ...(active ? styles.proPlanCardActive : {}),
+            }}
+          >
+            {plan === "yearly" ? (
+              <span style={styles.proPlanBadge}>推薦</span>
+            ) : null}
+            <div style={styles.proPlanTitle}>{pricing.shortTitle}</div>
+            <div style={styles.proPlanPrice}>{pricing.label}</div>
+            {plan === "yearly" && pricing.subtitle ? (
+              <div style={styles.proPlanSubtitle}>{pricing.subtitle}</div>
+            ) : null}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function ProUpgradeCard({
   variant,
   proStatus,
@@ -3433,10 +3689,12 @@ function ProUpgradeCard({
 }: {
   variant: "compact" | "settings";
   proStatus: ProStatus;
-  onUpgrade: () => void;
+  onUpgrade: (plan: ProPlanTier) => void | Promise<void>;
   onRedeem: () => void;
   onRestore: () => void | Promise<void>;
 }) {
+  const [selectedPlan, setSelectedPlan] = useState<ProPlanTier>("yearly");
+
   if (isProActive(proStatus)) return null;
 
   const compact = variant === "compact";
@@ -3463,25 +3721,19 @@ function ProUpgradeCard({
           解鎖 5 分鐘深度主播稿、10 個追蹤主題、AI 今日洞察與無廣告閱讀體驗
         </p>
       )}
-      <div style={styles.proUpgradePriceRow}>
-        <span>月費 {PRO_PRICING.monthly.label}</span>
-        <span style={styles.proUpgradePriceDot}>·</span>
-        <span>年費 {PRO_PRICING.yearly.label}</span>
-      </div>
+      <ProPlanPicker selectedPlan={selectedPlan} onSelectPlan={setSelectedPlan} />
       <div style={styles.proUpgradeBtnRow}>
         <button
           type="button"
-          onClick={onUpgrade}
+          onClick={() => onUpgrade(selectedPlan)}
           style={styles.proUpgradePrimaryBtn}
-          title="正式付款即將開放"
         >
-          升級 Pro（即將開放）
+          {getProUpgradeButtonLabel(selectedPlan)}
         </button>
         <button type="button" onClick={onRedeem} style={styles.proUpgradeSecondaryBtn}>
           輸入兌換碼
         </button>
       </div>
-      <p style={styles.proUpgradeFootnote}>正式付款即將開放（App Store / Google Play）</p>
       <RestorePurchasesButton label="已購買？恢復購買" onRestore={onRestore} variant="link" />
     </div>
   );
@@ -3489,15 +3741,9 @@ function ProUpgradeCard({
 
 function ProStatusCard({
   proStatus,
-  realProStatus,
-  testOverride = false,
-  showDebugTools,
   onRestore,
 }: {
   proStatus: ProStatus;
-  realProStatus: ProStatus;
-  testOverride?: boolean;
-  showDebugTools: boolean;
   onRestore: () => void | Promise<void>;
 }) {
   const active = isProActive(proStatus);
@@ -3507,11 +3753,14 @@ function ProStatusCard({
   return (
     <section style={styles.controlPanel}>
       <div style={styles.controlTitle}>Pro 方案</div>
-      {testOverride ? (
-        <div style={styles.settingHint}>
-          測試覆蓋中 · 正式訂閱：{realProStatus.isPro ? "Pro" : "Free"}
-        </div>
-      ) : null}
+      <div style={styles.proStatusLine}>
+        <strong>月費：</strong>
+        {PRO_PRICING.monthly.label}
+      </div>
+      <div style={styles.proStatusLine}>
+        <strong>年費：</strong>
+        {PRO_PRICING.yearly.label}
+      </div>
       {active ? (
         <>
           <div style={styles.proStatusLine}>
@@ -3605,31 +3854,6 @@ function ProStatusCard({
       <div style={styles.proRestoreRow}>
         <RestorePurchasesButton label="恢復購買" onRestore={onRestore} variant="secondary" />
       </div>
-
-      {showDebugTools ? (
-        <div style={styles.proDebugToolsBox}>
-          <div style={styles.proDebugToolsLabel}>測試工具</div>
-          <button
-            type="button"
-            onClick={() => {
-              const ok = window.confirm(
-                "確定要重置 Pro 測試狀態嗎？這只會清除本機 Pro 狀態，不會影響收藏、主題與 AI 歷史。"
-              );
-              if (!ok) return;
-              resetProTestState();
-              window.location.reload();
-            }}
-            style={styles.proDebugResetBtnProminent}
-          >
-            重置 Pro 測試狀態
-          </button>
-        </div>
-      ) : (
-        <p style={styles.proDebugHint}>
-          測試 Free／Pro 切換：請在網址加上 <strong>?debug=1</strong> 後重新整理（或於主控台執行
-          localStorage.setItem(&apos;pns_debug_mode&apos;,&apos;1&apos;)）
-        </p>
-      )}
     </section>
   );
 }
@@ -3644,7 +3868,7 @@ function UpgradeModal({
   kind: UpgradeModalKind;
   onClose: () => void;
   onRedeem: () => void;
-  onUpgrade: () => void;
+  onUpgrade: (plan: ProPlanTier) => void | Promise<void>;
   onRestore: () => void | Promise<void>;
 }) {
   const renderLimitBody = () => {
@@ -3751,8 +3975,12 @@ function UpgradeModal({
           />
         ) : (
           <div style={styles.proUpgradeBtnRow}>
-            <button type="button" onClick={onUpgrade} style={styles.proUpgradePrimaryBtn}>
-              升級 Pro（即將開放）
+            <button
+              type="button"
+              onClick={() => onUpgrade("yearly")}
+              style={styles.proUpgradePrimaryBtn}
+            >
+              {getProUpgradeButtonLabel("yearly")}
             </button>
             {kind === "five_minute" ? (
               <button type="button" onClick={onRedeem} style={styles.proUpgradeSecondaryBtn}>
@@ -3910,7 +4138,7 @@ function ProPaywall({
                   <div style={styles.paywallPlanName}>年費</div>
                   <div style={styles.paywallPlanPrice}>{PRO_PRICING.yearly.label}</div>
                 </div>
-                <div style={styles.paywallPlanSub}>約省 15% · 長期最划算</div>
+                <div style={styles.paywallPlanSub}>{PRO_PRICING.yearly.subtitle}</div>
               </button>
             </div>
           </section>
@@ -5054,7 +5282,6 @@ function NewsList({
   playingIndex?: number;
   emptyHint?: string;
 }) {
-  const headerMerged = !!homeToolbar;
   const selectedCount = news.filter((n) => n.selected).length;
   const allSelected = news.length > 0 && selectedCount === news.length;
   const newsById = useMemo(() => new Map(news.map((n) => [n.id, n])), [news]);
@@ -5135,63 +5362,52 @@ function NewsList({
 
   return (
     <>
-      <div
-        style={{
-          ...styles.sectionHeader,
-          ...(compact ? styles.sectionHeaderCompact : {}),
-          ...(headerMerged ? styles.sectionHeaderHomeToolbar : {}),
-        }}
-      >
-        {homeToolbar ? (
-          <>
-            <div style={styles.homeNewsToolbarLeft}>
-              <button
-                type="button"
-                className={`home-select-btn${allSelected ? " home-select-btn--active" : ""}`}
-                onClick={homeToolbar.selectAll}
-                style={{
-                  ...styles.homeSelectBtn,
-                  ...(allSelected ? styles.homeSelectBtnActive : {}),
-                }}
-              >
-                全選
-              </button>
-              <button
-                type="button"
-                className="home-clear-btn"
-                onClick={homeToolbar.clearAll}
-                style={styles.homeClearBtn}
-              >
-                取消
-              </button>
-            </div>
-            <div style={styles.homeNewsToolbarRight}>
-              <span style={styles.homeNewsSelected}>已選 {selectedCount} 則新聞</span>
-              {selectedBreakdown ? (
-                <span style={styles.homeNewsSelectedBreakdown}>{selectedBreakdown}</span>
-              ) : null}
-              <span style={styles.homeNewsCount}>{news.length} 則</span>
-              <span style={styles.homeNewsUpdated}>
-                {homeToolbar.lastUpdated
-                  ? `更新 ${homeToolbar.lastUpdated}`
-                  : "尚未更新"}
-              </span>
-            </div>
-          </>
-        ) : (
-          <>
-            <h2
+      {homeToolbar ? (
+        <div style={styles.homeNewsMiniToolbar}>
+          <div className="hide-scrollbar" style={styles.homeNewsMiniStatsScroll}>
+            <span style={styles.homeNewsMiniStatsText}>
+              已選 {selectedCount} 則
+              {selectedBreakdown ? `｜${selectedBreakdown}` : ""}
+            </span>
+          </div>
+          <div style={styles.homeNewsMiniActions}>
+            <button
+              type="button"
+              onClick={homeToolbar.selectAll}
               style={{
-                ...styles.sectionTitle,
-                ...(compact ? styles.sectionTitleCompact : {}),
+                ...styles.homeNewsMiniTextBtn,
+                ...(allSelected ? styles.homeNewsMiniTextBtnActive : {}),
               }}
             >
-              {title}
-            </h2>
-            <span style={styles.countText}>{news.length} 則</span>
-          </>
-        )}
-      </div>
+              全選
+            </button>
+            <button
+              type="button"
+              onClick={homeToolbar.clearAll}
+              style={styles.homeNewsMiniTextBtn}
+            >
+              清除
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div
+          style={{
+            ...styles.sectionHeader,
+            ...(compact ? styles.sectionHeaderCompact : {}),
+          }}
+        >
+          <h2
+            style={{
+              ...styles.sectionTitle,
+              ...(compact ? styles.sectionTitleCompact : {}),
+            }}
+          >
+            {title}
+          </h2>
+          <span style={styles.countText}>{news.length} 則</span>
+        </div>
+      )}
 
       {!loading && groupedMode && topicNavItems.length > 0 ? (
         <TopicQuickNavBar items={topicNavItems} />
@@ -5738,6 +5954,59 @@ const styles: Record<string, CSSProperties> = {
     background: "rgba(15,23,42,.55)",
     border: "1px solid rgba(255,255,255,.08)",
     borderRadius: "16px",
+  },
+  homeNewsMiniToolbar: {
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    marginTop: "4px",
+    marginBottom: "8px",
+    padding: "0 10px",
+    minHeight: "44px",
+    maxHeight: "56px",
+    height: "48px",
+    boxSizing: "border-box",
+    background: "rgba(15,23,42,.42)",
+    border: "1px solid rgba(148,163,184,.16)",
+    borderRadius: "10px",
+  },
+  homeNewsMiniStatsScroll: {
+    flex: "1 1 auto",
+    minWidth: 0,
+    overflowX: "auto",
+    overflowY: "hidden",
+    WebkitOverflowScrolling: "touch",
+    display: "flex",
+    alignItems: "center",
+  },
+  homeNewsMiniStatsText: {
+    fontSize: "12px",
+    fontWeight: 700,
+    color: "#CBD5E1",
+    whiteSpace: "nowrap",
+    lineHeight: 1.2,
+  },
+  homeNewsMiniActions: {
+    display: "flex",
+    flexShrink: 0,
+    alignItems: "center",
+    gap: "10px",
+    paddingLeft: "8px",
+    borderLeft: "1px solid rgba(148,163,184,.14)",
+  },
+  homeNewsMiniTextBtn: {
+    border: "none",
+    background: "transparent",
+    padding: "4px 2px",
+    fontSize: "12px",
+    fontWeight: 700,
+    color: "#94A3B8",
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+    WebkitTapHighlightColor: "transparent",
+  },
+  homeNewsMiniTextBtnActive: {
+    color: "#E2E8F0",
   },
   homeNewsToolbarLeft: {
     display: "flex",
@@ -7641,6 +7910,60 @@ const styles: Record<string, CSSProperties> = {
     color: "#94A3B8",
     lineHeight: 1.4,
   },
+  proPlanPicker: {
+    display: "flex",
+    gap: "8px",
+    marginBottom: "12px",
+  },
+  proPlanCard: {
+    position: "relative",
+    flex: "1 1 0",
+    minWidth: 0,
+    textAlign: "left",
+    border: "1px solid rgba(148,163,184,.2)",
+    borderRadius: "12px",
+    padding: "10px 10px 9px",
+    background: "rgba(255,255,255,.04)",
+    cursor: "pointer",
+    transition: "border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease",
+  },
+  proPlanCardActive: {
+    border: "1px solid rgba(129,140,248,.55)",
+    background: "linear-gradient(135deg, rgba(37,99,235,.18), rgba(99,102,241,.14))",
+    boxShadow: "0 0 0 1px rgba(99,102,241,.2)",
+  },
+  proPlanBadge: {
+    position: "absolute",
+    top: "-8px",
+    right: "8px",
+    fontSize: "10px",
+    fontWeight: 800,
+    color: "#FDE68A",
+    background: "rgba(251,191,36,.16)",
+    border: "1px solid rgba(251,191,36,.4)",
+    borderRadius: "999px",
+    padding: "2px 7px",
+    lineHeight: 1.2,
+  },
+  proPlanTitle: {
+    fontSize: "11px",
+    fontWeight: 800,
+    color: "#94A3B8",
+    marginBottom: "4px",
+  },
+  proPlanPrice: {
+    fontSize: "14px",
+    fontWeight: 900,
+    color: "#F8FAFC",
+    lineHeight: 1.25,
+  },
+  proPlanSubtitle: {
+    marginTop: "4px",
+    fontSize: "10px",
+    fontWeight: 600,
+    color: "#86EFAC",
+    lineHeight: 1.3,
+  },
   proUpgradePriceRow: {
     display: "flex",
     flexWrap: "wrap",
@@ -7716,38 +8039,6 @@ const styles: Record<string, CSSProperties> = {
     color: "#CBD5E1",
     lineHeight: 1.55,
     marginBottom: "6px",
-  },
-  proDebugToolsBox: {
-    marginTop: "14px",
-    paddingTop: "12px",
-    borderTop: "1px dashed rgba(251,191,36,.35)",
-  },
-  proDebugToolsLabel: {
-    fontSize: "11px",
-    fontWeight: 800,
-    letterSpacing: "0.08em",
-    color: "#FCD34D",
-    marginBottom: "8px",
-    textTransform: "uppercase",
-  },
-  proDebugResetBtnProminent: {
-    width: "100%",
-    boxSizing: "border-box",
-    border: "1px solid rgba(251,191,36,.45)",
-    background: "rgba(251,191,36,.12)",
-    color: "#FDE68A",
-    borderRadius: "12px",
-    padding: "10px 14px",
-    fontSize: "13px",
-    fontWeight: 800,
-    cursor: "pointer",
-  },
-  proDebugHint: {
-    marginTop: "12px",
-    marginBottom: 0,
-    fontSize: "12px",
-    lineHeight: 1.5,
-    color: "#64748B",
   },
   proModalBackdrop: {
     position: "fixed",
