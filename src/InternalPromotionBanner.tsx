@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
 
+const DEFAULT_ICON = "/wayne-apps/default-app-icon.png";
+
 export type InternalPromotion = {
   id: string;
-  emoji: string;
+  iconSrc: string;
   title: string;
   description: string;
   ctaLabel: string;
@@ -13,7 +15,7 @@ export type InternalPromotion = {
 export const INTERNAL_PROMOTIONS: InternalPromotion[] = [
   {
     id: "pet-care",
-    emoji: "🐱",
+    iconSrc: "/wayne-apps/pet-care-icon.png",
     title: "Pet Care 寵物日記",
     description: "寵物喝水、尿尿與照護紀錄",
     ctaLabel: "下載",
@@ -21,7 +23,7 @@ export const INTERNAL_PROMOTIONS: InternalPromotion[] = [
   },
   {
     id: "lovequest",
-    emoji: "💕",
+    iconSrc: "/wayne-apps/lovequest-icon.png",
     title: "LoveQuest 情侶日常",
     description: "情侶任務、紀念日與互動工具",
     ctaLabel: "下載",
@@ -29,7 +31,7 @@ export const INTERNAL_PROMOTIONS: InternalPromotion[] = [
   },
   {
     id: "ai-mouth",
-    emoji: "😼",
+    iconSrc: "/wayne-apps/ai-meme-icon.png",
     title: "AI有點嘴",
     description: "AI 毒舌分析，產生可分享結果",
     ctaLabel: "下載",
@@ -59,6 +61,29 @@ function writePromoIndex(index: number) {
   } catch {
     /* ignore */
   }
+}
+
+function PromotionAppIcon({ src, alt }: { src: string; alt: string }) {
+  const [iconSrc, setIconSrc] = useState(src);
+
+  useEffect(() => {
+    setIconSrc(src);
+  }, [src]);
+
+  return (
+    <img
+      src={iconSrc}
+      alt={alt}
+      width={44}
+      height={44}
+      loading="lazy"
+      decoding="async"
+      style={styles.appIcon}
+      onError={() => {
+        if (iconSrc !== DEFAULT_ICON) setIconSrc(DEFAULT_ICON);
+      }}
+    />
+  );
 }
 
 type InternalPromotionBannerProps = {
@@ -107,9 +132,7 @@ export function InternalPromotionBanner({
           className="internal-promo-mini-card"
           aria-label={`${app.title} — ${app.ctaLabel}`}
         >
-          <span style={styles.emoji} aria-hidden>
-            {app.emoji}
-          </span>
+          <PromotionAppIcon src={app.iconSrc} alt={app.title} />
           <span style={styles.textCol}>
             <span style={styles.appTitle}>{app.title}</span>
             <span style={styles.description}>{app.description}</span>
@@ -159,12 +182,14 @@ const styles: Record<string, CSSProperties> = {
     lineHeight: 1.2,
     flexShrink: 0,
   },
-  emoji: {
-    fontSize: "22px",
-    lineHeight: 1,
+  appIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 11,
     flexShrink: 0,
-    width: "28px",
-    textAlign: "center",
+    objectFit: "cover",
+    background: "rgba(255,255,255,.06)",
+    border: "1px solid rgba(148,163,184,.18)",
   },
   textCol: {
     flex: 1,

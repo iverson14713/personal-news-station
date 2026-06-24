@@ -1,8 +1,15 @@
 /**
- * Pro 訂閱狀態與方案限制（本機模擬，結構預留 Supabase / IAP / Stripe）
+ * Pro 訂閱狀態與方案限制
+ * 正式 Pro：Apple IAP / Restore Purchases（優先）
+ * 本機覆蓋：隱藏內部代碼（pns_internal_access_v2）
  */
 
-export type ProSource = "purchase" | "promo" | "manual" | null;
+import {
+  isInternalAccessActive,
+  readInternalAccess,
+} from "./hiddenDevUnlock";
+
+export type ProSource = "purchase" | "internal" | null;
 
 export type ProStatus = {
   isPro: boolean;
@@ -24,7 +31,8 @@ export type PlanLimits = {
 
 const PRO_STORAGE_KEY = "pns_pro_status_v1";
 const LEGACY_PLAN_TIER_KEY = "pns_plan_tier_v1";
-export const DEBUG_MODE_KEY = "pns_debug_mode";
+const TEST_PLAN_STORAGE_KEY = "news_station_test_plan";
+const DEBUG_MODE_KEY = "pns_debug_mode";
 
 const FREE_LIMITS: PlanLimits = {
   aiDailyLimit: 2,
@@ -55,17 +63,9 @@ export const AI_DAILY_LIMIT_FREE = FREE_LIMITS.aiDailyLimit;
 /** @deprecated 請改用 getPlanLimits */
 export const AI_DAILY_LIMIT_PRO = PRO_LIMITS.aiDailyLimit;
 
-/** 兌換碼 → 天數（之後可改為呼叫 /api/promo/redeem） */
-export const PROMO_CODE_DAYS: Record<string, number> = {
-  NEWSVIP30: 30,
-  KOLNEWS90: 90,
-  LAUNCH2026: 30,
-  TESTPRO: 7,
-};
-
 type StoredPro = {
   proExpiresAt: string | null;
-  proSource: ProSource;
+  proSource: "purchase" | null;
 };
 
 function endOfLocalDayIso(d: Date): string {
@@ -74,7 +74,7 @@ function endOfLocalDayIso(d: Date): string {
   return x.toISOString();
 }
 
-function parseStored(raw: string | null): StoredPro | null {
+function parseStoredPurchase(raw: string | null): StoredPro | null {
   if (!raw) return null;
   try {
     const o = JSON.parse(raw) as {
@@ -83,72 +83,90 @@ function parseStored(raw: string | null): StoredPro | null {
     };
     const proExpiresAt =
       typeof o.proExpiresAt === "string" ? o.proExpiresAt : o.proExpiresAt === null ? null : null;
-    const src = o.proSource;
-    const proSource: ProSource =
-      src === "purchase" || src === "promo" || src === "manual" ? src : null;
+    const proSource: StoredPro["proSource"] = o.proSource === "purchase" ? "purchase" : null;
+    if (proExpiresAt == null && proSource == null) return null;
     return { proExpiresAt, proSource };
   } catch {
     return null;
   }
 }
 
-function migrateLegacyPlanTier(): StoredPro | null {
-  try {
-    if (localStorage.getItem(LEGACY_PLAN_TIER_KEY) === "pro") {
-      const expires = endOfLocalDayIso(new Date(Date.now() + 30 * 86400000));
-      return { proExpiresAt: expires, proSource: "manual" };
-    }
-  } catch {
-    /* ignore */
-  }
-  return null;
-}
-
-function computeIsPro(stored: StoredPro | null): boolean {
-  if (!stored?.proExpiresAt) return false;
+function isPurchaseActive(stored: StoredPro | null): boolean {
+  if (!stored?.proExpiresAt || stored.proSource !== "purchase") return false;
   return new Date(stored.proExpiresAt).getTime() > Date.now();
 }
 
-export function getProStatus(): ProStatus {
-  let stored: StoredPro | null = null;
-  try {
-    stored = parseStored(localStorage.getItem(PRO_STORAGE_KEY));
-    if (!stored) {
-      stored = migrateLegacyPlanTier();
-      if (stored) writeProStatusRaw(stored);
-    }
-  } catch {
-    stored = null;
-  }
-
-  const isPro = computeIsPro(stored);
-  if (!stored || !isPro) {
-    return { isPro: false, proExpiresAt: stored?.proExpiresAt ?? null, proSource: null };
-  }
-  return {
-    isPro: true,
-    proExpiresAt: stored.proExpiresAt,
-    proSource: stored.proSource,
-  };
-}
-
-function writeProStatusRaw(stored: StoredPro) {
+function writePurchaseStatusRaw(stored: StoredPro) {
   try {
     localStorage.setItem(PRO_STORAGE_KEY, JSON.stringify(stored));
-    localStorage.setItem(LEGACY_PLAN_TIER_KEY, computeIsPro(stored) ? "pro" : "free");
+    localStorage.setItem(LEGACY_PLAN_TIER_KEY, isPurchaseActive(stored) ? "pro" : "free");
   } catch {
     /* ignore */
   }
 }
 
+/** 清除舊版 promo / test 覆蓋；保留 pns_internal_access_v2 */
+export function sanitizeNonIapProUnlocks(): void {
+  try {
+    localStorage.removeItem(TEST_PLAN_STORAGE_KEY);
+    localStorage.removeItem(DEBUG_MODE_KEY);
+    const stored = parseStoredPurchase(localStorage.getItem(PRO_STORAGE_KEY));
+    if (stored && stored.proSource !== "purchase") {
+      writePurchaseStatusRaw({ proExpiresAt: null, proSource: null });
+    }
+    if (localStorage.getItem(LEGACY_PLAN_TIER_KEY) === "pro") {
+      const purchase = parseStoredPurchase(localStorage.getItem(PRO_STORAGE_KEY));
+      if (!isPurchaseActive(purchase) && !isInternalAccessActive()) {
+        localStorage.removeItem(LEGACY_PLAN_TIER_KEY);
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+export function getProStatus(): ProStatus {
+  sanitizeNonIapProUnlocks();
+
+  let purchaseStored: StoredPro | null = null;
+  try {
+    purchaseStored = parseStoredPurchase(localStorage.getItem(PRO_STORAGE_KEY));
+  } catch {
+    purchaseStored = null;
+  }
+
+  if (purchaseStored && isPurchaseActive(purchaseStored)) {
+    return {
+      isPro: true,
+      proExpiresAt: purchaseStored.proExpiresAt,
+      proSource: "purchase",
+    };
+  }
+
+  if (isInternalAccessActive()) {
+    const internal = readInternalAccess();
+    return {
+      isPro: true,
+      proExpiresAt: internal?.expiresAt ?? null,
+      proSource: "internal",
+    };
+  }
+
+  return {
+    isPro: false,
+    proExpiresAt: purchaseStored?.proExpiresAt ?? null,
+    proSource: null,
+  };
+}
+
 export function writeProStatus(status: ProStatus) {
-  if (!status.isPro) {
-    writeProStatusRaw({ proExpiresAt: null, proSource: null });
+  if (!status.isPro || status.proSource !== "purchase") {
+    writePurchaseStatusRaw({ proExpiresAt: null, proSource: null });
     return;
   }
-  writeProStatusRaw({
+  writePurchaseStatusRaw({
     proExpiresAt: status.proExpiresAt,
-    proSource: status.proSource,
+    proSource: "purchase",
   });
 }
 
@@ -258,7 +276,7 @@ export function canUseDeepMode(status?: ProStatus): boolean {
   return getPlanLimits(status).deepModeEnabled;
 }
 
-/** 由 iOS 內購恢復或正式訂閱寫入 Pro 狀態（不影響測試模式覆蓋） */
+/** 由 iOS 內購恢復或正式訂閱寫入 Pro 狀態（優先於本機覆蓋） */
 export function applyRestoredPurchase(options?: {
   expiresAtIso?: string | null;
   expiresAtMs?: number;
@@ -271,55 +289,18 @@ export function applyRestoredPurchase(options?: {
     expiresAt = endOfLocalDayIso(new Date(options.expiresAtMs));
   } else {
     const current = getProStatus();
-    if (current.isPro && current.proExpiresAt) {
+    if (current.isPro && current.proExpiresAt && current.proSource === "purchase") {
       expiresAt = current.proExpiresAt;
     } else {
       expiresAt = endOfLocalDayIso(new Date(Date.now() + 35 * 86400000));
     }
   }
 
-  const next: ProStatus = {
-    isPro: true,
+  writePurchaseStatusRaw({
     proExpiresAt: expiresAt,
     proSource: "purchase",
-  };
-  writeProStatus(next);
+  });
   return getProStatus();
-}
-
-export function setPromoPro(days: number, source: ProSource = "promo"): ProStatus {
-  const current = getProStatus();
-  const base = current.isPro && current.proExpiresAt
-    ? Math.max(Date.now(), new Date(current.proExpiresAt).getTime())
-    : Date.now();
-  const expires = endOfLocalDayIso(new Date(base + days * 86400000));
-  const next: ProStatus = {
-    isPro: true,
-    proExpiresAt: expires,
-    proSource: source,
-  };
-  writeProStatus(next);
-  return next;
-}
-
-export type RedeemPromoResult =
-  | { ok: true; status: ProStatus; message: string }
-  | { ok: false; message: string };
-
-/** 本機兌換；之後可改為 fetch('/api/promo/redeem', ...) */
-export async function redeemPromoCode(code: string): Promise<RedeemPromoResult> {
-  const normalized = code.trim().toUpperCase();
-  const days = PROMO_CODE_DAYS[normalized];
-  if (!days) {
-    return { ok: false, message: "兌換碼無效或已過期" };
-  }
-  const status = setPromoPro(days, "promo");
-  const until = formatProExpiresAt(status.proExpiresAt);
-  return {
-    ok: true,
-    status,
-    message: `兌換成功，已解鎖 Pro 到 ${until}`,
-  };
 }
 
 export function formatProExpiresAt(iso: string | null): string {
@@ -333,50 +314,7 @@ export function formatProExpiresAt(iso: string | null): string {
 }
 
 export function proSourceLabel(source: ProSource): string | null {
-  if (source === "promo") return "兌換碼";
   if (source === "purchase") return "訂閱";
-  if (source === "manual") return "手動";
+  if (source === "internal") return "已啟用";
   return null;
-}
-
-export function syncProDebugModeFromUrl(): boolean {
-  try {
-    if (typeof window !== "undefined") {
-      const params = new URLSearchParams(window.location.search);
-      if (params.get("debug") === "1") {
-        localStorage.setItem(DEBUG_MODE_KEY, "1");
-      }
-    }
-  } catch {
-    /* ignore */
-  }
-  return isProDebugToolsVisible();
-}
-
-export function isProDebugToolsVisible(): boolean {
-  try {
-    if (import.meta.env.DEV) return true;
-    if (typeof window !== "undefined") {
-      if (new URLSearchParams(window.location.search).get("debug") === "1") {
-        return true;
-      }
-      if (localStorage.getItem(DEBUG_MODE_KEY) === "1") return true;
-    }
-  } catch {
-    /* ignore */
-  }
-  return false;
-}
-
-export function resetProTestState(): void {
-  try {
-    localStorage.removeItem(PRO_STORAGE_KEY);
-    localStorage.removeItem(LEGACY_PLAN_TIER_KEY);
-  } catch {
-    /* ignore */
-  }
-}
-
-export function clearProForDebug() {
-  resetProTestState();
 }

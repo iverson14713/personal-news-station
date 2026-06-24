@@ -3,7 +3,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "screenshot:news": "node scripts/screenshot-news.mjs"
+    "screenshot:news": "node scripts/screenshot-news.mjs",
+    "screenshot:apple": "node scripts/screenshot-apple.mjs",
+    "resize:apple-screenshots": "node scripts/resize-apple-screenshots.mjs"
   },
   "dependencies": {
     "@capacitor/cli": "^8.4.1",
@@ -18,6 +20,7 @@
   },
   "devDependencies": {
     "playwright": "^1.49.0",
+    "sharp": "^0.35.2",
     "typescript": "latest"
   }
 }

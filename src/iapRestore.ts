@@ -3,9 +3,8 @@
  * Web 與本機瀏覽器僅顯示提示，不寫入正式 Pro 狀態。
  */
 
-import { applyRestoredPurchase, getProStatus, isProActive, type ProStatus } from "./pro";
+import { applyRestoredPurchase, getProStatus, isProActive, sanitizeNonIapProUnlocks, type ProStatus } from "./pro";
 import { PRO_IAP_PRODUCT_IDS, type ProPlanTier } from "./proPricing";
-import { clearTestPlan, getTestPlan } from "./testPlan";
 
 export const RESTORE_WEB_MESSAGE = "此功能會在 iOS App 內啟用";
 export const PURCHASE_WEB_MESSAGE = "正式付款將在 iOS App 內啟用";
@@ -193,8 +192,7 @@ function parseLocalProSnapshot(raw: string | null): StoredProSnapshot | null {
     const proExpiresAt =
       typeof o.proExpiresAt === "string" ? o.proExpiresAt : o.proExpiresAt === null ? null : null;
     const src = o.proSource;
-    const proSource: ProStatus["proSource"] =
-      src === "purchase" || src === "promo" || src === "manual" ? src : null;
+    const proSource: ProStatus["proSource"] = src === "purchase" ? "purchase" : null;
     if (proExpiresAt == null && proSource == null) return null;
     return { proExpiresAt, proSource };
   } catch {
@@ -237,20 +235,16 @@ function readProStorageRaw(): string | null {
   }
 }
 
-/** StoreKit 寫入 Pro 後清除測試覆蓋，並確認 effective Pro 狀態 */
+/** StoreKit 寫入 Pro 後確認狀態 */
 function commitRestoredProStatus(
   apply: () => ProStatus,
   logContext: string
 ): { ok: true; status: ProStatus } | { ok: false; status: ProStatus } {
-  const testPlanBefore = getTestPlan();
-  logIapDebug(`${logContext} news_station_test_plan before`, testPlanBefore);
-
+  sanitizeNonIapProUnlocks();
   const applied = apply();
-  clearTestPlan();
   const status = getProStatus();
 
   logIapDebug(`${logContext} result.status`, status);
-  logIapDebug(`${logContext} news_station_test_plan after`, getTestPlan());
   logIapDebug(`${logContext} pns_pro_status_v1 after`, readProStorageRaw());
 
   if (!isProActive(status)) {
@@ -258,7 +252,6 @@ function commitRestoredProStatus(
       context: logContext,
       applied,
       status,
-      testPlanBefore,
       pns_pro_status_v1: readProStorageRaw(),
     });
     return { ok: false, status };
@@ -372,7 +365,6 @@ async function runSyncPurchasesOnLaunch(): Promise<SyncPurchasesOnLaunchResult> 
 
   logIapDebug("launch sync local status", localStatus);
   logIapDebug("launch sync pns_pro_status_v1", readProStorageRaw());
-  logIapDebug("launch sync news_station_test_plan", getTestPlan());
 
   if (isLocalProStillActive(localStatus)) {
     logIapInfo("launch sync skipped (local pro active)", {

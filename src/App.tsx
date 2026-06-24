@@ -17,9 +17,7 @@ import {
   getTotalTrackingCount,
   isProActive,
   proSourceLabel,
-  redeemPromoCode,
-  resetProTestState,
-  isProDebugToolsVisible,
+  sanitizeNonIapProUnlocks,
   type ProStatus,
 } from "./pro";
 import { parseAiSummaryContent, warnScriptQuality } from "./aiSummaryParse";
@@ -30,6 +28,7 @@ import {
   findClosestNewsByTitle,
   normalizeDailyInsight,
 } from "./AiDailyInsightCard";
+import { HiddenDevPanel } from "./HiddenDevPanel";
 import { InternalPromotionBanner } from "./InternalPromotionBanner";
 import { apiUrl } from "./apiBase";
 import { restorePurchases, purchaseProSubscription, syncPurchasesOnLaunch } from "./iapRestore";
@@ -52,7 +51,6 @@ import {
   getTopicSectionDomId,
   TopicQuickNavBar,
 } from "./TopicQuickNavBar";
-import { TestPlanModals } from "./TestPlanModals";
 import {
   ONBOARDING_TOPIC_PICK_COUNT,
   readOnboardingCompleted,
@@ -62,7 +60,6 @@ import {
   TopicOnboardingScreen,
   writeOnboardingCompleted,
 } from "./TopicOnboardingScreen";
-import { getEffectivePlan } from "./testPlan";
 
 type Tab = "home" | "player" | "video" | "favorites" | "settings";
 
@@ -233,7 +230,7 @@ function logTopicBootstrapState(args: {
   fallbackToOnboarding: boolean;
   activeTopicLabels: string[];
 }) {
-  if (!import.meta.env.DEV && !isProDebugToolsVisible()) return;
+  if (!import.meta.env.DEV) return;
   console.log("[Topics] onboarding_completed", readOnboardingCompleted());
   console.log("[Topics] loaded selectedTopics", args.loadedTopics);
   console.log("[Topics] loaded customKeywords", args.loadedKeywords);
@@ -857,17 +854,14 @@ export default function App() {
   const [brokenVideoThumbIds, setBrokenVideoThumbIds] = useState<Record<string, true>>({});
   const [scriptFontSize, setScriptFontSize] = useState<ScriptFontSize>(readScriptFontSize);
   // v1 商業模式：免登入 + 廣告 + AI 次數限制（先固定 Free）
-  const [realProStatus, setRealProStatus] = useState<ProStatus>(() => getProStatus());
-  const [testPlanRevision, setTestPlanRevision] = useState(0);
-  const [testPasswordOpen, setTestPasswordOpen] = useState(false);
-  const [testPanelOpen, setTestPanelOpen] = useState(false);
+  const [proStatus, setProStatus] = useState<ProStatus>(() => getProStatus());
+  const [hiddenDevPanelOpen, setHiddenDevPanelOpen] = useState(false);
   const titleTapRef = useRef({ count: 0, lastAt: 0 });
   const [upgradeModal, setUpgradeModal] = useState<UpgradeModalKind | null>(null);
   const [aiAnalysisMode, setAiAnalysisMode] = useState<AiAnalysisMode>("normal");
   const [savedCustomKeywords, setSavedCustomKeywords] = useState<string[]>(() =>
     readSavedCustomKeywords()
   );
-  const [promoModalOpen, setPromoModalOpen] = useState(false);
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [topicOnboardingOpen, setTopicOnboardingOpen] = useState(
     () => initialTopicOnboardingOpen
@@ -914,54 +908,32 @@ export default function App() {
   const selectedNews = news.filter((n) => n.selected);
   const favoriteNews = news.filter((n) => n.favorite);
 
-  const effectivePlan = useMemo(() => {
-    void testPlanRevision;
-    void realProStatus;
-    return getEffectivePlan();
-  }, [testPlanRevision, realProStatus]);
-  const effectiveStatus = effectivePlan.effectiveStatus;
-  const isPro = effectivePlan.isPro;
-  const planLimits = useMemo(() => getPlanLimits(effectiveStatus), [effectiveStatus]);
+  const isPro = isProActive(proStatus);
+  const planLimits = useMemo(() => getPlanLimits(proStatus), [proStatus]);
   const aiDailyLimit = planLimits.aiDailyLimit;
   const aiQuotaRemaining = Math.max(0, aiDailyLimit - aiQuota.used);
   const visibleAiHistory = useMemo(
-    () => filterHistoryByPlan(aiHistory, effectiveStatus),
-    [aiHistory, effectiveStatus]
+    () => filterHistoryByPlan(aiHistory, proStatus),
+    [aiHistory, proStatus]
   );
 
   const refreshProStatus = useCallback(() => {
-    setRealProStatus(getProStatus());
-    setTestPlanRevision((v) => v + 1);
+    setProStatus(getProStatus());
   }, []);
 
   const handleRestorePurchases = useCallback(async () => {
     const result = await restorePurchases();
     if (result.ok) {
-      setRealProStatus(result.status);
-      setTestPlanRevision((v) => v + 1);
+      setProStatus(result.status);
     }
     alert(result.message);
   }, []);
 
-  const handleTestPlanChanged = useCallback(() => {
-    setTestPlanRevision((v) => v + 1);
-    const ep = getEffectivePlan();
-    const clamped = clampTrackingToPlan(
-      selectedTopics,
-      savedCustomKeywords,
-      ep.effectiveStatus
-    );
-    if (clamped.topics.join("\0") !== selectedTopics.join("\0")) {
-      setSelectedTopics(clamped.topics);
-      writeSelectedTopics(clamped.topics);
-    }
-    if (clamped.keywords.join("\0") !== savedCustomKeywords.join("\0")) {
-      setSavedCustomKeywords(clamped.keywords);
-      writeSavedCustomKeywords(clamped.keywords);
-    }
-  }, [savedCustomKeywords, selectedTopics]);
+  const openProUpgrade = useCallback(() => {
+    setUpgradeModal("general");
+  }, []);
 
-  const handleBrandTitleTap = useCallback(() => {
+  const handleHomeBrandTap = useCallback(() => {
     const now = Date.now();
     if (now - titleTapRef.current.lastAt > 2500) {
       titleTapRef.current.count = 0;
@@ -970,31 +942,30 @@ export default function App() {
     titleTapRef.current.count += 1;
     if (titleTapRef.current.count >= 7) {
       titleTapRef.current.count = 0;
-      setTestPasswordOpen(true);
+      setHiddenDevPanelOpen(true);
     }
   }, []);
 
-  const openProUpgrade = useCallback(() => {
-    setUpgradeModal("general");
+  const handleHiddenDevStatusChanged = useCallback(() => {
+    setProStatus(getProStatus());
   }, []);
 
   const handleUpgradePro = useCallback(async (plan: ProPlanTier) => {
     const result = await purchaseProSubscription(plan);
     if (result.ok) {
-      setRealProStatus(result.status);
-      setTestPlanRevision((v) => v + 1);
+      setProStatus(result.status);
       setUpgradeModal(null);
     }
     alert(result.message);
   }, []);
 
   const setAiQuotaExhaustedMessage = useCallback(() => {
-    if (isProActive(effectiveStatus)) {
+    if (isProActive(proStatus)) {
       setAiError("今日 AI 次數已用完，明天會自動重置");
     } else {
       setUpgradeModal("quota");
     }
-  }, [effectiveStatus]);
+  }, [proStatus]);
 
   const buildDailyInsightFallback = useCallback((): AiDailyInsight => {
     const picked = news.slice(0, 20);
@@ -1024,7 +995,7 @@ export default function App() {
   }, [news]);
 
   const handleRequestDailyInsight = useCallback(async () => {
-    if (!canUseDailyInsight(effectiveStatus)) return;
+    if (!canUseDailyInsight(proStatus)) return;
     if (dailyInsightLoading || dailyInsight) return;
     const picked = news.slice(0, 20);
     if (picked.length === 0) return;
@@ -1036,7 +1007,7 @@ export default function App() {
       writeAiDailyQuota(normalized);
     }
     setAiQuota(normalized);
-    const remaining = Math.max(0, getAiDailyLimit(effectiveStatus) - normalized.used);
+    const remaining = Math.max(0, getAiDailyLimit(proStatus) - normalized.used);
     if (remaining <= 0) {
       setAiQuotaExhaustedMessage();
       return;
@@ -1120,13 +1091,14 @@ export default function App() {
     dailyInsightLoading,
     getAiDailyLimit,
     news,
-    effectiveStatus,
+    proStatus,
     selectedTopics,
     setAiQuota,
     setAiQuotaExhaustedMessage,
   ]);
 
   useEffect(() => {
+    sanitizeNonIapProUnlocks();
     refreshProStatus();
   }, [refreshProStatus]);
 
@@ -1150,7 +1122,7 @@ export default function App() {
     void (async () => {
       const result = await syncPurchasesOnLaunch();
       if (cancelled || !result.status) return;
-      setRealProStatus(result.status);
+      setProStatus(result.status);
     })();
     return () => {
       cancelled = true;
@@ -1159,7 +1131,7 @@ export default function App() {
 
   useEffect(() => {
     if (topicOnboardingOpen) return;
-    const clamped = clampTrackingToPlan(selectedTopics, savedCustomKeywords, effectiveStatus);
+    const clamped = clampTrackingToPlan(selectedTopics, savedCustomKeywords, proStatus);
     const topicsChanged = clamped.topics.join("\0") !== selectedTopics.join("\0");
     const keywordsChanged = clamped.keywords.join("\0") !== savedCustomKeywords.join("\0");
     if (!topicsChanged && !keywordsChanged) return;
@@ -1173,7 +1145,7 @@ export default function App() {
     }
     // 僅在方案切換或初次載入時校正追蹤上限
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveStatus]);
+  }, [proStatus]);
 
   useEffect(() => {
     if (onboardingOpen) {
@@ -1305,7 +1277,7 @@ export default function App() {
       { extraSearch: custom || undefined }
     );
 
-    if (import.meta.env.DEV || isProDebugToolsVisible()) {
+    if (import.meta.env.DEV) {
       console.log("[Topics] fetchNews activeTopics =", feedSources.map((s) => s.label));
       console.log("updateNews apiUrl =", apiUrl(`news?q=${encodeURIComponent(feedSources[0]?.query ?? "")}`));
     }
@@ -1536,25 +1508,6 @@ export default function App() {
     void fetchNews();
   };
 
-  const resetAiDailyQuota = () => {
-    try {
-      localStorage.removeItem(AI_DAILY_QUOTA_KEY);
-    } catch {
-      /* ignore */
-    }
-    setAiQuota({ date: todayYmdLocal(), used: 0 });
-    alert("已重置今日 AI 次數");
-  };
-
-  const handleResetProTestState = () => {
-    const ok = window.confirm(
-      "確定要重置 Pro 測試狀態嗎？這只會清除本機 Pro 狀態，不會影響收藏、主題與 AI 歷史。"
-    );
-    if (!ok) return;
-    resetProTestState();
-    window.location.reload();
-  };
-
   const resetTopicOnboarding = () => {
     writeOnboardingCompleted(false);
     writeOnboardingSeen(false);
@@ -1576,8 +1529,8 @@ export default function App() {
       if (prev.includes(label)) {
         return prev.filter((t) => t !== label);
       }
-      if (!canAddTopic(prev.length, effectiveStatus, savedCustomKeywords.length)) {
-        if (isProActive(effectiveStatus)) {
+      if (!canAddTopic(prev.length, proStatus, savedCustomKeywords.length)) {
+        if (isProActive(proStatus)) {
           alert("已達 Pro 追蹤上限");
         } else {
           setUpgradeModal("topic");
@@ -1589,7 +1542,7 @@ export default function App() {
   };
 
   const selectAllTopics = () => {
-    const limits = getPlanLimits(effectiveStatus);
+    const limits = getPlanLimits(proStatus);
     const maxByTotal = limits.totalTrackingLimit - savedCustomKeywords.length;
     const cap = Math.min(limits.topicLimit, maxByTotal);
     setSelectedTopics(topics.map((t) => t.label).slice(0, Math.max(0, cap)));
@@ -1600,8 +1553,8 @@ export default function App() {
   };
 
   const resetDefaultTopics = () => {
-    const limits = getPlanLimits(effectiveStatus);
-    const defaults = isProActive(effectiveStatus) ? PRO_DEFAULT_TOPICS : FREE_DEFAULT_TOPICS;
+    const limits = getPlanLimits(proStatus);
+    const defaults = isProActive(proStatus) ? PRO_DEFAULT_TOPICS : FREE_DEFAULT_TOPICS;
     const maxByTotal = limits.totalTrackingLimit - savedCustomKeywords.length;
     setSelectedTopics(defaults.slice(0, Math.min(limits.topicLimit, Math.max(0, maxByTotal))));
   };
@@ -1616,8 +1569,8 @@ export default function App() {
 
   const toggleFavorite = (item: NewsItem) => {
     if (!item.favorite && !favoriteLinks.includes(item.link)) {
-      if (!canAddFavorite(favoriteLinks.length, effectiveStatus)) {
-        if (isProActive(effectiveStatus)) {
+      if (!canAddFavorite(favoriteLinks.length, proStatus)) {
+        if (isProActive(proStatus)) {
           alert("已達 Pro 收藏上限");
         } else {
           setUpgradeModal("favorite");
@@ -1647,8 +1600,8 @@ export default function App() {
       alert("此關鍵字已在清單中");
       return;
     }
-    if (!canAddCustomKeyword(savedCustomKeywords.length, effectiveStatus, selectedTopics.length)) {
-      if (isProActive(effectiveStatus)) {
+    if (!canAddCustomKeyword(savedCustomKeywords.length, proStatus, selectedTopics.length)) {
+      if (isProActive(proStatus)) {
         alert("已達 Pro 自訂關鍵字或總追蹤上限");
       } else {
         setUpgradeModal("keyword");
@@ -2137,7 +2090,7 @@ export default function App() {
     } else {
       setAiQuota(q);
     }
-    const remaining = Math.max(0, getAiDailyLimit(effectiveStatus) - q.used);
+    const remaining = Math.max(0, getAiDailyLimit(proStatus) - q.used);
     if (remaining <= 0) {
       setAiQuotaExhaustedMessage();
       return;
@@ -2146,12 +2099,12 @@ export default function App() {
   };
 
   const runAiAnalysisWithDuration = (duration: AiDuration) => {
-    if (duration === 5 && !canUseFiveMinuteScript(effectiveStatus)) {
+    if (duration === 5 && !canUseFiveMinuteScript(proStatus)) {
       setAiDurationSheetOpen(false);
       setUpgradeModal("five_minute");
       return;
     }
-    if (aiAnalysisMode === "deep" && !canUseDeepMode(effectiveStatus)) {
+    if (aiAnalysisMode === "deep" && !canUseDeepMode(proStatus)) {
       setAiDurationSheetOpen(false);
       setUpgradeModal("deep");
       return;
@@ -2230,11 +2183,11 @@ ${newsText}
 
     const duration = durationOverride ?? aiDuration;
 
-    if (duration === 5 && !canUseFiveMinuteScript(effectiveStatus)) {
+    if (duration === 5 && !canUseFiveMinuteScript(proStatus)) {
       setUpgradeModal("five_minute");
       return;
     }
-    if (aiAnalysisMode === "deep" && !canUseDeepMode(effectiveStatus)) {
+    if (aiAnalysisMode === "deep" && !canUseDeepMode(proStatus)) {
       setUpgradeModal("deep");
       return;
     }
@@ -2247,13 +2200,13 @@ ${newsText}
       writeAiDailyQuota(normalized);
     }
     setAiQuota(normalized);
-    const remaining = Math.max(0, getAiDailyLimit(effectiveStatus) - normalized.used);
+    const remaining = Math.max(0, getAiDailyLimit(proStatus) - normalized.used);
     if (remaining <= 0) {
       setAiQuotaExhaustedMessage();
       return;
     }
     setAiError(null);
-    const deepMode = aiAnalysisMode === "deep" && canUseDeepMode(effectiveStatus);
+    const deepMode = aiAnalysisMode === "deep" && canUseDeepMode(proStatus);
     const fp = aiSummaryCacheFingerprint(picked, duration, deepMode);
 
     try {
@@ -2518,13 +2471,13 @@ ${newsText}
             <div style={{ minWidth: 0 }}>
               <h1
                 style={styles.homeBrand}
-                onClick={handleBrandTitleTap}
+                aria-label="今日 AI 新聞台"
+                onClick={handleHomeBrandTap}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") handleHomeBrandTap();
+                }}
                 role="button"
                 tabIndex={0}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") handleBrandTitleTap();
-                }}
-                aria-label="今日 AI 新聞台"
               >
                 今日 AI 新聞台
               </h1>
@@ -2541,17 +2494,7 @@ ${newsText}
         ) : (
           <header style={styles.headerOther}>
             <div>
-              <div
-                style={styles.kicker}
-                onClick={handleBrandTitleTap}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") handleBrandTitleTap();
-                }}
-              >
-                AI個人新聞台
-              </div>
+              <div style={styles.kicker}>AI個人新聞台</div>
               <h1 style={styles.titleOther}>{pageTitle}</h1>
             </div>
             <div style={styles.logoOther}>🎙️</div>
@@ -2882,15 +2825,14 @@ ${newsText}
 
             <SettingsCollapsible title="Pro 方案詳情" subtitle={isPro ? "Pro 已啟用" : "升級解鎖完整功能"}>
               <ProStatusCard
-                proStatus={effectiveStatus}
+                proStatus={proStatus}
                 onRestore={handleRestorePurchases}
               />
               {!isPro ? (
                 <ProUpgradeCard
                   variant="settings"
-                  proStatus={effectiveStatus}
+                  proStatus={proStatus}
                   onUpgrade={handleUpgradePro}
-                  onRedeem={() => setPromoModalOpen(true)}
                   onRestore={handleRestorePurchases}
                 />
               ) : null}
@@ -3122,26 +3064,16 @@ ${newsText}
           <UpgradeModal
             kind={upgradeModal}
             onClose={() => setUpgradeModal(null)}
-            onRedeem={() => {
-              setUpgradeModal(null);
-              setPromoModalOpen(true);
-            }}
             onUpgrade={handleUpgradePro}
             onRestore={handleRestorePurchases}
           />
         ) : null}
 
-        {promoModalOpen ? (
-          <PromoRedeemModal
-            onClose={() => setPromoModalOpen(false)}
-            onRedeemed={(status, message) => {
-              setRealProStatus(status);
-              setTestPlanRevision((v) => v + 1);
-              setPromoModalOpen(false);
-              alert(message);
-            }}
-          />
-        ) : null}
+        <HiddenDevPanel
+          open={hiddenDevPanelOpen}
+          onClose={() => setHiddenDevPanelOpen(false)}
+          onStatusChanged={handleHiddenDevStatusChanged}
+        />
 
         {splashOpen ? <SplashScreen /> : null}
 
@@ -3172,19 +3104,6 @@ ${newsText}
             onComplete={handleTopicOnboardingComplete}
           />
         ) : null}
-
-        <TestPlanModals
-          passwordOpen={testPasswordOpen}
-          panelOpen={testPanelOpen}
-          effectivePlan={effectivePlan}
-          onClosePassword={() => setTestPasswordOpen(false)}
-          onOpenPanel={() => setTestPanelOpen(true)}
-          onClosePanel={() => setTestPanelOpen(false)}
-          onPlanChanged={handleTestPlanChanged}
-          onResetProTestState={handleResetProTestState}
-          onResetOnboarding={resetTopicOnboarding}
-          onResetAiQuota={resetAiDailyQuota}
-        />
       </div>
     </div>
   );
@@ -3684,13 +3603,11 @@ function ProUpgradeCard({
   variant,
   proStatus,
   onUpgrade,
-  onRedeem,
   onRestore,
 }: {
   variant: "compact" | "settings";
   proStatus: ProStatus;
   onUpgrade: (plan: ProPlanTier) => void | Promise<void>;
-  onRedeem: () => void;
   onRestore: () => void | Promise<void>;
 }) {
   const [selectedPlan, setSelectedPlan] = useState<ProPlanTier>("yearly");
@@ -3729,9 +3646,6 @@ function ProUpgradeCard({
           style={styles.proUpgradePrimaryBtn}
         >
           {getProUpgradeButtonLabel(selectedPlan)}
-        </button>
-        <button type="button" onClick={onRedeem} style={styles.proUpgradeSecondaryBtn}>
-          輸入兌換碼
         </button>
       </div>
       <RestorePurchasesButton label="已購買？恢復購買" onRestore={onRestore} variant="link" />
@@ -3861,13 +3775,11 @@ function ProStatusCard({
 function UpgradeModal({
   kind,
   onClose,
-  onRedeem,
   onUpgrade,
   onRestore,
 }: {
   kind: UpgradeModalKind;
   onClose: () => void;
-  onRedeem: () => void;
   onUpgrade: (plan: ProPlanTier) => void | Promise<void>;
   onRestore: () => void | Promise<void>;
 }) {
@@ -3970,7 +3882,6 @@ function UpgradeModal({
             variant="settings"
             proStatus={{ isPro: false, proExpiresAt: null, proSource: null }}
             onUpgrade={onUpgrade}
-            onRedeem={onRedeem}
             onRestore={onRestore}
           />
         ) : (
@@ -3982,78 +3893,11 @@ function UpgradeModal({
             >
               {getProUpgradeButtonLabel("yearly")}
             </button>
-            {kind === "five_minute" ? (
-              <button type="button" onClick={onRedeem} style={styles.proUpgradeSecondaryBtn}>
-                輸入兌換碼
-              </button>
-            ) : null}
             <button type="button" onClick={onClose} style={styles.proUpgradeSecondaryBtn}>
               {kind === "quota" ? "明天再用" : "稍後再說"}
             </button>
           </div>
         )}
-      </div>
-    </div>
-  );
-}
-
-function PromoRedeemModal({
-  onClose,
-  onRedeemed,
-}: {
-  onClose: () => void;
-  onRedeemed: (status: ProStatus, message: string) => void;
-}) {
-  const [code, setCode] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  const submit = async () => {
-    const trimmed = code.trim();
-    if (!trimmed) return;
-    setBusy(true);
-    try {
-      const result = await redeemPromoCode(trimmed);
-      if (result.ok) {
-        onRedeemed(result.status, result.message);
-      } else {
-        alert(result.message);
-      }
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div style={styles.proModalBackdrop} onClick={onClose} role="presentation">
-      <div
-        style={styles.promoModalPanel}
-        onClick={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-        aria-label="兌換碼"
-      >
-        <div style={styles.promoModalTitle}>輸入兌換碼</div>
-        <input
-          value={code}
-          onChange={(e) => setCode(e.target.value)}
-          placeholder="例如 NEWSVIP30"
-          style={styles.promoInput}
-          autoCapitalize="characters"
-          autoComplete="off"
-        />
-        <div style={styles.proUpgradeBtnRow}>
-          <button
-            type="button"
-            disabled={busy || !code.trim()}
-            onClick={() => void submit()}
-            style={styles.proUpgradePrimaryBtn}
-          >
-            {busy ? "兌換中…" : "兌換"}
-          </button>
-          <button type="button" onClick={onClose} style={styles.proUpgradeSecondaryBtn}>
-            取消
-          </button>
-        </div>
       </div>
     </div>
   );
