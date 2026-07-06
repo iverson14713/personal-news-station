@@ -121,27 +121,45 @@ export type DailyRadioPushOptions = {
   /** DB 已確認 audio_url 就緒；僅 audioReady 時送 AI 主播推播 */
   audioReady?: boolean;
   durationMinutes?: number;
+  newsCount?: number;
 };
+
+function resolveDisplayName(displayName?: string | null): string {
+  const trimmed = displayName?.trim();
+  return trimmed || "朋友";
+}
 
 function pushCopy(
   slot: RadioSlot,
+  displayName: string | null | undefined,
   options: DailyRadioPushOptions
 ): { title: string; body: string } {
+  const name = resolveDisplayName(displayName);
   const minutes = options.durationMinutes ?? 3;
   const audioReady =
     options.audioReady === true && options.hasAnchorAudio === true;
+  const anchorName = options.anchorName?.trim();
 
   if (audioReady) {
     if (slot === "evening") {
+      const title = anchorName
+        ? `🌙 ${name}，${anchorName} 已經準備好今晚的 AI 晚報`
+        : `🌙 ${name}，你的 AI 主播已準備好。`;
       return {
-        title: "🌆 你的專屬 AI 晚報已完成",
-        body: `點我收聽 ${minutes} 分鐘 AI 晚間簡報`,
+        title,
+        body: `今天的重要新聞都整理好了，${minutes} 分鐘快速掌握重點。`,
       };
     }
-    return {
-      title: "📰 你的專屬 AI 早報已完成",
-      body: `點我收聽 ${minutes} 分鐘 AI 晨間簡報`,
-    };
+
+    const title = anchorName
+      ? `🎙️ ${name}，${anchorName} 已經準備好今天的 AI 早報`
+      : `🎙️ ${name}，你的 AI 主播已準備好。`;
+    const newsCount = options.newsCount;
+    const body =
+      typeof newsCount === "number" && newsCount > 0
+        ? `今天整理了 ${newsCount} 則你關心的新聞，濃縮成 ${minutes} 分鐘，點一下立即開始收聽。`
+        : `今天整理了你關心的新聞，濃縮成 ${minutes} 分鐘，點一下立即開始收聽。`;
+    return { title, body };
   }
 
   if (slot === "evening") {
@@ -183,7 +201,7 @@ async function sendViaApns(
   }
 
   const radioSlot = pushOptions.radioSlot ?? "morning";
-  const { title, body } = pushCopy(radioSlot, pushOptions);
+  const { title, body } = pushCopy(radioSlot, displayName, pushOptions);
   const audioReady =
     pushOptions.audioReady === true && pushOptions.hasAnchorAudio === true;
 

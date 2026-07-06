@@ -4,10 +4,12 @@ import App from "./App";
 import AppStoreScreenshots from "./AppStoreScreenshots";
 import { AiAnchorAudioProvider } from "./AiAnchorAudioProvider";
 import { initSupabaseAuth, isSupabaseConfigured } from "./supabaseClient";
+import { setupNativeKeyboard } from "./keyboardSetup";
 
 if (isSupabaseConfigured()) {
   void initSupabaseAuth();
 }
+void setupNativeKeyboard();
 
 function Root() {
   const path = window.location.pathname;

@@ -388,6 +388,23 @@ export function AiAnchorProLockCard({ onUpgrade }: { onUpgrade: () => void }) {
   );
 }
 
+export function AiAnchorSettingsIntro() {
+  return (
+    <p style={anchorIntroStyle}>
+      每天早上 7:00、下午 5:00，AI 主播都會依照以下設定，
+      <br />
+      為你播報今日新聞。
+    </p>
+  );
+}
+
+const anchorIntroStyle: CSSProperties = {
+  margin: "0 0 2px",
+  fontSize: "13px",
+  lineHeight: 1.55,
+  color: "#94A3B8",
+};
+
 export function AiAnchorSettingsFields({
   anchorId,
   styleId,
@@ -398,11 +415,7 @@ export function AiAnchorSettingsFields({
 }: Omit<AiAnchorSettingsFieldsProps, "voiceFeatureEnabled">) {
   return (
     <>
-      <div style={{ fontSize: "12px", color: "#94A3B8", lineHeight: 1.5, marginBottom: "12px" }}>
-        選擇你喜歡的主播與播報風格，生成後可隨時調整播放速度。
-      </div>
-
-      <div style={{ fontSize: "12px", fontWeight: 800, color: "#E2E8F0", marginBottom: "8px" }}>
+      <div style={{ fontSize: "12px", fontWeight: 800, color: "#E2E8F0", marginBottom: "8px", marginTop: "4px" }}>
         主播聲音
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginBottom: "14px" }}>

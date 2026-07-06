@@ -282,14 +282,14 @@ export async function syncUserNewsPreferences(input: {
   anchorStyle?: string;
   playbackRate?: number;
   voiceFeatureEnabled?: boolean;
-}): Promise<void> {
-  if (!isSupabaseConfigured()) return;
+}): Promise<boolean> {
+  if (!isSupabaseConfigured()) return true;
 
   const userId = await ensureSupabaseUser();
-  if (!userId) return;
+  if (!userId) return false;
 
   const supabase = getSupabase();
-  if (!supabase) return;
+  if (!supabase) return false;
 
   const morningTime = input.morningRadioTime ?? "07:00";
   const eveningTime = input.eveningRadioTime ?? "17:00";
@@ -329,7 +329,9 @@ export async function syncUserNewsPreferences(input: {
 
   if (error) {
     console.warn("[DailyRadio] sync preferences failed", error.message);
+    return false;
   }
+  return true;
 }
 
 export async function syncPushTokenToSupabase(

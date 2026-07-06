@@ -1,5 +1,19 @@
 import type { AiDuration } from "./aiDuration";
+import { DAILY_SCRIPT_TIMEZONE, hourInTimezone } from "./dateLocal";
 import { readUserDisplayName } from "./dailyRadio";
+
+/** 設定頁即時預覽：AI 主播開場稱呼 */
+export function buildAnchorGreetingPreview(nameDraft: string): string {
+  const trimmed = nameDraft.trim();
+  if (!trimmed) {
+    return "「朋友，歡迎收聽今天的 AI 新聞。」";
+  }
+  const hour = hourInTimezone(DAILY_SCRIPT_TIMEZONE);
+  if (hour >= 17) {
+    return `「${trimmed}，晚安，今天有幾則你關心的新聞，我幫你整理成 3 分鐘重點。」`;
+  }
+  return `「${trimmed}，早安，我已經幫你整理好今天最值得關注的新聞。」`;
+}
 
 function greetingForHour(hour: number): string {
   if (hour < 11) return "早安";

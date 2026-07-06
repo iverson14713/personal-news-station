@@ -109,6 +109,11 @@ const MORNING_PUSH_WINDOW_MINUTES = 30;
 const UPSERT_CONFLICT =
   "user_id,script_date,duration_minutes,generation_source,radio_slot";
 
+function sourceNewsCount(sourceNews: unknown): number | undefined {
+  if (!Array.isArray(sourceNews)) return undefined;
+  return sourceNews.length;
+}
+
 const FULL_SCRIPT_SELECT =
   "id, status, updated_at, push_sent_at, generation_source, radio_slot, script_date, script_text, audio_url, audio_voice, audio_style, audio_expires_at";
 
@@ -813,6 +818,7 @@ async function processUserSlot(
         hasAnchorAudio: audioReady,
         audioReady,
         durationMinutes: duration,
+        newsCount: news.length,
       }
     );
 
@@ -934,6 +940,7 @@ async function ensureTodayAudioAndPush(
       hasAnchorAudio: audioReady,
       audioReady,
       durationMinutes: duration,
+      newsCount: sourceNewsCount(fullRow.source_news),
     }
   );
 
@@ -1023,6 +1030,7 @@ async function sendTestPushForExistingScript(
       hasAnchorAudio: audioReady,
       audioReady,
       durationMinutes: duration,
+      newsCount: sourceNewsCount(fullRow.source_news),
     }
   );
 
@@ -1089,6 +1097,7 @@ async function sendDailyRadioPush(
     hasAnchorAudio?: boolean;
     audioReady?: boolean;
     durationMinutes?: number;
+    newsCount?: number;
   }
 ): Promise<PushSendResult> {
   const forceTestPush = options.sendTestPush;
@@ -1120,6 +1129,7 @@ async function sendDailyRadioPush(
       hasAnchorAudio: pushMeta?.audioReady === true,
       audioReady: pushMeta?.audioReady === true,
       durationMinutes: pushMeta?.durationMinutes ?? duration,
+      newsCount: pushMeta?.newsCount,
     }
   );
 

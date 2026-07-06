@@ -92,6 +92,7 @@ import {
   AiAnchorBroadcastPanel,
   AiAnchorProLockCard,
   AiAnchorSettingsFields,
+  AiAnchorSettingsIntro,
 } from "./AiAnchorBroadcastPanel";
 import { generateScriptAudio, isScriptUuid, pingVercelApi } from "./scriptAudioApi";
 import { isInternalAccessActive } from "./hiddenDevUnlock";
@@ -118,6 +119,8 @@ import {
   normalizeDailyInsight,
 } from "./AiDailyInsightCard";
 import { HiddenDevPanel } from "./HiddenDevPanel";
+import { DisplayNameField } from "./DisplayNameField";
+import { SettingsToastHost, showSettingsToast } from "./SettingsToast";
 import { InternalPromotionBanner } from "./InternalPromotionBanner";
 import { apiUrl } from "./apiBase";
 import { restorePurchases, purchaseProSubscription, syncPurchasesOnLaunch } from "./iapRestore";
@@ -1019,7 +1022,7 @@ export default function App() {
     void syncUserNewsPreferences({
       topics: selectedTopics,
       customKeywords: savedCustomKeywords,
-      displayName: userDisplayName,
+      displayName: readUserDisplayName(),
       dailyRadioEnabled: true,
       morningRadioEnabled: true,
       eveningRadioEnabled: isPro,
@@ -1043,7 +1046,6 @@ export default function App() {
     isPro,
     savedCustomKeywords,
     selectedTopics,
-    userDisplayName,
     voiceFeatureEnabled,
   ]);
   const handleAnchorIdChange = useCallback(
@@ -3048,7 +3050,7 @@ ${newsText}
       await syncUserNewsPreferences({
         topics: selectedTopics,
         customKeywords: savedCustomKeywords,
-        displayName: userDisplayName,
+        displayName: readUserDisplayName(),
         dailyRadioEnabled: true,
         morningRadioEnabled: true,
         eveningRadioEnabled: isPro,
@@ -3068,7 +3070,6 @@ ${newsText}
     topicOnboardingOpen,
     selectedTopics,
     savedCustomKeywords,
-    userDisplayName,
     dailyRadioState.scheduledTime,
     dailyRadioState.eveningTime,
     isPro,
@@ -3212,6 +3213,44 @@ ${newsText}
     [startPlayback]
   );
 
+  const handleSaveDisplayName = useCallback(
+    async (name: string): Promise<boolean> => {
+      writeUserDisplayName(name);
+      setUserDisplayName(name);
+      if (!isSupabaseConfigured()) return true;
+      return syncUserNewsPreferences({
+        topics: selectedTopics,
+        customKeywords: savedCustomKeywords,
+        displayName: name,
+        dailyRadioEnabled: true,
+        morningRadioEnabled: true,
+        eveningRadioEnabled: isPro,
+        morningRadioTime: dailyRadioState.scheduledTime || MORNING_RADIO_TIME,
+        eveningRadioTime: dailyRadioState.eveningTime || EVENING_RADIO_TIME,
+        morningDurationMinutes: 3,
+        eveningDurationMinutes: 3,
+        isPro,
+        anchorId,
+        anchorVoice: selectedAnchor.voice,
+        anchorStyle: anchorStyleId,
+        playbackRate: anchorPlaybackRate,
+        voiceFeatureEnabled,
+      });
+    },
+    [
+      selectedTopics,
+      savedCustomKeywords,
+      isPro,
+      dailyRadioState.scheduledTime,
+      dailyRadioState.eveningTime,
+      anchorId,
+      selectedAnchor.voice,
+      anchorStyleId,
+      anchorPlaybackRate,
+      voiceFeatureEnabled,
+    ]
+  );
+
   const pageTitle =
     tab === "home"
       ? "首頁"
@@ -3229,6 +3268,7 @@ ${newsText}
 
   return (
     <div style={styles.page}>
+      <SettingsToastHost />
       <div
         style={{
           ...styles.phone,
@@ -3709,17 +3749,6 @@ ${newsText}
                   每天早上自動整理你最關心的新聞，3 分鐘快速掌握今天的重要資訊。
                 </div>
               )}
-              <label style={styles.settingLabel} htmlFor="pns-display-name">
-                播放開場稱呼
-              </label>
-              <input
-                id="pns-display-name"
-                value={userDisplayName}
-                onChange={(e) => setUserDisplayName(e.target.value)}
-                onBlur={() => writeUserDisplayName(userDisplayName)}
-                placeholder="例如：Wayne"
-                style={styles.settingInput}
-              />
               {isPro ? (
                 <div style={styles.proStatusLine}>
                   <strong>📻 專屬 AI 電台</strong>
@@ -3747,6 +3776,15 @@ ${newsText}
                   : "Pro 專屬功能"
               }
             >
+              <AiAnchorSettingsIntro />
+              <DisplayNameField
+                savedValue={userDisplayName}
+                onSave={handleSaveDisplayName}
+                onToast={showSettingsToast}
+                anchorName={selectedAnchor.name}
+                styleName={selectedAnchorStyle.name}
+                playbackRate={anchorPlaybackRate}
+              />
               {voiceFeatureEnabled ? (
                 <AiAnchorSettingsFields
                   anchorId={anchorId}
@@ -6677,7 +6715,8 @@ const styles: Record<string, CSSProperties> = {
     boxSizing: "border-box",
     width: "100%",
     maxWidth: "100%",
-    minHeight: "100dvh",
+    minHeight: "100%",
+    height: "100%",
     margin: 0,
     padding: 0,
     overflowX: "hidden",
@@ -6695,7 +6734,6 @@ const styles: Record<string, CSSProperties> = {
     paddingRight: "max(16px, env(safe-area-inset-right, 0px))",
     paddingTop: "max(12px, env(safe-area-inset-top, 0px))",
     paddingBottom: "calc(84px + env(safe-area-inset-bottom, 0px))",
-    transition: "padding-bottom 0.2s ease",
   },
   homeHeader: {
     display: "flex",
@@ -7875,10 +7913,12 @@ const styles: Record<string, CSSProperties> = {
     color: "white",
     border: "1px solid rgba(255,255,255,.12)",
     outline: "none",
-    fontSize: "15px",
+    fontSize: "16px",
+    lineHeight: 1.35,
     padding: "12px",
     borderRadius: "14px",
     marginTop: "8px",
+    WebkitTextSizeAdjust: "100%",
   },
   savedKeywordChips: {
     display: "flex",
