@@ -3,8 +3,22 @@
     "api/summary.ts": {
       "maxDuration": 60,
       "memory": 1024
+    },
+    "api/generate-audio.ts": {
+      "maxDuration": 60,
+      "memory": 1024
+    },
+    "api/cleanup-audio.ts": {
+      "maxDuration": 60,
+      "memory": 512
     }
   },
+  "crons": [
+    {
+      "path": "/api/cleanup-audio",
+      "schedule": "0 16 * * *"
+    }
+  ],
   "rewrites": [
     { "source": "/privacy", "destination": "/privacy.html" },
     { "source": "/terms", "destination": "/terms.html" },

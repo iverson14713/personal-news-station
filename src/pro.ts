@@ -24,9 +24,12 @@ export type PlanLimits = {
   totalTrackingLimit: number;
   favoriteLimit: number;
   historyDays: number;
-  fiveMinuteEnabled: boolean;
+  /** 解鎖 5 / 10 / 15 分鐘新聞稿 */
+  proDurationsEnabled: boolean;
   deepModeEnabled: boolean;
   dailyInsightEnabled: boolean;
+  /** 後續：自訂每日生成時間 */
+  customScheduleEnabled: boolean;
 };
 
 const PRO_STORAGE_KEY = "pns_pro_status_v1";
@@ -41,9 +44,10 @@ const FREE_LIMITS: PlanLimits = {
   totalTrackingLimit: 4,
   favoriteLimit: 20,
   historyDays: 7,
-  fiveMinuteEnabled: false,
+  proDurationsEnabled: false,
   deepModeEnabled: false,
   dailyInsightEnabled: false,
+  customScheduleEnabled: false,
 };
 
 const PRO_LIMITS: PlanLimits = {
@@ -53,9 +57,10 @@ const PRO_LIMITS: PlanLimits = {
   totalTrackingLimit: 10,
   favoriteLimit: 500,
   historyDays: 180,
-  fiveMinuteEnabled: true,
+  proDurationsEnabled: true,
   deepModeEnabled: true,
   dailyInsightEnabled: true,
+  customScheduleEnabled: true,
 };
 
 /** @deprecated 請改用 getPlanLimits */
@@ -183,8 +188,13 @@ export function getAiDailyLimit(status?: ProStatus): number {
   return getPlanLimits(status).aiDailyLimit;
 }
 
+export function canUseProDuration(status?: ProStatus): boolean {
+  return getPlanLimits(status).proDurationsEnabled;
+}
+
+/** @deprecated 請改用 canUseProDuration */
 export function canUseFiveMinuteScript(status?: ProStatus): boolean {
-  return getPlanLimits(status).fiveMinuteEnabled;
+  return canUseProDuration(status);
 }
 
 export function getTotalTrackingCount(topicCount: number, keywordCount: number): number {

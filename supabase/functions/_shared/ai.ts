@@ -1,0 +1,140 @@
+import type { NewsItem } from "./news.ts";
+import type { RadioSlot } from "./news.ts";
+
+const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
+
+function formatNewsList(items: NewsItem[]): string {
+  return items
+    .map((it, i) => {
+      const lines = [
+        `新聞 ${i + 1}：`,
+        `標題：${it.title}`,
+        `來源：${it.source}`,
+      ];
+      if (it.summary) lines.push(`摘要：${it.summary}`);
+      if (it.url) lines.push(`連結：${it.url}`);
+      if (it.topic) lines.push(`相關主題：${it.topic}`);
+      if (it.publishedAt) lines.push(`發布時間：${it.publishedAt}`);
+      return lines.join("\n");
+    })
+    .join("\n\n");
+}
+
+export type GenerateRadioScriptOptions = {
+  radioSlot?: RadioSlot;
+  displayName?: string | null;
+  /** 早報已報導標題，晚報時避免重複 */
+  morningHeadlines?: string[];
+};
+
+function buildMorningSystemPrompt(): string {
+  return `你是「AI 個人新聞台」的專業新聞編輯與主播稿撰寫助理。
+請依提供的新聞整理 3 分鐘「今日早報」口播稿（約 700～1000 字），繁體中文、新聞主播語氣。
+必須保留人名、球隊、公司、幣種等專有名詞，禁止模糊代稱。
+請勿自行撰寫「以上就是今天的…」類結尾，系統會統一加上節目結尾。
+只輸出 JSON：{"title":"今日 AI 早報","script":"口播稿全文"}`;
+}
+
+function buildEveningSystemPrompt(): string {
+  return `你是「AI 個人新聞台」的專業新聞編輯與主播稿撰寫助理。
+請依提供的新聞整理 3 分鐘「今日晚報」口播稿（約 700～1000 字），繁體中文、新聞主播語氣。
+重點：整理下午前後的最新更新、今日後續發展與新動態；不要重複早報已報導過的同一則新聞或同一事件。
+若新聞是早報事件的後續進展，可簡短帶出「延續早報…」再說新進展，但不可整段重複早報內容。
+必須保留人名、球隊、公司、幣種等專有名詞，禁止模糊代稱。
+請勿自行撰寫「以上就是今天的…」類結尾，系統會統一加上節目結尾。
+只輸出 JSON：{"title":"今日 AI 晚報","script":"口播稿全文"}`;
+}
+
+function buildUserMessage(
+  items: NewsItem[],
+  options: GenerateRadioScriptOptions
+): string {
+  const n = items.length;
+  const name = options.displayName?.trim() || "聽眾朋友";
+  const listText = formatNewsList(items);
+  const slot = options.radioSlot ?? "morning";
+
+  if (slot === "evening") {
+    const morningBlock =
+      options.morningHeadlines && options.morningHeadlines.length > 0
+        ? `\n\n早報已報導過的新聞標題（請避免重複報導同一事件，優先選擇新新聞或後續更新）：\n${options.morningHeadlines.map((t) => `- ${t}`).join("\n")}`
+        : "\n\n（無早報稿件紀錄，請依新聞列表撰寫晚報。）";
+
+    return `聽眾稱呼：${name}
+請為以下 ${n} 則「新抓取」的新聞撰寫 3 分鐘今日晚報口播稿。
+${morningBlock}
+
+${listText}`;
+  }
+
+  return `聽眾稱呼：${name}
+請為以下 ${n} 則「新抓取」的新聞撰寫 3 分鐘今日早報口播稿。
+
+${listText}`;
+}
+
+export async function generateRadioScript(
+  apiKey: string,
+  items: NewsItem[],
+  options: GenerateRadioScriptOptions = {}
+): Promise<{ script: string; title: string }> {
+  const slot = options.radioSlot ?? "morning";
+  const system =
+    slot === "evening" ? buildEveningSystemPrompt() : buildMorningSystemPrompt();
+  const userMsg = buildUserMessage(items, options);
+  const defaultTitle = slot === "evening" ? "今日 AI 晚報" : "今日 AI 早報";
+
+  console.log("[AI] generateRadioScript", {
+    radio_slot: slot,
+    news_count: items.length,
+    morning_headlines_excluded: options.morningHeadlines?.length ?? 0,
+  });
+
+  const res = await fetch(OPENAI_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    signal: AbortSignal.timeout(55_000),
+    body: JSON.stringify({
+      model: "gpt-4.1-mini",
+      temperature: slot === "evening" ? 0.45 : 0.42,
+      max_tokens: 1900,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: userMsg },
+      ],
+    }),
+  });
+
+  const raw = await res.text();
+  if (!res.ok) {
+    throw new Error(`OpenAI error ${res.status}: ${raw.slice(0, 200)}`);
+  }
+
+  const data = JSON.parse(raw) as {
+    choices?: { message?: { content?: string } }[];
+  };
+  const content = data.choices?.[0]?.message?.content?.trim() ?? "";
+  if (!content) throw new Error("OpenAI empty response");
+
+  const parsed = JSON.parse(content) as { title?: string; script?: string };
+  const script = String(parsed.script ?? "").trim();
+  if (!script) throw new Error("OpenAI missing script");
+  const title = String(parsed.title ?? defaultTitle).trim();
+  return { script, title };
+}
+
+/** @deprecated 使用 generateRadioScript */
+export async function generateThreeMinuteScript(
+  apiKey: string,
+  items: NewsItem[],
+  displayName?: string | null
+): Promise<{ script: string; title: string }> {
+  return generateRadioScript(apiKey, items, {
+    radioSlot: "morning",
+    displayName,
+  });
+}

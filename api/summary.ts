@@ -10,7 +10,7 @@ type SummaryItem = {
   publishedAt: string;
   topic: string;
 };
-type AiDuration = 1 | 3 | 5;
+type AiDuration = 3 | 5 | 10 | 15;
 
 type HighlightOut = { level: string; title: string; summary: string };
 
@@ -41,8 +41,8 @@ function parseBody(req: any): Record<string, unknown> {
 
 function normalizeDuration(raw: unknown): AiDuration {
   const n = Number(raw);
-  if (n === 3 || n === 5) return n;
-  return 1;
+  if (n === 5 || n === 10 || n === 15) return n;
+  return 3;
 }
 
 function hasFinanceRelatedNews(items: SummaryItem[]): boolean {
@@ -201,9 +201,10 @@ function formatNewsListForInsight(items: SummaryItem[]): string {
 }
 
 function deepDiveCount(duration: AiDuration, newsCount: number): number {
-  if (duration === 1) return Math.min(2, newsCount);
   if (duration === 3) return Math.min(3, Math.max(2, newsCount >= 4 ? 3 : 2));
-  return Math.min(3, Math.max(2, newsCount >= 4 ? 3 : newsCount));
+  if (duration === 5) return Math.min(4, Math.max(2, newsCount >= 4 ? 3 : newsCount));
+  if (duration === 10) return Math.min(5, Math.max(3, newsCount >= 4 ? 4 : newsCount));
+  return Math.min(5, Math.max(3, newsCount));
 }
 
 /** 依時長 × 新聞數量 × 一般/深度 決定 token 上限與篇幅指引 */
@@ -224,33 +225,15 @@ function buildDynamicAllocation(
 function buildNormalAllocation(duration: AiDuration, n: number): Allocation {
   const many = n >= 4;
 
-  if (duration === 1) {
-    return {
-      maxTokens: many ? 950 : 800,
-      temperature: 0.4,
-      modeLabel: "1 分鐘｜一般整理｜快報",
-      scriptGuide: `【定位】快速掌握今天發生什麼事。
-【字數】總字數約 250～400 字（寧短勿冗）。
-【語氣】新聞主播式、清楚、簡潔；只整理主要重點，不要評論專欄、不要延伸分析、不要預測漲跌。
-【結構】簡短開場 → 快速帶過 ${n} 則重點（🔥/⚠️ 可 1～2 句，ℹ️ 1 句）→ 簡短結尾。
-【名稱】每則第一次出現必寫清楚人名／球隊／公司／幣種等，禁止「這位球員」「某公司」。
-【禁止】寫「事件背景／為什麼重要／後續觀察」等分析段落標題；禁止把每則都寫成深度稿。`,
-      highlightsGuide: `highlights 共 ${n} 則，與輸入一一對應。
-- level：🔥重大 / ⚠️注意 / ℹ️一般（依重要度排序）。
-- summary：🔥 1～2 句講清「發生什麼」；⚠️ 1 句；ℹ️ 1 句。
-- 禁止寫背景分析、影響預測、投資建議。`,
-    };
-  }
-
   if (duration === 3) {
     return {
       maxTokens: many ? 1900 : 1600,
       temperature: 0.42,
-      modeLabel: "3 分鐘｜一般整理｜主播稿",
-      scriptGuide: `【定位】快速掌握今日重點，像晚間新聞中段。
+      modeLabel: "3 分鐘｜一般整理｜每日早報",
+      scriptGuide: `【定位】快速掌握今日重點，像每日 AI 早報。
 【字數】總字數約 700～1000 字。
 【語氣】新聞主播式、有轉場、清楚好聽；以「發生了什麼」為主。
-【結構】開場 → 依重要度播報全部 ${n} 則（🔥 2～3 句；⚠️ 1～2 句；ℹ️ 1 句）→ 結尾。
+【結構】簡短開場 → 依重要度播報全部 ${n} 則（🔥 2～3 句；⚠️ 1～2 句；ℹ️ 1 句）→ 結尾。
 【允許】極簡短的一句影響或脈絡（嵌入句中即可），但不要展開成分析段落。
 【禁止】使用「一、事件背景」等深度解析標題；禁止每則平均寫長；禁止評論專欄語氣。`,
       highlightsGuide: `highlights 共 ${n} 則，與輸入一一對應。
@@ -259,19 +242,52 @@ function buildNormalAllocation(duration: AiDuration, n: number): Allocation {
     };
   }
 
-  return {
-    maxTokens: n >= 4 ? 2200 : 2000,
-    temperature: 0.45,
-    modeLabel: "5 分鐘｜一般整理｜完整廣播稿",
-    scriptGuide: `【定位】較完整的今日新聞廣播稿（仍是一般整理，不是深度解析）。
+  if (duration === 5) {
+    return {
+      maxTokens: n >= 4 ? 2200 : 2000,
+      temperature: 0.45,
+      modeLabel: "5 分鐘｜一般整理｜推薦完整版",
+      scriptGuide: `【定位】推薦收聽長度，較完整的今日新聞廣播稿。
 【字數】總字數約 1200～1600 字。
 【語氣】Podcast 新聞節目感、有層次與轉場，但仍是「播報重點」而非「分析評論」。
 【結構】開場 → 全部 ${n} 則都要出現（🔥 3～4 句；⚠️ 2 句；ℹ️ 1～2 句）→ 結尾。
 【允許】🔥 可帶一句背景或影響（簡短），但不要為每則都寫四段分析。
 【禁止】「一、事件背景／二、為什麼重要」等深度解析架構；禁止保證性語氣與投資建議。`,
-    highlightsGuide: `highlights 共 ${n} 則，與輸入一一對應。
+      highlightsGuide: `highlights 共 ${n} 則，與輸入一一對應。
 - 🔥：2～3 句（重點＋簡短影響）；⚠️：2 句；ℹ️：1 句。
 - 仍偏事實整理，勿寫成分析報告。`,
+    };
+  }
+
+  if (duration === 10) {
+    return {
+      maxTokens: n >= 4 ? 3200 : 2800,
+      temperature: 0.48,
+      modeLabel: "10 分鐘｜深入版｜更多背景",
+      scriptGuide: `【定位】深入版每日電台，加入更多新聞背景與脈絡。
+【字數】總字數約 2000～2800 字。
+【語氣】像 podcast 新聞深度節目前段，仍保持主播口播感。
+【結構】儀式感開場 → 全部 ${n} 則依重要度展開（🔥 4～5 句含背景；⚠️ 2～3 句；ℹ️ 1～2 句）→ 今日小結。
+【允許】穿插簡短「為何重要」「後續觀察」嵌入句中；可補充輸入摘要中已有的背景。
+【禁止】捏造未提供的事實；禁止論文式標題；禁止投資建議。`,
+      highlightsGuide: `highlights 共 ${n} 則，與輸入一一對應。
+- 🔥：3～4 句（事實＋背景＋影響）；⚠️：2～3 句；ℹ️：1～2 句。`,
+    };
+  }
+
+  return {
+    maxTokens: n >= 4 ? 4000 : 3600,
+    temperature: 0.5,
+    modeLabel: "15 分鐘｜完整 Podcast｜洞察與觀點",
+    scriptGuide: `【定位】完整 Podcast 等級的專屬 AI 電台，不是單純加長。
+【字數】總字數約 2800～3800 字。
+【語氣】有儀式感、有層次，像每日個人電台完整節目。
+【結構】開場問候 → 今日主軸 → 全部 ${n} 則深度播報（🔥 5～6 句含背景/後續/不確定性；⚠️ 3 句；ℹ️ 2 句）→ AI 洞察小結（整合今日趨勢，非新資料）→ 結尾。
+【必須】至少 1～2 則加入「不同觀點或爭議點」（僅能基於輸入，保守表述）。
+【必須】至少 1 段「後續值得觀察什麼」。
+【禁止】把每則都寫成相同長度；禁止補出原資料沒有的數字或交易；禁止投資建議。`,
+    highlightsGuide: `highlights 共 ${n} 則，與輸入一一對應。
+- 🔥：4～5 句（含背景、影響、後續）；⚠️：2～3 句；ℹ️：1～2 句。`,
   };
 }
 
@@ -289,22 +305,6 @@ function buildDeepAllocation(
   const antiRewrite =
     "深度解析不可只是改寫一般整理；須回答為什麼重要、影響誰、後續觀察什麼、有哪些不確定性。";
 
-  if (duration === 1) {
-    return {
-      maxTokens: 900,
-      temperature: 0.5,
-      modeLabel: "1 分鐘｜深度解析 Pro｜口播",
-      scriptGuide: `【定位】1～2 分鐘內講清楚 1～2 則最重要新聞的背景與意義（自然主播口播）。
-【字數】script 約 350～550 字。
-【策略】從 ${n} 則中只挑 1～2 則講深；${supplementGuide}
-【寫法】開頭第一句就要寫出該則新聞的主體全名（人名＋球隊／公司等）；再講背景、為何重要、後續觀察。
-【禁止】報告式「一、二、三、四」標題；禁止「這位球員」「某重砲手」取代標題裡已有的人名；${antiRewrite}`,
-      highlightsGuide: `highlights 共 ${n} 則，與輸入一一對應。
-- 深入 1～2 則：summary 2～3 句。
-- 其餘：summary 1 句。`,
-    };
-  }
-
   if (duration === 3) {
     return {
       maxTokens: 2000,
@@ -313,24 +313,53 @@ function buildDeepAllocation(
       scriptGuide: `【定位】新聞台深度口播，挑 2～3 個主題，比一般整理更有分析感。
 【字數】script 約 900～1300 字。
 【策略】${diveCount} 則主題；${supplementGuide}
-【寫法】每段第一句必明確寫出新聞主體全名（例：「首先關注 MLB 的 Ohtani…」而非「首先關注一位球員」）；先講標題/摘要中的事實，再講為何重要、可能影響、後續觀察。
+【寫法】每段第一句必明確寫出新聞主體全名；先講標題/摘要中的事實，再講為何重要、可能影響、後續觀察。
 【禁止】無資料卻寫薪資結構、交易市場、季後賽前景；資訊不足就簡短保守；禁止模糊代稱；${antiRewrite}`,
       highlightsGuide: `highlights 共 ${n} 則，與輸入一一對應。
 - 深入主題 summary 2～4 句；其餘 1～2 句。`,
     };
   }
 
-  return {
-    maxTokens: 2600,
-    temperature: 0.52,
-    modeLabel: "5 分鐘｜深度解析 Pro｜完整深度",
-    scriptGuide: `【定位】完整深度解析約 3 個主題，仍保持新聞台口播感。
+  if (duration === 5) {
+    return {
+      maxTokens: 2600,
+      temperature: 0.52,
+      modeLabel: "5 分鐘｜深度解析 Pro｜完整深度",
+      scriptGuide: `【定位】完整深度解析約 3～4 個主題，仍保持新聞台口播感。
 【字數】script 約 1500～2200 字。
-【策略】${diveCount} 則主題可用明確小段開場（勿用論文式「一、二、三、四」全套）；${supplementGuide}
+【策略】${diveCount} 則主題可用明確小段開場；${supplementGuide}
 【內容】含背景、重要性、影響、後續觀察與不確定性；${antiRewrite}
 【禁止】不要像券商研究報告；script 內禁止出現 JSON 或 highlights 資料。`,
-    highlightsGuide: `highlights 共 ${n} 則，與輸入一一對應。
+      highlightsGuide: `highlights 共 ${n} 則，與輸入一一對應。
 - 深入主題 summary 3～5 句；快速補充 1～2 句。`,
+    };
+  }
+
+  if (duration === 10) {
+    return {
+      maxTokens: 3400,
+      temperature: 0.54,
+      modeLabel: "10 分鐘｜深度解析 Pro｜深入電台",
+      scriptGuide: `【定位】深入版 Pro 電台，更多背景、後續與不確定性。
+【字數】script 約 2200～3000 字。
+【策略】${diveCount} 則主題深入；${supplementGuide}
+【內容】含事件背景、多方觀點（僅基於輸入）、後續觀察；${antiRewrite}`,
+      highlightsGuide: `highlights 共 ${n} 則，與輸入一一對應。
+- 深入主題 summary 4～6 句；其餘 2 句。`,
+    };
+  }
+
+  return {
+    maxTokens: 4200,
+    temperature: 0.55,
+    modeLabel: "15 分鐘｜深度解析 Pro｜完整 Podcast",
+    scriptGuide: `【定位】完整 Podcast 等級 Pro 深度電台：洞察、後續、不同觀點，不是單純加長。
+【字數】script 約 3000～4000 字。
+【策略】${diveCount} 則主題完整深度；${supplementGuide}
+【內容】含背景、影響、爭議或不同觀點、後續觀察、AI 整合小結；${antiRewrite}
+【禁止】捏造事實；禁止 JSON 出現在 script。`,
+    highlightsGuide: `highlights 共 ${n} 則，與輸入一一對應。
+- 深入主題 summary 5～7 句；快速補充 2 句。`,
   };
 }
 
@@ -357,19 +386,21 @@ function buildDeepModeSystemBlock(
 - script 只能是口播新聞稿全文，禁止在 script 內輸出 JSON 或 highlights。`;
   }
 
-  const oneMinNote =
-    duration === 1
-      ? "\n- 1 分鐘深度：口播敘事、350～550 字，禁止「一、二、三、四」報告標題。"
-      : duration === 3
-        ? "\n- 3 分鐘深度：可用輕量小標，900～1300 字，勿像 JSON 或報告。"
-        : "\n- 5 分鐘深度：段落可更完整，1500～2200 字，仍保持主播感。";
+  const durationNote =
+    duration === 3
+      ? "\n- 3 分鐘深度：可用輕量小標，900～1300 字，勿像 JSON 或報告。"
+      : duration === 5
+        ? "\n- 5 分鐘深度：段落可更完整，1500～2200 字，仍保持主播感。"
+        : duration === 10
+          ? "\n- 10 分鐘深度：2200～3000 字，可加入更多背景與後續觀察。"
+          : "\n- 15 分鐘深度：3000～4000 字，完整 Podcast 洞察，禁止單純加長。";
 
   return `
 
 【深度解析 Pro】
 - 挑 ${diveCount} 則最重要主題講深，其餘快速補充；不可只改寫一般整理。
 - script 僅放口播稿，highlights 只放在 JSON 的 highlights 陣列，禁止混進 script。
-- 須有「為什麼重要／影響誰／後續觀察／不確定性」；深度解析不可只是改寫摘要。${oneMinNote}`;
+- 須有「為什麼重要／影響誰／後續觀察／不確定性」；深度解析不可只是改寫摘要。${durationNote}`;
 }
 
 function safeJsonParse(s: string): Record<string, unknown> | null {
@@ -490,7 +521,8 @@ export default async function handler(req: any, res: any) {
   const duration = normalizeDuration(body.duration);
   const deepMode = body.deepMode === true || body.mode === "deep";
   const rawItems = body.items;
-  const itemLimit = kind === "dailyInsight" ? 20 : 5;
+  const itemLimit =
+    kind === "dailyInsight" ? 20 : duration >= 10 ? 8 : 5;
   const items: SummaryItem[] = Array.isArray(rawItems)
     ? rawItems
         .slice(0, itemLimit)
@@ -639,16 +671,14 @@ ${listText}`;
     ? "分析解讀"
     : "今日重點整理";
   const scriptTitleRule = deepMode
-    ? duration === 1
-      ? "自然口播深入，禁止報告式編號標題"
+    ? duration >= 10
+      ? "可用段落小標，禁止 JSON 或報告體"
       : "可用輕量段落，禁止 JSON 或報告體"
     : "禁止使用深度解析報告標題";
   const durationFeel = deepMode ? " 深度解析" : " 一般整理";
   const userWriteHint = deepMode
-    ? duration === 1
-      ? "請挑 1～2 則用口播方式深入講解，其餘一句話快速補充。script 只寫新聞稿，不要輸出 JSON。"
-      : `請挑 ${diveCount} 則深入分析，其餘快速補充。script 只寫口播稿，不可只改寫摘要。`
-    : "請以新聞主播快報整理，不要寫成深度分析。";
+    ? `請挑 ${diveCount} 則深入分析，其餘快速補充。script 只寫口播稿，不可只改寫摘要。`
+    : "請以新聞主播整理今日重點，不要寫成過度分析。";
 
   const system = `你是「AI 個人新聞台」的專業新聞編輯與主播稿撰寫助理。
 使用者提供每則新聞的標題、來源、摘要（若有）、連結與時間；請嚴格依這些資料整理，不要捏造具體數據、姓名或未被資料暗示的事實。

@@ -5,13 +5,19 @@
     "preview": "vite preview",
     "screenshot:news": "node scripts/screenshot-news.mjs",
     "screenshot:apple": "node scripts/screenshot-apple.mjs",
-    "resize:apple-screenshots": "node scripts/resize-apple-screenshots.mjs"
+    "resize:apple-screenshots": "node scripts/resize-apple-screenshots.mjs",
+    "test:supabase-daily-radio": "node scripts/test-supabase-daily-radio.mjs",
+    "setup:petcare-supabase": "bash scripts/setup-petcare-supabase.sh"
   },
   "dependencies": {
+    "@capacitor/app": "^8.1.0",
     "@capacitor/cli": "^8.4.1",
     "@capacitor/core": "^8.4.1",
     "@capacitor/ios": "^8.4.1",
+    "@capacitor/local-notifications": "^8.2.0",
+    "@capacitor/push-notifications": "^8.1.1",
     "@capgo/native-purchases": "^8.4.6",
+    "@supabase/supabase-js": "^2.110.0",
     "@vitejs/plugin-react": "latest",
     "lucide-react": "latest",
     "react": "latest",

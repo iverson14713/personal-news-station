@@ -1,0 +1,11 @@
+# Supabase local config (optional: supabase start)
+project_id = "tldekbnftaadswxhhznl"
+
+[api]
+enabled = true
+
+[db]
+major_version = 15
+
+[functions.generate-daily-radio]
+verify_jwt = false

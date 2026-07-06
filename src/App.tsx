@@ -7,7 +7,7 @@ import {
   canAddTopic,
   canUseDailyInsight,
   canUseDeepMode,
-  canUseFiveMinuteScript,
+  canUseProDuration,
   clampTrackingToPlan,
   filterHistoryByPlan,
   formatProExpiresAt,
@@ -20,6 +20,95 @@ import {
   sanitizeNonIapProUnlocks,
   type ProStatus,
 } from "./pro";
+import {
+  AI_DURATIONS,
+  DAILY_AUTO_DURATION,
+  FREE_DURATION,
+  durationOptionSubtitle,
+  isProDuration,
+  normalizeAiDuration,
+  type AiDuration,
+} from "./aiDuration";
+import {
+  consumeAutoplayDailyFlag,
+  clearAutoplayDailyFlag,
+  clearAutoplayAnchorAudioFlag,
+  consumeAutoplayAnchorAudioFlag,
+  setAutoplayAnchorAudioFlag,
+  dailyRadioHeroDisplay,
+  dailyRadioHeroStatus,
+  findTodayDailyHistoryEntry,
+  logDailyRadioScheduler,
+  markDailyGenerationComplete,
+  markDailyGenerationFailed,
+  markDailyGenerationStarted,
+  NEWS_FETCH_TIMEOUT_MS,
+  readDailyRadioState,
+  readUserDisplayName,
+  setAutoplayDailyFlag,
+  writeUserDisplayName,
+  todayDailyScriptYmd,
+  writeDailyRadioState,
+  type DailyRadioState,
+  type NewsFetchStatus,
+  type ServerSyncStatus,
+} from "./dailyRadio";
+import { initDailyNotificationsOnce, maybeRescheduleDailyRadioReminder } from "./dailyNotifications";
+import { initRemotePush, dailyRadioPushPayloadToOpenInfo, type DailyRadioPushOpenInfo } from "./remotePush";
+import { ensureSupabaseUser, getSupabaseAuthUserId, initSupabaseAuth, isSupabaseConfigured } from "./supabaseClient";
+import {
+  fetchServerDailyScript,
+  saveAppGeneratedDailyScript,
+  syncUserNewsPreferences,
+  triggerServerDailyRadioGeneration,
+  type DailyScriptQueryDebug,
+  type FetchScriptOptions,
+  type ServerDailyScript,
+} from "./dailyRadioApi";
+import { AiAnchorAudioProvider, useAiAnchorPlayer, useAiAnchorPlayerActions } from "./AiAnchorAudioProvider";
+import { MORNING_RADIO_TIME, EVENING_RADIO_TIME, radioSlotCompletedTitle, type RadioSlot } from "./radioSlot";
+import { appendRadioClosing } from "./radioClosing";
+import {
+  formatAnchorPlaybackRate,
+  getAnchorById,
+  getScriptAudioStaleReason,
+  isTodayScriptAudioReady,
+  getStyleById,
+  readAnchorId,
+  readAnchorPlaybackRate,
+  readAnchorStyleId,
+  readAnchorVolumeGain,
+  writeAnchorId,
+  writeAnchorPlaybackRate,
+  writeAnchorStyleId,
+  writeAnchorVolumeGain,
+  type AiAnchorPlaybackRate,
+  type AiAnchorStyle,
+  type AiAnchorVoice,
+  type AiAnchorVolumeGain,
+  type ScriptAudioStaleReason,
+} from "./aiAnchorSettings";
+import {
+  AiAnchorBroadcastPanel,
+  AiAnchorProLockCard,
+  AiAnchorSettingsFields,
+} from "./AiAnchorBroadcastPanel";
+import { generateScriptAudio, isScriptUuid, pingVercelApi } from "./scriptAudioApi";
+import { isInternalAccessActive } from "./hiddenDevUnlock";
+import { hourInTimezone, DAILY_SCRIPT_TIMEZONE, todayYmdLocal } from "./dateLocal";
+import { buildPlaybackIntro, prependPlaybackIntro } from "./playbackIntro";
+import {
+  formatRemainingTime,
+  isPlaybackActiveState,
+  playbackPageTitle,
+  canStopPlayback,
+  canStartPlayback,
+  canRestartPlayback,
+  isPlayPrimaryDisabled,
+  type PlaybackMode,
+  type PlaybackState,
+} from "./playbackController";
+import { usePlaybackController } from "./usePlaybackController";
 import { parseAiSummaryContent, warnScriptQuality } from "./aiSummaryParse";
 import { TOKENS, shortVoiceLabel } from "./theme";
 import type { AiDailyInsight } from "./AiDailyInsightCard";
@@ -70,8 +159,6 @@ type Tab = "home" | "player" | "video" | "favorites" | "settings";
  */
 const ENABLE_VIDEO_NEWS_UI = false;
 
-type AiDuration = 1 | 3 | 5;
-
 type AiHighlight = {
   level: string;
   title: string;
@@ -86,6 +173,7 @@ type AiHistoryEntry = {
   highlights: AiHighlight[];
   jsonFallback: boolean;
   newsTitles: string[];
+  isDailyAuto?: boolean;
 };
 
 type AiFavoriteEntry = {
@@ -188,8 +276,6 @@ const SCRIPT_FONT_KEY = "pns_script_font_v1";
 const AI_DAILY_QUOTA_KEY = "pns_ai_daily_quota_v1";
 
 type ScriptFontSize = "sm" | "md" | "lg" | "xl";
-type PlaybackMode = "ai" | "news" | null;
-
 const ONBOARDING_SEEN_KEY = "pns_onboarding_seen_v1";
 const SPLASH_SEEN_SESSION_KEY = "pns_splash_seen_session_v1";
 const SPLASH_DURATION_MS = 1500;
@@ -202,7 +288,7 @@ type AiAnalysisMode = "normal" | "deep";
 
 type UpgradeModalKind =
   | "general"
-  | "five_minute"
+  | "pro_duration"
   | "quota"
   | "topic"
   | "favorite"
@@ -354,14 +440,6 @@ function readScriptFontSize(): ScriptFontSize {
   return "md";
 }
 
-function todayYmdLocal(): string {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
 function readAiDailyQuota(): { date: string; used: number } {
   const today = todayYmdLocal();
   try {
@@ -406,56 +484,6 @@ function splitSpeechChunks(text: string): string[] {
   return merged;
 }
 
-function estimateChunkDurationMs(text: string, rate: number): number {
-  return Math.max(650, Math.round((text.length * 92) / rate));
-}
-
-function estimatePlaybackSafeFallbackMs(text: string, rate: number): number {
-  const estimated = estimateChunkDurationMs(text, rate);
-  return Math.max(180_000, Math.round(estimated * 2.5));
-}
-
-function isSpeechSynthesisActive(): boolean {
-  const synth = window.speechSynthesis;
-  return synth.speaking || synth.pending || synth.paused;
-}
-
-function findResumeIndex(text: string, approxIndex: number): number {
-  const t = String(text || "");
-  if (!t) return 0;
-  const i = Math.max(0, Math.min(t.length, Math.floor(approxIndex)));
-  // 從目前位置往後找最近的安全切點（標點/換行），避免從句子中間開始
-  const forward = t.slice(i, Math.min(t.length, i + 80));
-  const m = forward.match(/[。！？!?；;，,\n]/);
-  if (m && m.index != null) {
-    return Math.min(t.length, i + m.index + 1);
-  }
-  // fallback：往前找
-  const back = t.slice(Math.max(0, i - 80), i);
-  const backIdx = Math.max(
-    back.lastIndexOf("。"),
-    back.lastIndexOf("！"),
-    back.lastIndexOf("？"),
-    back.lastIndexOf("!"),
-    back.lastIndexOf("?"),
-    back.lastIndexOf("；"),
-    back.lastIndexOf(";"),
-    back.lastIndexOf("，"),
-    back.lastIndexOf(","),
-    back.lastIndexOf("\n")
-  );
-  if (backIdx >= 0) {
-    return Math.max(0, i - 80 + backIdx + 1);
-  }
-  return i;
-}
-
-function formatRemainingTime(ms: number): string {
-  const sec = Math.max(0, Math.ceil(ms / 1000));
-  const m = Math.floor(sec / 60);
-  const s = sec % 60;
-  return m > 0 ? `剩餘 ${m}:${String(s).padStart(2, "0")}` : `剩餘 ${sec} 秒`;
-}
 
 function aiSummaryCacheFingerprint(
   items: NewsItem[],
@@ -548,6 +576,10 @@ function readAiHistory(): AiHistoryEntry[] {
           typeof (x as AiHistoryEntry).id === "string" &&
           typeof (x as AiHistoryEntry).script === "string"
       )
+      .map((entry) => ({
+        ...entry,
+        duration: normalizeAiDuration(entry.duration),
+      }))
       .slice(0, AI_HISTORY_MAX);
   } catch {
     return [];
@@ -807,6 +839,8 @@ async function parseVideosApiResponse(res: Response): Promise<
 }
 
 export default function App() {
+  const anchorPlayer = useAiAnchorPlayer();
+  const anchorActions = useAiAnchorPlayerActions();
   const initialStoredTopics = readStoredSelectedTopics();
   const initialStoredKeywords = readSavedCustomKeywords();
   const initialTopicOnboardingOpen = shouldShowTopicOnboarding(initialStoredTopics);
@@ -820,14 +854,13 @@ export default function App() {
   const [favoriteLinks, setFavoriteLinks] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [videoLoading, setVideoLoading] = useState(false);
-  const [newsBanner, setNewsBanner] = useState<string | null>(null);
+  const [newsFetchStatus, setNewsFetchStatus] = useState<NewsFetchStatus>("idle");
   const [videoBanner, setVideoBanner] = useState<string | null>(null);
   const [videoBadge, setVideoBadge] = useState<string | null>(null);
   const [videoContentFlags, setVideoContentFlags] = useState<string[]>([]);
   const [lastUpdated, setLastUpdated] = useState("");
   const [speed, setSpeed] = useState(readPlaybackSpeed);
   const [aiDurationSheetOpen, setAiDurationSheetOpen] = useState(false);
-  const [isSpeaking, setIsSpeaking] = useState(false);
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [voiceName, setVoiceName] = useState("");
   const [aiScript, setAiScript] = useState("");
@@ -837,20 +870,12 @@ export default function App() {
   const [aiLastDuration, setAiLastDuration] = useState<AiDuration | null>(null);
   const [aiLastNewsTitles, setAiLastNewsTitles] = useState<string[]>([]);
   const [aiLastFp, setAiLastFp] = useState<string | null>(null);
-  const [aiDuration, setAiDuration] = useState<AiDuration>(1);
+  const [aiDuration, setAiDuration] = useState<AiDuration>(FREE_DURATION);
   const [selectedScriptDuration, setSelectedScriptDuration] = useState<
     AiDuration | null
   >(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
-  const [isPaused, setIsPaused] = useState(false);
-  const [playbackProgress, setPlaybackProgress] = useState(0);
-  const [currentChunkIndex, setCurrentChunkIndex] = useState(-1);
-  const [playbackMode, setPlaybackMode] = useState<PlaybackMode>(null);
-  const [playbackCompleted, setPlaybackCompleted] = useState(false);
-  const [playbackError, setPlaybackError] = useState<string | null>(null);
-  const [remainingMs, setRemainingMs] = useState(0);
-  const [totalChunks, setTotalChunks] = useState(0);
   const [brokenVideoThumbIds, setBrokenVideoThumbIds] = useState<Record<string, true>>({});
   const [scriptFontSize, setScriptFontSize] = useState<ScriptFontSize>(readScriptFontSize);
   // v1 商業模式：免登入 + 廣告 + AI 次數限制（先固定 Free）
@@ -881,34 +906,174 @@ export default function App() {
     return q;
   });
 
+  const [dailyRadioState, setDailyRadioState] = useState<DailyRadioState>(() =>
+    readDailyRadioState()
+  );
+  const [serverSyncState, setServerSyncState] = useState<ServerSyncStatus>(() =>
+    isSupabaseConfigured() ? "idle" : "unconfigured"
+  );
+  const [supabaseUserId, setSupabaseUserId] = useState<string | null>(null);
+  const [scriptQueryDebug, setScriptQueryDebug] = useState<DailyScriptQueryDebug | null>(
+    null
+  );
+  const [userDisplayName, setUserDisplayName] = useState(() => readUserDisplayName());
+  const [activeScriptAudioUrl, setActiveScriptAudioUrl] = useState<string | null>(null);
+  const [cachedScriptAudioVoice, setCachedScriptAudioVoice] = useState<string | null>(null);
+  const [cachedScriptAudioStyle, setCachedScriptAudioStyle] = useState<string | null>(null);
+  const [scriptAudioLoading, setScriptAudioLoading] = useState(false);
+  const [scriptAudioError, setScriptAudioError] = useState<string | null>(null);
+  const [anchorId, setAnchorId] = useState(readAnchorId);
+  const [anchorStyleId, setAnchorStyleId] = useState(readAnchorStyleId);
+  const [anchorPlaybackRate, setAnchorPlaybackRate] = useState<AiAnchorPlaybackRate>(
+    readAnchorPlaybackRate
+  );
+  const [anchorVolumeGain, setAnchorVolumeGain] = useState<AiAnchorVolumeGain>(readAnchorVolumeGain);
+  const dailyGenRunningRef = useRef(false);
+  const serverScriptReadyRef = useRef(false);
+  const fetchNewsRef = useRef<() => Promise<void>>(async () => {});
   const topicSelectionKeyRef = useRef<string | null>(null);
-  const currentUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
-  const currentSpeakTextRef = useRef<string>("");
-  const speakStartedAtRef = useRef<number>(0);
-  const lastBoundaryCharIndexRef = useRef<number>(0);
-  const lastBoundaryAtRef = useRef<number>(0);
-  const progressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const lastTtsErrorAtRef = useRef(0);
-  const isManualStopRef = useRef(false);
-  const isPausedRef = useRef(false);
-  const isSpeakingRef = useRef(false);
-  const playbackFullTextRef = useRef("");
-  const playbackFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const playbackPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const newsRef = useRef<NewsItem[]>([]);
+  const selectedNewsRef = useRef<NewsItem[]>([]);
+  const fetchAiSummaryRef = useRef<
+    (
+      durationOverride?: AiDuration,
+      options?: { skipQuota?: boolean; isDailyAuto?: boolean }
+    ) => Promise<void>
+  >(async () => {});
+  const startPlaybackRef = useRef<
+    (scriptOverride?: string, options?: { withIntro?: boolean; autoplay?: boolean }) => void
+  >(() => {});
   const stopPlaybackRef = useRef<() => void>(() => {});
+  const autoplayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pushAutoplayScheduledRef = useRef(false);
+  const pushAnchorAutoplayPendingRef = useRef(false);
+  const handleOpenFromDailyNotificationRef = useRef<
+    (source: "local_reminder" | "server_completed" | DailyRadioPushOpenInfo) => void
+  >(() => {});
+  const pendingAnchorAutoplayRef = useRef(false);
+  const pendingHomeAnchorPlayRef = useRef(false);
 
-  useEffect(() => {
-    isPausedRef.current = isPaused;
-  }, [isPaused]);
+  const {
+    playbackState,
+    playbackProgress,
+    remainingMs,
+    playbackMode,
+    currentChunkIndex,
+    totalChunks,
+    play,
+    stop,
+    togglePlayPause: togglePlayback,
+    changeSpeed: changePlaybackSpeed,
+    clearAutoplay: clearPlayerAutoplay,
+  } = usePlaybackController({ speed, voiceName, voices });
 
-  useEffect(() => {
-    isSpeakingRef.current = isSpeaking;
-  }, [isSpeaking]);
+  const playbackActive = isPlaybackActiveState(playbackState);
 
   const selectedNews = news.filter((n) => n.selected);
   const favoriteNews = news.filter((n) => n.favorite);
+  const totalNewsCount = news.length;
+
+  const globalNewsBanner = useMemo(() => {
+    if (loading || totalNewsCount > 0) return null;
+    switch (newsFetchStatus) {
+      case "empty":
+        return "目前沒有抓到符合主題的新聞，可重新整理或修改主題。";
+      case "timeout":
+        return "新聞讀取失敗，請稍後再試。";
+      case "error":
+        return "新聞讀取失敗，請點重新整理。";
+      default:
+        return null;
+    }
+  }, [loading, totalNewsCount, newsFetchStatus]);
+
+  useEffect(() => {
+    newsRef.current = news;
+    selectedNewsRef.current = selectedNews;
+  }, [news, selectedNews]);
 
   const isPro = isProActive(proStatus);
+  const voiceFeatureEnabled = isPro || isInternalAccessActive();
+  const selectedAnchor = useMemo(() => getAnchorById(anchorId), [anchorId]);
+  const selectedAnchorStyle = useMemo(() => getStyleById(anchorStyleId), [anchorStyleId]);
+  const scriptAudioStaleReason = useMemo(
+    () =>
+      getScriptAudioStaleReason(
+        activeScriptAudioUrl,
+        cachedScriptAudioVoice,
+        cachedScriptAudioStyle,
+        selectedAnchor.voice,
+        anchorStyleId
+      ),
+    [
+      activeScriptAudioUrl,
+      cachedScriptAudioVoice,
+      cachedScriptAudioStyle,
+      selectedAnchor.voice,
+      anchorStyleId,
+    ]
+  );
+  const anchorAudioReady = Boolean(activeScriptAudioUrl && !scriptAudioStaleReason);
+  const syncAnchorPrefsToCloud = useCallback(() => {
+    if (!isSupabaseConfigured()) return;
+    void syncUserNewsPreferences({
+      topics: selectedTopics,
+      customKeywords: savedCustomKeywords,
+      displayName: userDisplayName,
+      dailyRadioEnabled: true,
+      morningRadioEnabled: true,
+      eveningRadioEnabled: isPro,
+      morningRadioTime: dailyRadioState.scheduledTime || MORNING_RADIO_TIME,
+      eveningRadioTime: dailyRadioState.eveningTime || EVENING_RADIO_TIME,
+      morningDurationMinutes: 3,
+      eveningDurationMinutes: 3,
+      isPro,
+      anchorId,
+      anchorVoice: getAnchorById(anchorId).voice,
+      anchorStyle: anchorStyleId,
+      playbackRate: anchorPlaybackRate,
+      voiceFeatureEnabled,
+    });
+  }, [
+    anchorId,
+    anchorPlaybackRate,
+    anchorStyleId,
+    dailyRadioState.eveningTime,
+    dailyRadioState.scheduledTime,
+    isPro,
+    savedCustomKeywords,
+    selectedTopics,
+    userDisplayName,
+    voiceFeatureEnabled,
+  ]);
+  const handleAnchorIdChange = useCallback(
+    (id: string) => {
+      setAnchorId(id);
+      writeAnchorId(id);
+      queueMicrotask(() => syncAnchorPrefsToCloud());
+    },
+    [syncAnchorPrefsToCloud]
+  );
+  const handleAnchorStyleChange = useCallback(
+    (id: string) => {
+      setAnchorStyleId(id);
+      writeAnchorStyleId(id);
+      queueMicrotask(() => syncAnchorPrefsToCloud());
+    },
+    [syncAnchorPrefsToCloud]
+  );
+  const handleAnchorPlaybackRateChange = useCallback(
+    (rate: AiAnchorPlaybackRate) => {
+      setAnchorPlaybackRate(rate);
+      writeAnchorPlaybackRate(rate);
+      queueMicrotask(() => syncAnchorPrefsToCloud());
+    },
+    [syncAnchorPrefsToCloud]
+  );
+  const handleAnchorVolumeGainChange = useCallback((gain: AiAnchorVolumeGain) => {
+    setAnchorVolumeGain(gain);
+    writeAnchorVolumeGain(gain);
+  }, []);
   const planLimits = useMemo(() => getPlanLimits(proStatus), [proStatus]);
   const aiDailyLimit = planLimits.aiDailyLimit;
   const aiQuotaRemaining = Math.max(0, aiDailyLimit - aiQuota.used);
@@ -1098,6 +1263,16 @@ export default function App() {
   ]);
 
   useEffect(() => {
+    if (!isSupabaseConfigured()) return;
+    void getSupabaseAuthUserId().then((id) => {
+      if (id) {
+        console.log("[Supabase] app launch auth user_id", id);
+        setSupabaseUserId(id);
+      }
+    });
+  }, []);
+
+  useEffect(() => {
     sanitizeNonIapProUnlocks();
     refreshProStatus();
   }, [refreshProStatus]);
@@ -1223,14 +1398,19 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const latest = readAiHistory()[0];
-    if (!latest?.script?.trim()) return;
-    setAiScript(parseAiSummaryContent(latest.script, latest.highlights).script);
-    setAiHighlights(latest.highlights ?? []);
-    setAiJsonFallback(Boolean(latest.jsonFallback));
-    setSelectedScriptDuration(latest.duration);
-    setAiDuration(latest.duration);
-    setActiveAiHistoryId(latest.id);
+    if (isSupabaseConfigured()) return;
+    const latest = findTodayDailyHistoryEntry(readAiHistory());
+    if (latest?.script?.trim()) {
+      setAiScript(parseAiSummaryContent(latest.script, latest.highlights).script);
+      setAiHighlights(latest.highlights ?? []);
+      setAiJsonFallback(Boolean(latest.jsonFallback));
+      setSelectedScriptDuration(latest.duration);
+      setAiDuration(latest.duration);
+      setActiveAiHistoryId(latest.id);
+      setDailyRadioState(
+        markDailyGenerationComplete(latest.id, latest.duration, "app")
+      );
+    }
   }, []);
 
   const persistPlaybackSpeed = useCallback((rate: number) => {
@@ -1277,22 +1457,20 @@ export default function App() {
       { extraSearch: custom || undefined }
     );
 
-    if (import.meta.env.DEV) {
-      console.log("[Topics] fetchNews activeTopics =", feedSources.map((s) => s.label));
-      console.log("updateNews apiUrl =", apiUrl(`news?q=${encodeURIComponent(feedSources[0]?.query ?? "")}`));
-    }
-
     if (feedSources.length === 0) {
       setTopicOnboardingOpen(true);
       setLoading(false);
-      setNewsBanner(null);
+      setNewsFetchStatus("idle");
       return;
     }
 
     setLoading(true);
-    setNewsBanner(null);
+    setNewsFetchStatus("loading");
+    console.log("[News] news fetch started", {
+      topics: feedSources.map((s) => s.label),
+    });
 
-    try {
+    const runFetch = async () => {
       const nowMs = Date.now();
       const responseTexts = await Promise.all(
         feedSources.map(async (source) => {
@@ -1314,17 +1492,24 @@ export default function App() {
         ),
       }));
 
+      let mergedNews: NewsItem[] = [];
       setNews((prev) => {
         const merged = mergeTopicNewsFeeds(feeds, prev);
         setTopicNewsSections(merged.sections);
+        mergedNews = merged.news;
         return merged.news;
       });
 
-      setAiScript("");
-      stopPlaybackRef.current();
-      setAiHighlights([]);
-      setAiJsonFallback(false);
-      setSelectedScriptDuration(null);
+      if (!serverScriptReadyRef.current) {
+        const todayEntry = findTodayDailyHistoryEntry(readAiHistory());
+        if (!todayEntry) {
+          setAiScript("");
+          stopPlaybackRef.current();
+          setAiHighlights([]);
+          setAiJsonFallback(false);
+          setSelectedScriptDuration(null);
+        }
+      }
       setAiError(null);
       setLastUpdated(
         new Date().toLocaleTimeString("zh-TW", {
@@ -1332,16 +1517,45 @@ export default function App() {
           minute: "2-digit",
         })
       );
+
+      if (mergedNews.length === 0) {
+        setNewsFetchStatus("empty");
+        console.log("[News] news fetch succeeded", { news_count: 0 });
+      } else {
+        setNewsFetchStatus("success");
+        console.log("[News] news fetch succeeded", { news_count: mergedNews.length });
+      }
+    };
+
+    try {
+      await Promise.race([
+        runFetch(),
+        new Promise<never>((_, reject) => {
+          window.setTimeout(
+            () => reject(new Error("news_fetch_timeout")),
+            NEWS_FETCH_TIMEOUT_MS
+          );
+        }),
+      ]);
     } catch (error) {
+      const isTimeout =
+        error instanceof Error && error.message === "news_fetch_timeout";
       setNews([]);
       setTopicNewsSections([]);
       setLastUpdated("");
-      setNewsBanner("新聞更新失敗，請確認網路連線後再試一次。");
-      console.error(error);
+      if (isTimeout) {
+        setNewsFetchStatus("timeout");
+        console.warn("[News] news fetch timeout");
+      } else {
+        setNewsFetchStatus("error");
+        console.warn("[News] news fetch failed", error);
+      }
     }
 
     setLoading(false);
   };
+
+  fetchNewsRef.current = fetchNews;
 
   const loadVideos = useCallback(
     async (force: boolean) => {
@@ -1453,7 +1667,10 @@ export default function App() {
       setTopicOnboardingOpen(true);
       return;
     }
-    void fetchNews();
+    void (async () => {
+      await refreshServerDailyScript();
+      await fetchNews();
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1632,192 +1849,103 @@ export default function App() {
     setNews((prev) => prev.map((item) => ({ ...item, favorite: false })));
   };
 
-  const clearPlaybackTimers = useCallback(() => {
-    if (playbackFallbackTimerRef.current != null) {
-      clearTimeout(playbackFallbackTimerRef.current);
-      playbackFallbackTimerRef.current = null;
+  const buildPlayRequest = useCallback(
+    (
+      scriptOverride?: string,
+      options?: { withIntro?: boolean; autoplay?: boolean }
+    ) => {
+      const scriptText = (scriptOverride ?? aiScript).trim();
+      const hasAi = scriptText.length > 0;
+      if (!hasAi && selectedNews.length === 0) return null;
+
+      let textToSpeak = hasAi
+        ? scriptText
+        : selectedNews.map((n, i) => `第 ${i + 1} 則新聞，${n.title}`).join("。");
+
+      if (hasAi && options?.withIntro !== false) {
+        const intro = buildPlaybackIntro({
+          newsCount: Math.max(selectedNews.length, aiLastNewsTitles.length, 1),
+          duration: selectedScriptDuration ?? aiDuration ?? DAILY_AUTO_DURATION,
+          topics: selectedTopics,
+        });
+        textToSpeak = prependPlaybackIntro(textToSpeak, intro);
+      }
+
+      return {
+        text: textToSpeak,
+        mode: (hasAi ? "ai" : "news") as PlaybackMode,
+        autoplay: options?.autoplay,
+      };
+    },
+    [
+      aiScript,
+      aiDuration,
+      aiLastNewsTitles.length,
+      selectedNews,
+      selectedScriptDuration,
+      selectedTopics,
+    ]
+  );
+
+  const cancelScheduledAutoplay = useCallback(() => {
+    if (autoplayTimerRef.current != null) {
+      clearTimeout(autoplayTimerRef.current);
+      autoplayTimerRef.current = null;
     }
-    if (playbackPollTimerRef.current != null) {
-      clearInterval(playbackPollTimerRef.current);
-      playbackPollTimerRef.current = null;
-    }
+    pushAutoplayScheduledRef.current = false;
+    clearAutoplayDailyFlag();
   }, []);
 
-  const clearProgressTimer = () => {
-    if (progressTimerRef.current != null) {
-      clearInterval(progressTimerRef.current);
-      progressTimerRef.current = null;
+  const schedulePushAutoplay = useCallback(() => {
+    if (autoplayTimerRef.current != null) {
+      clearTimeout(autoplayTimerRef.current);
+      autoplayTimerRef.current = null;
     }
-  };
-
-  const finishPlaybackNaturally = useCallback(() => {
-    if (isManualStopRef.current) return;
-    currentUtteranceRef.current = null;
-    clearPlaybackTimers();
-    try {
-      window.speechSynthesis.cancel();
-    } catch {
-      /* ignore */
-    }
-    currentSpeakTextRef.current = "";
-    playbackFullTextRef.current = "";
-    setIsSpeaking(false);
-    setIsPaused(false);
-    isPausedRef.current = false;
-    setCurrentChunkIndex(-1);
-    setPlaybackProgress(1);
-    setRemainingMs(0);
-    setPlaybackMode(null);
-    setTotalChunks(0);
-    setPlaybackCompleted(true);
-    setPlaybackError(null);
-  }, [clearPlaybackTimers]);
-
-  const handlePlaybackError = useCallback(
-    (message = "播放發生錯誤，請稍後再試") => {
-      if (isManualStopRef.current) return;
-      clearPlaybackTimers();
-      try {
-        window.speechSynthesis.cancel();
-      } catch {
-        /* ignore */
-      }
-      currentUtteranceRef.current = null;
-      currentSpeakTextRef.current = "";
-      playbackFullTextRef.current = "";
-      setIsSpeaking(false);
-      setIsPaused(false);
-      isPausedRef.current = false;
-      setCurrentChunkIndex(-1);
-      setPlaybackProgress(0);
-      setRemainingMs(0);
-      setPlaybackMode(null);
-      setTotalChunks(0);
-      setPlaybackCompleted(false);
-      setPlaybackError(message);
-    },
-    [clearPlaybackTimers]
-  );
-
-  const runFallbackSafetyCheck = useCallback(
-    (utterance: SpeechSynthesisUtterance, speakText: string, rate: number) => {
-      if (currentUtteranceRef.current !== utterance) return;
-      if (isManualStopRef.current) return;
-      if (isPausedRef.current) {
-        playbackFallbackTimerRef.current = window.setTimeout(() => {
-          runFallbackSafetyCheck(utterance, speakText, rate);
-        }, 30_000);
+    console.log("[Player] autoplay scheduled 800ms");
+    autoplayTimerRef.current = window.setTimeout(() => {
+      autoplayTimerRef.current = null;
+      const request = buildPlayRequest(undefined, { autoplay: true });
+      if (!request) {
+        clearPlayerAutoplay();
         return;
       }
-      if (isSpeechSynthesisActive()) {
-        playbackFallbackTimerRef.current = window.setTimeout(() => {
-          runFallbackSafetyCheck(utterance, speakText, rate);
-        }, 30_000);
+      void play(request);
+    }, 800);
+  }, [buildPlayRequest, clearPlayerAutoplay, play]);
+
+  const startPlayback = useCallback(
+    (
+      scriptOverride?: string,
+      options?: { withIntro?: boolean; autoplay?: boolean }
+    ) => {
+      anchorActions.pause();
+      const request = buildPlayRequest(scriptOverride, options);
+      if (!request) {
+        alert("請先選擇要播放的新聞，或等待今日專屬新聞稿準備完成");
         return;
       }
-      if (!isSpeakingRef.current && !isPausedRef.current) return;
-      finishPlaybackNaturally();
+      setTab("player");
+      void play(request);
     },
-    [finishPlaybackNaturally]
-  );
-
-  const startPlaybackWatchdog = useCallback(
-    (
-      utterance: SpeechSynthesisUtterance,
-      speakText: string,
-      fullText: string,
-      rate: number
-    ) => {
-      clearPlaybackTimers();
-      const totalChars = Math.max(1, fullText.length || speakText.length);
-
-      setRemainingMs(estimateChunkDurationMs(speakText, rate));
-
-      playbackPollTimerRef.current = window.setInterval(() => {
-        if (currentUtteranceRef.current !== utterance) return;
-        if (isManualStopRef.current) return;
-        if (isPausedRef.current) return;
-
-        const boundaryIdx = lastBoundaryCharIndexRef.current;
-        if (boundaryIdx > 0) {
-          const progress = Math.min(1, boundaryIdx / totalChars);
-          setPlaybackProgress(progress);
-          const remainChars = Math.max(0, totalChars - boundaryIdx);
-          setRemainingMs(
-            estimateChunkDurationMs("一".repeat(Math.max(1, remainChars)), rate)
-          );
-        }
-      }, 400);
-
-      playbackFallbackTimerRef.current = window.setTimeout(() => {
-        runFallbackSafetyCheck(utterance, speakText, rate);
-      }, estimatePlaybackSafeFallbackMs(speakText, rate));
-    },
-    [clearPlaybackTimers, runFallbackSafetyCheck]
-  );
-
-  const attachUtteranceHandlers = useCallback(
-    (
-      utterance: SpeechSynthesisUtterance,
-      speakText: string,
-      fullText: string,
-      rate: number
-    ) => {
-      utterance.onboundary = (ev) => {
-        if (currentUtteranceRef.current !== utterance) return;
-        const idx =
-          typeof (ev as unknown as { charIndex?: unknown }).charIndex === "number"
-            ? Number((ev as unknown as { charIndex: number }).charIndex)
-            : NaN;
-        if (!Number.isNaN(idx) && idx >= 0) {
-          lastBoundaryCharIndexRef.current = idx;
-          lastBoundaryAtRef.current = Date.now();
-        }
-      };
-
-      utterance.onend = () => {
-        if (currentUtteranceRef.current !== utterance) return;
-        if (isManualStopRef.current) return;
-        if (isPausedRef.current) return;
-        finishPlaybackNaturally();
-      };
-
-      utterance.onerror = () => {
-        if (currentUtteranceRef.current !== utterance) return;
-        if (isManualStopRef.current) return;
-        handlePlaybackError();
-      };
-
-      startPlaybackWatchdog(utterance, speakText, fullText, rate);
-    },
-    [finishPlaybackNaturally, handlePlaybackError, startPlaybackWatchdog]
+    [anchorActions, buildPlayRequest, play]
   );
 
   const stopPlayback = useCallback(() => {
-    isManualStopRef.current = true;
-    currentUtteranceRef.current = null;
-    currentSpeakTextRef.current = "";
-    playbackFullTextRef.current = "";
+    cancelScheduledAutoplay();
+    void stop();
+  }, [cancelScheduledAutoplay, stop]);
 
-    clearPlaybackTimers();
-    try {
-      window.speechSynthesis.cancel();
-    } catch {
-      /* ignore */
+  const togglePlayPause = useCallback(() => {
+    if (!playbackActive) {
+      anchorActions.pause();
     }
+    togglePlayback(buildPlayRequest());
+  }, [playbackActive, anchorActions, buildPlayRequest, togglePlayback]);
 
-    clearProgressTimer();
-    setIsSpeaking(false);
-    setIsPaused(false);
-    isPausedRef.current = false;
-    setCurrentChunkIndex(-1);
-    setPlaybackProgress(0);
-    setRemainingMs(0);
-    setPlaybackMode(null);
-    setTotalChunks(0);
-    setPlaybackCompleted(false);
-    setPlaybackError(null);
-  }, [clearPlaybackTimers]);
+  const changeSpeed = (newSpeed: number) => {
+    const next = persistPlaybackSpeed(newSpeed);
+    changePlaybackSpeed(next);
+  };
 
   useEffect(() => {
     stopPlaybackRef.current = stopPlayback;
@@ -1828,160 +1956,6 @@ export default function App() {
       stopPlayback();
     }
   }, [aiLoading, stopPlayback]);
-
-  const pausePlayback = useCallback(() => {
-    try {
-      window.speechSynthesis.pause();
-    } catch {
-      /* ignore */
-    }
-    isPausedRef.current = true;
-    setIsPaused(true);
-  }, []);
-
-  const resumePlayback = useCallback(() => {
-    try {
-      window.speechSynthesis.resume();
-    } catch {
-      /* ignore */
-    }
-    isPausedRef.current = false;
-    setIsPaused(false);
-  }, []);
-
-  const startPlayback = useCallback(
-    (scriptOverride?: string) => {
-      const scriptText = (scriptOverride ?? aiScript).trim();
-      const hasAi = scriptText.length > 0;
-      if (!hasAi && selectedNews.length === 0) {
-        alert("請先選擇要播放的新聞，或先產生 AI 新聞稿");
-        return;
-      }
-
-      isManualStopRef.current = false;
-
-      const mode: PlaybackMode = hasAi ? "ai" : "news";
-      const textToSpeak = hasAi
-        ? scriptText
-        : selectedNews.map((n, i) => `第 ${i + 1} 則新聞，${n.title}`).join("。");
-
-      playbackFullTextRef.current = textToSpeak;
-      setPlaybackMode(mode);
-      setTab("player");
-      setIsSpeaking(true);
-      setIsPaused(false);
-      isPausedRef.current = false;
-      setPlaybackProgress(0);
-      setRemainingMs(estimateChunkDurationMs(textToSpeak, speed));
-      setCurrentChunkIndex(0);
-      setTotalChunks(0);
-      setPlaybackCompleted(false);
-      setPlaybackError(null);
-
-      try {
-        window.speechSynthesis.cancel();
-      } catch {
-        /* ignore */
-      }
-
-      const selectedVoice = voices.find((v) => v.name === voiceName);
-      const u = new SpeechSynthesisUtterance(textToSpeak);
-      u.lang = "zh-TW";
-      u.rate = speed;
-      if (selectedVoice) u.voice = selectedVoice;
-      currentUtteranceRef.current = u;
-      currentSpeakTextRef.current = textToSpeak;
-      speakStartedAtRef.current = Date.now();
-      lastBoundaryCharIndexRef.current = 0;
-      lastBoundaryAtRef.current = Date.now();
-
-      attachUtteranceHandlers(u, textToSpeak, textToSpeak, speed);
-
-      try {
-        window.speechSynthesis.speak(u);
-      } catch {
-        handlePlaybackError();
-      }
-    },
-    [
-      aiScript,
-      attachUtteranceHandlers,
-      handlePlaybackError,
-      selectedNews,
-      speed,
-      voices,
-      voiceName,
-    ]
-  );
-
-  const togglePlayPause = useCallback(() => {
-    if (isPaused) {
-      resumePlayback();
-      return;
-    }
-    if (isSpeaking) {
-      pausePlayback();
-      return;
-    }
-    startPlayback();
-  }, [isPaused, isSpeaking, resumePlayback, pausePlayback, startPlayback]);
-
-  const changeSpeed = (newSpeed: number) => {
-    const next = persistPlaybackSpeed(newSpeed);
-    if (!isSpeaking && !isPaused) return;
-
-    const fullText = playbackFullTextRef.current || currentSpeakTextRef.current;
-    const currentText = currentSpeakTextRef.current;
-    if (!currentText.trim()) return;
-
-    const boundaryIdx = lastBoundaryCharIndexRef.current;
-    let approxIdx = boundaryIdx;
-    if (!approxIdx || approxIdx <= 0) {
-      const elapsedMs = Math.max(0, Date.now() - speakStartedAtRef.current);
-      const estCharsPerMs =
-        1 / Math.max(1, estimateChunkDurationMs("一".repeat(100), speed) / 100);
-      approxIdx = Math.floor(elapsedMs * estCharsPerMs);
-    }
-
-    const resumeAt = findResumeIndex(currentText, approxIdx);
-    const remain = currentText.slice(resumeAt).trim();
-    if (!remain) {
-      finishPlaybackNaturally();
-      return;
-    }
-
-    const selectedVoice = voices.find((v) => v.name === voiceName);
-    const u = new SpeechSynthesisUtterance(remain);
-    u.lang = "zh-TW";
-    u.rate = next;
-    if (selectedVoice) u.voice = selectedVoice;
-
-    isManualStopRef.current = true;
-    clearPlaybackTimers();
-    try {
-      window.speechSynthesis.cancel();
-    } catch {
-      /* ignore */
-    }
-    isManualStopRef.current = false;
-
-    currentUtteranceRef.current = u;
-    currentSpeakTextRef.current = remain;
-    speakStartedAtRef.current = Date.now();
-    lastBoundaryCharIndexRef.current = 0;
-    lastBoundaryAtRef.current = Date.now();
-
-    attachUtteranceHandlers(u, remain, fullText, next);
-
-    setIsPaused(false);
-    isPausedRef.current = false;
-    setIsSpeaking(true);
-    try {
-      window.speechSynthesis.speak(u);
-    } catch {
-      handlePlaybackError();
-    }
-  };
 
   const clearAiCache = () => {
     try {
@@ -2099,9 +2073,9 @@ export default function App() {
   };
 
   const runAiAnalysisWithDuration = (duration: AiDuration) => {
-    if (duration === 5 && !canUseFiveMinuteScript(proStatus)) {
+    if (isProDuration(duration) && !canUseProDuration(proStatus)) {
       setAiDurationSheetOpen(false);
-      setUpgradeModal("five_minute");
+      setUpgradeModal("pro_duration");
       return;
     }
     if (aiAnalysisMode === "deep" && !canUseDeepMode(proStatus)) {
@@ -2137,7 +2111,7 @@ export default function App() {
 2. 先列出今日最重要的 5 個重點
 3. 依重要程度動態調整每則篇幅（🔥多講、ℹ️簡短）
 4. 幫我判斷重要程度：🔥重大 / ⚠️注意 / ℹ️一般
-5. 最後給我一段適合語音朗讀的 1 分鐘新聞稿
+5. 最後給我一段適合語音朗讀的 3 分鐘新聞稿
 6. 避免誇大投資建議，只做資訊整理與風險提醒
 
 新聞列表：
@@ -2174,39 +2148,51 @@ ${newsText}
     }
   };
 
-  const fetchAiSummary = async (durationOverride?: AiDuration) => {
-    const picked = selectedNews.slice(0, 5);
-    if (picked.length === 0) {
-      alert("請先選擇新聞");
-      return;
-    }
-
+  const fetchAiSummary = async (
+    durationOverride?: AiDuration,
+    options?: { skipQuota?: boolean; isDailyAuto?: boolean; radioSlot?: RadioSlot }
+  ) => {
     const duration = durationOverride ?? aiDuration;
-
-    if (duration === 5 && !canUseFiveMinuteScript(proStatus)) {
-      setUpgradeModal("five_minute");
+    const pickLimit = duration >= 10 ? 8 : 5;
+    const picked = selectedNewsRef.current.slice(0, pickLimit);
+    if (picked.length === 0) {
+      if (!options?.isDailyAuto) alert("請先選擇新聞");
       return;
     }
-    if (aiAnalysisMode === "deep" && !canUseDeepMode(proStatus)) {
+
+
+    if (isProDuration(duration) && !canUseProDuration(proStatus)) {
+      if (!options?.isDailyAuto) setUpgradeModal("pro_duration");
+      return;
+    }
+    if (
+      aiAnalysisMode === "deep" &&
+      !canUseDeepMode(proStatus) &&
+      !options?.isDailyAuto
+    ) {
       setUpgradeModal("deep");
       return;
     }
 
-    // 每次呼叫前先檢查今日額度（用完就阻止，不呼叫 API）
-    const q = readAiDailyQuota();
-    const today = todayYmdLocal();
-    const normalized = q.date === today ? q : { date: today, used: 0 };
-    if (q.date !== normalized.date || q.used !== normalized.used) {
-      writeAiDailyQuota(normalized);
-    }
-    setAiQuota(normalized);
-    const remaining = Math.max(0, getAiDailyLimit(proStatus) - normalized.used);
-    if (remaining <= 0) {
-      setAiQuotaExhaustedMessage();
-      return;
+    if (!options?.skipQuota) {
+      const q = readAiDailyQuota();
+      const today = todayYmdLocal();
+      const normalized = q.date === today ? q : { date: today, used: 0 };
+      if (q.date !== normalized.date || q.used !== normalized.used) {
+        writeAiDailyQuota(normalized);
+      }
+      setAiQuota(normalized);
+      const remaining = Math.max(0, getAiDailyLimit(proStatus) - normalized.used);
+      if (remaining <= 0) {
+        if (!options?.isDailyAuto) setAiQuotaExhaustedMessage();
+        return;
+      }
     }
     setAiError(null);
-    const deepMode = aiAnalysisMode === "deep" && canUseDeepMode(proStatus);
+    const deepMode =
+      !options?.isDailyAuto &&
+      aiAnalysisMode === "deep" &&
+      canUseDeepMode(proStatus);
     const fp = aiSummaryCacheFingerprint(picked, duration, deepMode);
 
     try {
@@ -2236,11 +2222,9 @@ ${newsText}
           setAiScript(cached.script);
           setAiHighlights(cached.highlights);
           setAiJsonFallback(false);
-          setSelectedScriptDuration(
-            o.duration === 3 || o.duration === 5 ? o.duration : 1
-          );
+          setSelectedScriptDuration(normalizeAiDuration(o.duration));
           setAiLastSavedAt(o.savedAt);
-          setAiLastDuration(o.duration === 3 || o.duration === 5 ? o.duration : duration);
+          setAiLastDuration(normalizeAiDuration(o.duration ?? duration));
           setAiLastNewsTitles(
             Array.isArray(o.newsTitles) && o.newsTitles.every((t) => typeof t === "string")
               ? (o.newsTitles as string[])
@@ -2255,11 +2239,23 @@ ${newsText}
       /* ignore */
     }
 
-    setAiLoading(true);
-    stopPlayback();
-    setAiScript("");
-    setAiHighlights([]);
-    setAiJsonFallback(false);
+    if (!options?.isDailyAuto) {
+      setAiLoading(true);
+      stopPlayback();
+      setAiScript("");
+      setAiHighlights([]);
+      setAiJsonFallback(false);
+      setActiveScriptAudioUrl(null);
+      setCachedScriptAudioVoice(null);
+      setCachedScriptAudioStyle(null);
+      setScriptAudioError(null);
+    } else {
+      setAiLoading(true);
+      setActiveScriptAudioUrl(null);
+      setCachedScriptAudioVoice(null);
+      setCachedScriptAudioStyle(null);
+      setScriptAudioError(null);
+    }
     try {
       const res = await fetch(apiUrl("summary"), {
         method: "POST",
@@ -2275,8 +2271,10 @@ ${newsText}
       });
       const { data, error: parseError } = await readSummaryApiPayload(res);
       if (parseError || !data) {
-        setAiError(parseError || "AI 精華產生失敗");
-        await runGptFallbackClipboard();
+        const msg = parseError || "AI 精華產生失敗";
+        if (options?.isDailyAuto) setDailyRadioState(markDailyGenerationFailed(msg));
+        setAiError(msg);
+        if (!options?.isDailyAuto) await runGptFallbackClipboard();
         return;
       }
 
@@ -2287,8 +2285,9 @@ ${newsText}
             : data.code === "TIMEOUT"
               ? "AI 產生逾時，請改選較短時長或一般整理模式後再試"
               : data.error || "AI 精華產生失敗";
+        if (options?.isDailyAuto) setDailyRadioState(markDailyGenerationFailed(msg));
         setAiError(msg);
-        if (data.code !== "NO_KEY") {
+        if (!options?.isDailyAuto && data.code !== "NO_KEY") {
           await runGptFallbackClipboard();
         }
         return;
@@ -2296,18 +2295,24 @@ ${newsText}
 
       const parsed = parseAiSummaryContent(data.script, data.highlights);
       if (!parsed.script) {
-        setAiError("AI 未回傳有效內容");
-        await runGptFallbackClipboard();
+        const msg = "AI 未回傳有效內容";
+        if (options?.isDailyAuto) setDailyRadioState(markDailyGenerationFailed(msg));
+        setAiError(msg);
+        if (!options?.isDailyAuto) await runGptFallbackClipboard();
         return;
       }
 
-      setAiScript(parsed.script);
+      const closingSlot =
+        options?.radioSlot ?? (options?.isDailyAuto ? "morning" : undefined);
+      const finalScript = closingSlot
+        ? appendRadioClosing(parsed.script, closingSlot)
+        : parsed.script;
+
+      setAiScript(finalScript);
       setAiHighlights(parsed.highlights);
       setAiJsonFallback(false);
-      warnScriptQuality(parsed.script, picked);
-      setSelectedScriptDuration(
-        data.duration === 3 || data.duration === 5 ? data.duration : duration
-      );
+      warnScriptQuality(finalScript, picked);
+      setSelectedScriptDuration(normalizeAiDuration(data.duration ?? duration));
 
       const savedAt = Date.now();
       try {
@@ -2318,7 +2323,7 @@ ${newsText}
             savedAt,
             duration,
             highlights: parsed.highlights,
-            script: parsed.script,
+            script: finalScript,
             jsonFallback: false,
             newsTitles: picked.map((n) => n.title),
           })
@@ -2330,12 +2335,12 @@ ${newsText}
       const historyEntry: AiHistoryEntry = {
         id: `${savedAt}-${fp.slice(0, 48)}`,
         savedAt,
-        duration:
-          data.duration === 3 || data.duration === 5 ? data.duration : duration,
-        script: parsed.script,
+        duration: normalizeAiDuration(data.duration ?? duration),
+        script: finalScript,
         highlights: parsed.highlights,
         jsonFallback: false,
         newsTitles: picked.map((n) => n.title),
+        isDailyAuto: options?.isDailyAuto === true,
       };
       appendAiHistoryEntry(historyEntry);
       setAiLastSavedAt(savedAt);
@@ -2343,25 +2348,136 @@ ${newsText}
       setAiLastNewsTitles(historyEntry.newsTitles);
       setAiLastFp(fp);
 
-      // 僅在成功產生後才扣次數（API 失敗 / 沒選新聞 / 回傳空字串都不扣）
-      setAiQuota((prev) => {
-        const today = todayYmdLocal();
-        const base = prev.date === today ? prev : { date: today, used: 0 };
-        const next = { date: today, used: base.used + 1 };
-        writeAiDailyQuota(next);
-        return next;
-      });
+      if (options?.isDailyAuto) {
+        const serverId = await saveAppGeneratedDailyScript({
+          scriptText: finalScript,
+          title: "今日 AI 早報",
+          radioSlot: closingSlot ?? "morning",
+          sourceNews: picked.map((n) => ({
+            title: n.title,
+            source: n.source,
+            topic: n.topic,
+          })),
+        });
+        setActiveScriptAudioUrl(null);
+        setCachedScriptAudioVoice(null);
+        setCachedScriptAudioStyle(null);
+        setScriptAudioError(null);
+        setDailyRadioState(
+          markDailyGenerationComplete(
+            serverId ?? historyEntry.id,
+            historyEntry.duration,
+            "app"
+          )
+        );
+      } else {
+        setAiQuota((prev) => {
+          const today = todayYmdLocal();
+          const base = prev.date === today ? prev : { date: today, used: 0 };
+          const next = { date: today, used: base.used + 1 };
+          writeAiDailyQuota(next);
+          return next;
+        });
+      }
     } catch (e) {
+      if (options?.isDailyAuto) {
+        setDailyRadioState(
+          markDailyGenerationFailed(
+            e instanceof Error ? e.message : "今日早報生成失敗"
+          )
+        );
+      }
       setAiError(e instanceof Error ? e.message : "網路或伺服器錯誤");
-      await runGptFallbackClipboard();
+      if (!options?.isDailyAuto) await runGptFallbackClipboard();
     } finally {
       setAiLoading(false);
+      if (options?.isDailyAuto) {
+        dailyGenRunningRef.current = false;
+      }
     }
   };
 
-  const copyAiScript = async () => {
-    await copyAiScriptText(aiScript);
-  };
+  const refreshServerDailyScript = useCallback(async (options: FetchScriptOptions = {}): Promise<ServerDailyScript | null> => {
+    if (!isSupabaseConfigured()) {
+      setServerSyncState("unconfigured");
+      serverScriptReadyRef.current = false;
+      setScriptQueryDebug(null);
+      return null;
+    }
+
+    setServerSyncState("loading");
+    const result = await fetchServerDailyScript(options);
+
+    if (result.debug) {
+      setScriptQueryDebug(result.debug);
+      if (result.debug.userId) setSupabaseUserId(result.debug.userId);
+    }
+
+    if (result.kind === "unconfigured") {
+      setServerSyncState("unconfigured");
+      serverScriptReadyRef.current = false;
+      return null;
+    }
+
+    if (result.kind === "no_user") {
+      setServerSyncState("no_user");
+      serverScriptReadyRef.current = false;
+      return null;
+    }
+
+    if (result.kind === "ready") {
+      const s = result.script;
+      setAiScript(s.scriptText);
+      setAiHighlights([]);
+      setAiJsonFallback(false);
+      setSelectedScriptDuration(DAILY_AUTO_DURATION);
+      setAiDuration(DAILY_AUTO_DURATION);
+      setAiError(null);
+      setActiveScriptAudioUrl(s.audioUrl ?? null);
+      setCachedScriptAudioVoice(s.audioVoice ?? null);
+      setCachedScriptAudioStyle(s.audioStyle ?? null);
+      setScriptAudioError(null);
+      setDailyRadioState(
+        markDailyGenerationComplete(
+          s.id,
+          DAILY_AUTO_DURATION,
+          s.generationSource ?? "server",
+          s.radioSlot
+        )
+      );
+      setServerSyncState("ready");
+      serverScriptReadyRef.current = true;
+      return s;
+    }
+
+    serverScriptReadyRef.current = false;
+
+    const today = todayDailyScriptYmd();
+    const state = readDailyRadioState();
+    if (state.lastGeneratedDate === today && state.status === "ready") {
+      console.warn("[DailyRadio] clearing stale local ready state (server has no script for this user)");
+      setDailyRadioState(
+        writeDailyRadioState({
+          status: "idle",
+          generationSource: null,
+          lastGeneratedDate: null,
+          lastEntryId: null,
+        })
+      );
+      setAiScript("");
+      setAiHighlights([]);
+      setSelectedScriptDuration(null);
+    }
+
+    if (result.kind === "not_found") {
+      clearAutoplayDailyFlag();
+      clearAutoplayAnchorAudioFlag();
+      setServerSyncState("not_found");
+    } else {
+      setServerSyncState("idle");
+    }
+    return null;
+  }, []);
 
   const currentAiFavoriteId = useMemo(() => {
     if (!aiLastFp) return null;
@@ -2370,10 +2486,667 @@ ${newsText}
     return `${createdAt}-${aiLastFp.slice(0, 48)}`;
   }, [aiLastFp, aiLastSavedAt]);
 
+  useEffect(() => {
+    anchorActions.registerStopTts(() => {
+      stopPlaybackRef.current();
+    });
+    return () => anchorActions.registerStopTts(null);
+  }, [anchorActions]);
+
+  useEffect(() => {
+    anchorActions.setPlaybackRate(anchorPlaybackRate);
+  }, [anchorActions, anchorPlaybackRate]);
+
+  useEffect(() => {
+    if (!voiceFeatureEnabled) return;
+    if (anchorAudioReady && activeScriptAudioUrl) {
+      anchorActions.setAudioUrl(activeScriptAudioUrl);
+    }
+  }, [voiceFeatureEnabled, anchorAudioReady, activeScriptAudioUrl, anchorActions]);
+
   const currentAiIsFavorited = useMemo(() => {
     if (!currentAiFavoriteId) return false;
     return aiFavorites.some((f) => f.id === currentAiFavoriteId);
   }, [aiFavorites, currentAiFavoriteId]);
+
+  const handleGenerateScriptAudio = useCallback(async (override?: {
+    scriptId?: string;
+    scriptText?: string;
+  }): Promise<boolean> => {
+    const script = (override?.scriptText ?? aiScript).trim();
+    if (!script) {
+      alert("尚無 AI 主播稿可轉語音");
+      return false;
+    }
+    if (!voiceFeatureEnabled) {
+      openProUpgrade();
+      return false;
+    }
+
+    const voice = selectedAnchor.voice;
+    const style = anchorStyleId;
+    console.log("[RealVoice] handleGenerateScriptAudio start", {
+      scriptTextLength: script.length,
+      voice,
+      style,
+      anchorId,
+      isFavorited: currentAiIsFavorited,
+      isPro: voiceFeatureEnabled,
+      lastEntryId: dailyRadioState.lastEntryId,
+    });
+
+    setScriptAudioError(null);
+    setScriptAudioLoading(true);
+
+    try {
+      let scriptId =
+        override?.scriptId ??
+        (isScriptUuid(dailyRadioState.lastEntryId) ? dailyRadioState.lastEntryId : null);
+
+      if (!scriptId) {
+        console.log("[RealVoice] no UUID scriptId, saving app script first");
+        const savedId = await saveAppGeneratedDailyScript({
+          scriptText: script,
+          title:
+            dailyRadioState.lastRadioSlot === "evening"
+              ? "今日 AI 晚報"
+              : "今日 AI 早報",
+          radioSlot: dailyRadioState.lastRadioSlot ?? "morning",
+          sourceNews: selectedNews.map((n) => ({
+            title: n.title,
+            source: n.source,
+            topic: n.topic,
+          })),
+        });
+        if (savedId) {
+          scriptId = savedId;
+          setDailyRadioState(
+            markDailyGenerationComplete(
+              savedId,
+              selectedScriptDuration ?? aiDuration,
+              dailyRadioState.generationSource ?? "app",
+              dailyRadioState.lastRadioSlot ?? "morning"
+            )
+          );
+        }
+      }
+
+      if (!scriptId) {
+        const msg = "稿件尚未同步至雲端，請稍後再試";
+        console.warn("[RealVoice] missing scriptId after save attempt");
+        setScriptAudioError(msg);
+        return false;
+      }
+
+      console.log("[RealVoice] calling /api/generate-audio", {
+        scriptId,
+        voice,
+        style,
+        isFavorited: currentAiIsFavorited,
+        scriptTextLength: script.length,
+      });
+
+      const ping = await pingVercelApi();
+      if (!ping.ok) {
+        const msg = ping.error
+          ? `無法連線 Vercel API（ping 失敗）：${ping.error}`
+          : `無法連線 Vercel API（ping HTTP ${ping.status ?? "?"}）`;
+        console.warn("[RealVoice] ping failed before generate-audio", ping);
+        setScriptAudioError(msg);
+        return false;
+      }
+
+      const result = await generateScriptAudio({
+        scriptId,
+        scriptText: script,
+        voice,
+        style,
+        isPro: voiceFeatureEnabled,
+        isFavorited: currentAiIsFavorited,
+      });
+
+      console.log("[RealVoice] API finished", {
+        ok: result.ok,
+        status: result.status,
+        audioUrl: result.ok ? result.audioUrl : null,
+        error: result.ok ? null : result.error,
+        code: result.ok ? null : result.code,
+        responseBody: result.ok ? null : result.responseBody,
+      });
+
+      if (result.ok) {
+        setActiveScriptAudioUrl(result.audioUrl);
+        setCachedScriptAudioVoice(result.voice ?? voice);
+        setCachedScriptAudioStyle(result.style ?? style);
+        setScriptAudioError(null);
+        if (pendingAnchorAutoplayRef.current || pendingHomeAnchorPlayRef.current) {
+          pendingAnchorAutoplayRef.current = false;
+          pendingHomeAnchorPlayRef.current = false;
+          void anchorActions.play(result.audioUrl);
+        }
+        return true;
+      }
+
+      if (result.code === "PRO_REQUIRED") {
+        openProUpgrade();
+      }
+      setScriptAudioError(result.error);
+      return false;
+    } finally {
+      setScriptAudioLoading(false);
+    }
+  }, [
+    aiScript,
+    aiDuration,
+    anchorId,
+    anchorStyleId,
+    dailyRadioState.generationSource,
+    dailyRadioState.lastEntryId,
+    dailyRadioState.lastRadioSlot,
+    openProUpgrade,
+    selectedNews,
+    selectedScriptDuration,
+    voiceFeatureEnabled,
+    currentAiIsFavorited,
+    selectedAnchor.voice,
+    anchorActions,
+  ]);
+
+  const ensureDailyAnchorAudio = useCallback(
+    async (serverScript?: ServerDailyScript | null) => {
+      if (!voiceFeatureEnabled) return;
+      if (serverScript) {
+        if (
+          isTodayScriptAudioReady(
+            serverScript.scriptDate,
+            todayDailyScriptYmd(),
+            serverScript.audioUrl,
+            serverScript.audioExpiresAt,
+            serverScript.audioVoice,
+            serverScript.audioStyle,
+            selectedAnchor.voice,
+            anchorStyleId
+          )
+        ) {
+          return;
+        }
+      } else if (anchorAudioReady) {
+        return;
+      }
+      await handleGenerateScriptAudio();
+    },
+    [
+      voiceFeatureEnabled,
+      selectedAnchor.voice,
+      anchorStyleId,
+      anchorAudioReady,
+      handleGenerateScriptAudio,
+    ]
+  );
+
+  const maybeRunDailyRadioGeneration = useCallback(
+    async (trigger: "cron" | "manual" | "push_open") => {
+      if (dailyGenRunningRef.current) return;
+      if (topicOnboardingOpen) return;
+
+      console.log("[DailyRadio] manual generate started", { trigger });
+
+      const serverScript = await refreshServerDailyScript();
+      if (serverScript) {
+        logDailyRadioScheduler(trigger, "server script already ready");
+        console.log("[DailyRadio] manual generate succeeded", { source: "server" });
+        await ensureDailyAnchorAudio(serverScript);
+        return;
+      }
+
+      if (newsRef.current.length === 0) {
+        console.log("[DailyRadio] manual generate: refetching news");
+        await fetchNewsRef.current();
+      }
+
+      if (newsRef.current.length === 0) {
+        const msg =
+          newsFetchStatus === "empty"
+            ? "目前沒有抓到符合主題的新聞，請重新整理或修改主題。"
+            : "無法取得新聞，請先按「更新新聞」或確認網路連線。";
+        alert(msg);
+        console.warn("[DailyRadio] manual generate failed", { reason: "no_news" });
+        return;
+      }
+
+      if (selectedNewsRef.current.length === 0 && newsRef.current.length > 0) {
+        const allSelected = newsRef.current.map((n) => ({ ...n, selected: true }));
+        newsRef.current = allSelected;
+        selectedNewsRef.current = allSelected;
+        setNews(allSelected);
+      }
+
+      const existing = !isSupabaseConfigured()
+        ? findTodayDailyHistoryEntry(readAiHistory())
+        : null;
+      if (existing?.script?.trim()) {
+        setAiScript(parseAiSummaryContent(existing.script, existing.highlights).script);
+        setAiHighlights(existing.highlights ?? []);
+        setDailyRadioState(
+          markDailyGenerationComplete(existing.id, existing.duration, "app")
+        );
+        console.log("[DailyRadio] manual generate succeeded", { source: "local_history" });
+        await ensureDailyAnchorAudio();
+        return;
+      }
+
+      dailyGenRunningRef.current = true;
+      logDailyRadioScheduler(trigger, "app fallback daily briefing generation");
+      setDailyRadioState(markDailyGenerationStarted());
+      try {
+        await fetchAiSummary(DAILY_AUTO_DURATION, {
+          skipQuota: true,
+          isDailyAuto: true,
+        });
+        if (readDailyRadioState().status === "ready") {
+          console.log("[DailyRadio] manual generate succeeded", { source: "app" });
+          await ensureDailyAnchorAudio();
+        } else {
+          console.warn("[DailyRadio] manual generate failed", {
+            reason: readDailyRadioState().lastError ?? "unknown",
+          });
+        }
+      } catch (e) {
+        console.warn("[DailyRadio] manual generate failed", {
+          reason: e instanceof Error ? e.message : "unknown",
+        });
+      }
+    },
+    [
+      topicOnboardingOpen,
+      refreshServerDailyScript,
+      newsFetchStatus,
+      ensureDailyAnchorAudio,
+    ]
+  );
+
+  const handleHomePlayNow = useCallback(() => {
+    if (voiceFeatureEnabled) {
+      stopPlayback();
+      if (anchorActions.getIsPlaying()) {
+        anchorActions.pause();
+        return;
+      }
+      if (anchorAudioReady && activeScriptAudioUrl) {
+        void anchorActions.play(activeScriptAudioUrl);
+        return;
+      }
+      pendingHomeAnchorPlayRef.current = true;
+      if (!scriptAudioLoading) {
+        void handleGenerateScriptAudio();
+      }
+      return;
+    }
+    startPlayback();
+    setTab("player");
+  }, [
+    voiceFeatureEnabled,
+    anchorAudioReady,
+    activeScriptAudioUrl,
+    scriptAudioLoading,
+    handleGenerateScriptAudio,
+    stopPlayback,
+    startPlayback,
+    anchorActions,
+  ]);
+
+  const handlePushOpenAnchorPlay = useCallback(
+    async (script: ServerDailyScript, audioReadyFromPush?: boolean) => {
+      console.log("[PushOpen] audioReady", audioReadyFromPush ?? false);
+      console.log("[PushOpen] script loaded", {
+        scriptId: script.id,
+        scriptDate: script.scriptDate,
+      });
+
+      const audioUrlReady = isTodayScriptAudioReady(
+        script.scriptDate,
+        todayDailyScriptYmd(),
+        script.audioUrl,
+        script.audioExpiresAt,
+        script.audioVoice,
+        script.audioStyle,
+        selectedAnchor.voice,
+        anchorStyleId
+      );
+
+      console.log("[PushOpen] audio_url exists", audioUrlReady);
+
+      pushAutoplayScheduledRef.current = true;
+      pushAnchorAutoplayPendingRef.current = false;
+
+      if (audioUrlReady && script.audioUrl) {
+        console.log("[PushOpen] play AI MP3");
+        console.log("[PushOpen] skip speechSynthesis");
+        stopPlayback();
+        anchorActions.setAudioUrl(script.audioUrl);
+        await anchorActions.play(script.audioUrl);
+        return;
+      }
+
+      if (!voiceFeatureEnabled) {
+        console.log(
+          "[PushOpen] fallback to text speech only because user is not Pro"
+        );
+        pushAutoplayScheduledRef.current = false;
+        schedulePushAutoplay();
+        return;
+      }
+
+      console.log("[PushOpen] AI anchor audio preparing — generating MP3");
+      pendingAnchorAutoplayRef.current = true;
+      stopPlayback();
+
+      const generated = await handleGenerateScriptAudio({
+        scriptId: script.id,
+        scriptText: script.scriptText,
+      });
+
+      if (generated) {
+        return;
+      }
+
+      pendingAnchorAutoplayRef.current = false;
+      console.log(
+        "[PushOpen] fallback to text speech only because MP3 generation failed"
+      );
+      pushAutoplayScheduledRef.current = false;
+      schedulePushAutoplay();
+    },
+    [
+      selectedAnchor.voice,
+      anchorStyleId,
+      voiceFeatureEnabled,
+      stopPlayback,
+      anchorActions,
+      schedulePushAutoplay,
+      handleGenerateScriptAudio,
+    ]
+  );
+
+  const handleStartDailyBriefing = useCallback(() => {
+    void maybeRunDailyRadioGeneration("manual");
+  }, [maybeRunDailyRadioGeneration]);
+
+  const handleOpenFromDailyNotification = useCallback(
+    (source: "local_reminder" | "server_completed" | DailyRadioPushOpenInfo) => {
+      void (async () => {
+        if (typeof source === "object") {
+          const preferAnchorAudio =
+            source.openTarget === "ai_anchor_audio" || source.autoPlay === true;
+          console.log("[PushOpen] openTarget", source.openTarget ?? null);
+
+          cancelScheduledAutoplay();
+          stopPlayback();
+
+          if (preferAnchorAudio) {
+            pushAnchorAutoplayPendingRef.current = true;
+            setAutoplayAnchorAudioFlag();
+            clearAutoplayDailyFlag();
+          } else {
+            pushAnchorAutoplayPendingRef.current = false;
+            setAutoplayDailyFlag();
+          }
+
+          const ready = await refreshServerDailyScript({
+            scriptId: source.scriptId,
+            radioSlot: source.radioSlot,
+          });
+
+          if (!ready) return;
+
+          setTab("player");
+
+          if (preferAnchorAudio) {
+            await handlePushOpenAnchorPlay(ready, source.audioReady);
+          } else if (consumeAutoplayDailyFlag()) {
+            if (voiceFeatureEnabled) {
+              console.log(
+                "[PushOpen] skip speechSynthesis for Pro on fallback text push"
+              );
+            } else {
+              schedulePushAutoplay();
+            }
+          }
+          return;
+        }
+        if (source === "server_completed") {
+          setAutoplayDailyFlag();
+          console.log("[DailyRadio] opened from server push notification");
+          const ready = await refreshServerDailyScript();
+          if (ready) {
+            setTab("player");
+            if (consumeAutoplayDailyFlag()) {
+              if (voiceFeatureEnabled) {
+                console.log(
+                  "[PushOpen] skip speechSynthesis for Pro on legacy text push"
+                );
+              } else {
+                schedulePushAutoplay();
+              }
+            }
+          }
+          return;
+        }
+        console.log("[DailyRadio] opened from local reminder (not assuming server ready)");
+        void refreshServerDailyScript();
+      })();
+    },
+    [
+      cancelScheduledAutoplay,
+      stopPlayback,
+      refreshServerDailyScript,
+      handlePushOpenAnchorPlay,
+      schedulePushAutoplay,
+      voiceFeatureEnabled,
+    ]
+  );
+
+  handleOpenFromDailyNotificationRef.current = handleOpenFromDailyNotification;
+
+  const handleTriggerServerDailyRadio = useCallback(async () => {
+    const radioSlot: RadioSlot =
+      hourInTimezone(DAILY_SCRIPT_TIMEZONE) >= 17 ? "evening" : "morning";
+    const result = await triggerServerDailyRadioGeneration({ radioSlot });
+    if (!result.ok) {
+      alert(`Server 生成失敗：${result.error}`);
+      return;
+    }
+    await refreshServerDailyScript({ radioSlot });
+    alert("已觸發 server 生成，請查看播放頁");
+  }, [refreshServerDailyScript]);
+
+  const handleSimulateAiAnchorPushClick = useCallback(async () => {
+    let scriptId = scriptQueryDebug?.scriptId ?? null;
+    let radioSlot = scriptQueryDebug?.radioSlot ?? null;
+
+    const hasServerScript =
+      serverSyncState === "ready" &&
+      scriptQueryDebug?.generationSource === "server" &&
+      Boolean(scriptId);
+
+    if (!hasServerScript) {
+      const script = await refreshServerDailyScript();
+      if (!script || script.generationSource !== "server") {
+        alert("今日尚無 server script，請先觸發 server 生成");
+        return;
+      }
+      scriptId = script.id;
+      radioSlot = script.radioSlot;
+    }
+
+    const openInfo = dailyRadioPushPayloadToOpenInfo({
+      type: "daily_radio",
+      openTarget: "ai_anchor_audio",
+      autoPlay: true,
+      audioReady: true,
+      scriptId,
+      script_id: scriptId,
+      radio_slot: radioSlot ?? undefined,
+    });
+
+    if (!openInfo) {
+      alert("推播 payload 無效");
+      return;
+    }
+
+    handleOpenFromDailyNotification(openInfo);
+  }, [
+    scriptQueryDebug,
+    serverSyncState,
+    refreshServerDailyScript,
+    handleOpenFromDailyNotification,
+  ]);
+
+  useEffect(() => {
+    fetchAiSummaryRef.current = fetchAiSummary;
+    startPlaybackRef.current = startPlayback;
+  });
+
+  useEffect(() => {
+    void (async () => {
+      if (!isSupabaseConfigured()) return;
+      await initSupabaseAuth();
+      await initRemotePush((info) => {
+        handleOpenFromDailyNotificationRef.current(info);
+      });
+    })();
+  }, []);
+
+  useEffect(() => {
+    void initDailyNotificationsOnce((source) => {
+      handleOpenFromDailyNotificationRef.current(source);
+    });
+  }, []);
+
+  useEffect(() => {
+    void maybeRescheduleDailyRadioReminder(
+      dailyRadioState.scheduledTime || MORNING_RADIO_TIME
+    );
+  }, [dailyRadioState.scheduledTime]);
+
+  useEffect(() => {
+    if (topicOnboardingOpen) return;
+    if (!isSupabaseConfigured()) return;
+    void (async () => {
+      const userId = await ensureSupabaseUser();
+      if (!userId) return;
+      await refreshServerDailyScript();
+    })();
+  }, [topicOnboardingOpen, refreshServerDailyScript]);
+
+  useEffect(() => {
+    if (topicOnboardingOpen) return;
+    if (!isSupabaseConfigured()) return;
+    void (async () => {
+      const userId = await ensureSupabaseUser();
+      if (!userId) return;
+      await syncUserNewsPreferences({
+        topics: selectedTopics,
+        customKeywords: savedCustomKeywords,
+        displayName: userDisplayName,
+        dailyRadioEnabled: true,
+        morningRadioEnabled: true,
+        eveningRadioEnabled: isPro,
+        morningRadioTime: dailyRadioState.scheduledTime || MORNING_RADIO_TIME,
+        eveningRadioTime: dailyRadioState.eveningTime || EVENING_RADIO_TIME,
+        morningDurationMinutes: 3,
+        eveningDurationMinutes: 3,
+        isPro,
+        anchorId,
+        anchorVoice: selectedAnchor.voice,
+        anchorStyle: anchorStyleId,
+        playbackRate: anchorPlaybackRate,
+        voiceFeatureEnabled,
+      });
+    })();
+  }, [
+    topicOnboardingOpen,
+    selectedTopics,
+    savedCustomKeywords,
+    userDisplayName,
+    dailyRadioState.scheduledTime,
+    dailyRadioState.eveningTime,
+    isPro,
+    anchorId,
+    anchorStyleId,
+    anchorPlaybackRate,
+    selectedAnchor.voice,
+    voiceFeatureEnabled,
+  ]);
+
+  const autoAudioEnsuredRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!voiceFeatureEnabled) return;
+    if (pushAnchorAutoplayPendingRef.current) return;
+    if (pushAutoplayScheduledRef.current) return;
+    if (dailyRadioState.status !== "ready") return;
+    if (!aiScript.trim()) return;
+    if (anchorAudioReady || scriptAudioLoading) return;
+    const key = `${dailyRadioState.lastEntryId ?? "local"}-${todayDailyScriptYmd()}`;
+    if (autoAudioEnsuredRef.current === key) return;
+    autoAudioEnsuredRef.current = key;
+    void ensureDailyAnchorAudio();
+  }, [
+    voiceFeatureEnabled,
+    dailyRadioState.status,
+    dailyRadioState.lastEntryId,
+    aiScript,
+    anchorAudioReady,
+    scriptAudioLoading,
+    ensureDailyAnchorAudio,
+  ]);
+
+  useEffect(() => {
+    if (!pendingHomeAnchorPlayRef.current) return;
+    if (scriptAudioLoading) return;
+    if (!anchorAudioReady || !activeScriptAudioUrl) return;
+    pendingHomeAnchorPlayRef.current = false;
+    stopPlayback();
+    void anchorActions.play(activeScriptAudioUrl);
+  }, [anchorAudioReady, activeScriptAudioUrl, scriptAudioLoading, stopPlayback, anchorActions]);
+
+  useEffect(() => {
+    if (!aiScript.trim()) return;
+    if (dailyRadioState.status !== "ready") return;
+    if (pushAutoplayScheduledRef.current) return;
+    if (pushAnchorAutoplayPendingRef.current) return;
+
+    if (consumeAutoplayAnchorAudioFlag()) {
+      pushAutoplayScheduledRef.current = true;
+      return;
+    }
+
+    if (!consumeAutoplayDailyFlag()) return;
+
+    if (serverSyncState !== "ready") {
+      console.log("[PushOpen] skip speechSynthesis: no server script for today");
+      return;
+    }
+
+    if (voiceFeatureEnabled) {
+      console.log("[PushOpen] skip speechSynthesis for Pro on text-only daily flag");
+      return;
+    }
+
+    pushAutoplayScheduledRef.current = true;
+    setTab("player");
+    schedulePushAutoplay();
+  }, [
+    aiScript,
+    dailyRadioState.status,
+    serverSyncState,
+    voiceFeatureEnabled,
+    schedulePushAutoplay,
+  ]);
+
+  const copyAiScript = async () => {
+    await copyAiScriptText(aiScript);
+  };
 
   const toggleAiFavorite = useCallback(() => {
     const script = aiScript.trim();
@@ -2394,7 +3167,7 @@ ${newsText}
             {
               id,
               createdAt: aiLastSavedAt,
-              duration: aiLastDuration ?? (selectedScriptDuration ?? 1),
+              duration: aiLastDuration ?? (selectedScriptDuration ?? FREE_DURATION),
               highlights: aiHighlights,
               script,
               newsTitles: aiLastNewsTitles,
@@ -2443,7 +3216,7 @@ ${newsText}
     tab === "home"
       ? "首頁"
       : tab === "player"
-        ? "正在播放"
+        ? playbackPageTitle(playbackState)
         : tab === "video"
           ? ENABLE_VIDEO_NEWS_UI
             ? "影音新聞"
@@ -2452,7 +3225,7 @@ ${newsText}
             ? "收藏新聞"
             : "個人設定";
 
-  const showFloatingPlayer = (isSpeaking || isPaused) && tab !== "player";
+  const showFloatingPlayer = playbackActive && tab !== "player";
 
   return (
     <div style={styles.page}>
@@ -2487,7 +3260,7 @@ ${newsText}
                 {lastUpdated ? "已更新" : ""}
               </p>
             </div>
-            {isSpeaking ? (
+            {playbackState === "playing" ? (
               <span style={styles.homeLivePill}>播放中</span>
             ) : null}
           </header>
@@ -2515,26 +3288,47 @@ ${newsText}
               </button>
             </div>
 
-            {newsBanner ? (
+            {globalNewsBanner ? (
               <div style={styles.videoInfoBanner} role="status">
-                {newsBanner}
+                {globalNewsBanner}
               </div>
             ) : null}
 
             <HomeStationHero
+              newsCount={totalNewsCount}
               selectedCount={selectedNews.length}
+              scriptDuration={selectedScriptDuration}
+              radioStatus={dailyRadioHeroStatus({
+                hasScript: aiScript.trim().length > 0,
+                aiLoading,
+                localState: dailyRadioState,
+                serverSyncState,
+                generationSource: dailyRadioState.generationSource,
+              })}
+              generationSource={dailyRadioState.generationSource}
+              radioSlot={dailyRadioState.lastRadioSlot}
+              serverConfigured={isSupabaseConfigured()}
+              serverSyncState={serverSyncState}
+              newsFetchStatus={newsFetchStatus}
+              supabaseUserId={supabaseUserId}
+              scriptQueryDebug={scriptQueryDebug}
               aiQuotaRemaining={aiQuotaRemaining}
               aiDailyLimit={aiDailyLimit}
               isPro={isPro}
+              voiceFeatureEnabled={voiceFeatureEnabled}
+              anchorName={selectedAnchor.name}
+              anchorAudioReady={anchorAudioReady}
+              scriptAudioLoading={scriptAudioLoading}
+              scriptAudioStaleReason={scriptAudioStaleReason}
+              homeAnchorPlaying={anchorPlayer.isPlaying}
               hasScript={aiScript.trim().length > 0}
               aiLoading={aiLoading}
-              onGenerate={openAiAnalysis}
+              onPlayNow={handleHomePlayNow}
+              onStartDaily={handleStartDailyBriefing}
+              onRegenerate={openAiAnalysis}
+              onRegenerateAnchor={() => void handleGenerateScriptAudio()}
               onRefresh={updateMyNews}
               onSettingsTopics={() => setTab("settings")}
-              onContinuePlay={() => {
-                startPlayback();
-                setTab("player");
-              }}
               loadingNews={loading}
             />
 
@@ -2577,10 +3371,13 @@ ${newsText}
                 lastUpdated,
               }}
               news={news}
+              totalNewsCount={totalNewsCount}
               loading={loading}
+              newsFetchStatus={newsFetchStatus}
               toggleNews={toggleNews}
               toggleFavorite={toggleFavorite}
-              emptyText="目前沒有新聞。可先按「更新新聞」或稍後再試。"
+              onRefreshNews={updateMyNews}
+              onSettingsTopics={() => setTab("settings")}
             />
 
             <AiSummaryPanel
@@ -2593,8 +3390,8 @@ ${newsText}
               selectedScriptDuration={selectedScriptDuration}
               scriptFontSize={scriptFontSize}
               onScriptFontSizeChange={setScriptFontSize}
-              isSpeaking={isSpeaking}
-              isPaused={isPaused}
+              isSpeaking={playbackActive}
+              isPaused={playbackState === "paused"}
               onPlayScript={(script) => {
                 startPlayback(script);
                 setTab("player");
@@ -2609,6 +3406,20 @@ ${newsText}
               onOpenProModal={openProUpgrade}
               aiFavorited={currentAiIsFavorited}
               onToggleAiFavorite={toggleAiFavorite}
+              voiceFeatureEnabled={voiceFeatureEnabled}
+              anchor={selectedAnchor}
+              anchorStyle={selectedAnchorStyle}
+              anchorPlaybackRate={anchorPlaybackRate}
+              onAnchorPlaybackRateChange={handleAnchorPlaybackRateChange}
+              anchorVolumeGain={anchorVolumeGain}
+              onAnchorVolumeGainChange={handleAnchorVolumeGainChange}
+              scriptAudioUrl={activeScriptAudioUrl}
+              scriptAudioLoading={scriptAudioLoading}
+              scriptAudioError={scriptAudioError}
+              scriptAudioStaleReason={scriptAudioStaleReason}
+              onGenerateScriptAudio={() => void handleGenerateScriptAudio()}
+              anchorAudioReady={anchorAudioReady}
+              onRegenerateAnchor={() => void handleGenerateScriptAudio()}
             />
 
             <SiteFooter />
@@ -2617,29 +3428,76 @@ ${newsText}
 
         {tab === "player" && (
           <>
-            <PlayerDeck
-              isSpeaking={isSpeaking}
-              isPaused={isPaused}
-              playbackCompleted={playbackCompleted}
-              playbackError={playbackError}
-              playbackProgress={playbackProgress}
-              remainingMs={remainingMs}
-              speed={speed}
-              playbackMode={playbackMode}
-              currentChunkIndex={currentChunkIndex}
-              totalChunks={totalChunks}
-              aiScript={aiScript}
-              selectedNewsCount={selectedNews.length}
-              voiceName={voiceName}
-              voices={voices}
-              onVoiceChange={setVoiceName}
-              onSpeedChange={changeSpeed}
-              onTogglePlayPause={togglePlayPause}
-              onStop={stopPlayback}
-              onStart={startPlayback}
-              onOpenAnalysis={openAiAnalysis}
-              aiLoading={aiLoading}
-            />
+            {voiceFeatureEnabled ? (
+              aiScript.trim() ? (
+                <div style={styles.playerVoicePrimary}>
+                  <AiAnchorBroadcastPanel
+                    anchor={selectedAnchor}
+                    style={selectedAnchorStyle}
+                    playbackRate={anchorPlaybackRate}
+                    onPlaybackRateChange={handleAnchorPlaybackRateChange}
+                    volumeGain={anchorVolumeGain}
+                    onVolumeGainChange={handleAnchorVolumeGainChange}
+                    audioUrl={activeScriptAudioUrl}
+                    loading={scriptAudioLoading}
+                    error={scriptAudioError}
+                    staleReason={scriptAudioStaleReason}
+                    onGenerate={() => void handleGenerateScriptAudio()}
+                  />
+                  {scriptAudioError && !scriptAudioLoading ? (
+                    <div style={styles.anchorFallbackHint}>
+                      AI 主播暫時無法播放，可先使用文字朗讀
+                    </div>
+                  ) : null}
+                </div>
+              ) : null
+            ) : (
+              <div style={styles.playerVoicePrimary}>
+                <AiAnchorProLockCard onUpgrade={openProUpgrade} />
+              </div>
+            )}
+
+            {!voiceFeatureEnabled ? (
+              <PlayerDeck
+                playbackState={playbackState}
+                radioSlot={dailyRadioState.lastRadioSlot}
+                dailyRadioReady={dailyRadioState.status === "ready"}
+                playbackProgress={playbackProgress}
+                remainingMs={remainingMs}
+                speed={speed}
+                playbackMode={playbackMode}
+                currentChunkIndex={currentChunkIndex}
+                totalChunks={totalChunks}
+                aiScript={aiScript}
+                selectedNewsCount={selectedNews.length}
+                voiceName={voiceName}
+                voices={voices}
+                onVoiceChange={setVoiceName}
+                onSpeedChange={changeSpeed}
+                onTogglePlayPause={togglePlayPause}
+                onStop={stopPlayback}
+                onStart={startPlayback}
+                onOpenAnalysis={openAiAnalysis}
+                aiLoading={aiLoading}
+              />
+            ) : aiScript.trim() || selectedNews.length > 0 ? (
+              <BackupTextToSpeechSection
+                defaultOpen={Boolean(scriptAudioError && !scriptAudioLoading)}
+                playbackState={playbackState}
+                playbackProgress={playbackProgress}
+                remainingMs={remainingMs}
+                speed={speed}
+                aiScript={aiScript}
+                selectedNewsCount={selectedNews.length}
+                voiceName={voiceName}
+                voices={voices}
+                onVoiceChange={setVoiceName}
+                onSpeedChange={changeSpeed}
+                onTogglePlayPause={togglePlayPause}
+                onStop={stopPlayback}
+                onStart={startPlayback}
+              />
+            ) : null}
 
             <InternalPromotionBanner isPro={isPro} variant="player" />
 
@@ -2653,8 +3511,8 @@ ${newsText}
               selectedScriptDuration={selectedScriptDuration}
               scriptFontSize={scriptFontSize}
               onScriptFontSizeChange={setScriptFontSize}
-              isSpeaking={isSpeaking}
-              isPaused={isPaused}
+              isSpeaking={playbackActive}
+              isPaused={playbackState === "paused"}
               onPlayScript={(script) => startPlayback(script)}
               onStopScript={stopPlayback}
               onCopyScript={() => void copyAiScript()}
@@ -2666,6 +3524,18 @@ ${newsText}
               onOpenProModal={openProUpgrade}
               aiFavorited={currentAiIsFavorited}
               onToggleAiFavorite={toggleAiFavorite}
+              voiceFeatureEnabled={voiceFeatureEnabled}
+              anchor={selectedAnchor}
+              anchorStyle={selectedAnchorStyle}
+              anchorPlaybackRate={anchorPlaybackRate}
+              onAnchorPlaybackRateChange={handleAnchorPlaybackRateChange}
+              anchorVolumeGain={anchorVolumeGain}
+              onAnchorVolumeGainChange={handleAnchorVolumeGainChange}
+              scriptAudioUrl={activeScriptAudioUrl}
+              scriptAudioLoading={scriptAudioLoading}
+              scriptAudioError={scriptAudioError}
+              scriptAudioStaleReason={scriptAudioStaleReason}
+              onGenerateScriptAudio={() => void handleGenerateScriptAudio()}
             />
 
             <NewsList
@@ -2823,6 +3693,74 @@ ${newsText}
               speed={speed}
             />
 
+            <SettingsCollapsible
+              title="專屬 AI 電台"
+              subtitle={isPro ? "早晚固定開播" : "每天早上為你準備"}
+              defaultOpen
+            >
+              {isPro ? (
+                <div style={styles.settingHint}>
+                  每天早晚自動整理你最關心的新聞，
+                  <br />
+                  重要資訊不用自己找，打開 App 就能立即收聽。
+                </div>
+              ) : (
+                <div style={styles.settingHint}>
+                  每天早上自動整理你最關心的新聞，3 分鐘快速掌握今天的重要資訊。
+                </div>
+              )}
+              <label style={styles.settingLabel} htmlFor="pns-display-name">
+                播放開場稱呼
+              </label>
+              <input
+                id="pns-display-name"
+                value={userDisplayName}
+                onChange={(e) => setUserDisplayName(e.target.value)}
+                onBlur={() => writeUserDisplayName(userDisplayName)}
+                placeholder="例如：Wayne"
+                style={styles.settingInput}
+              />
+              {isPro ? (
+                <div style={styles.proStatusLine}>
+                  <strong>📻 專屬 AI 電台</strong>
+                  <div style={styles.settingHintMuted}>每天早晚固定開播，就像收聽自己的 Podcast。</div>
+                  <div>• 每日 {MORNING_RADIO_TIME} AI 早報</div>
+                  <div>• 每日 {EVENING_RADIO_TIME} AI 晚報</div>
+                  <div>• 推播提醒</div>
+                  <div>• 一鍵立即播放</div>
+                </div>
+              ) : (
+                <div style={styles.proStatusLine}>
+                  <strong>📻 每日早報</strong>
+                  <div style={styles.settingHintMuted}>每天早上固定開播，為你整理今日重點。</div>
+                  <div>• 每日 {MORNING_RADIO_TIME}</div>
+                  <div>• 3 分鐘快速掌握重點</div>
+                </div>
+              )}
+            </SettingsCollapsible>
+
+            <SettingsCollapsible
+              title="AI 主播設定"
+              subtitle={
+                voiceFeatureEnabled
+                  ? `${selectedAnchor.name} · ${selectedAnchorStyle.name} · ${formatAnchorPlaybackRate(anchorPlaybackRate)}`
+                  : "Pro 專屬功能"
+              }
+            >
+              {voiceFeatureEnabled ? (
+                <AiAnchorSettingsFields
+                  anchorId={anchorId}
+                  styleId={anchorStyleId}
+                  playbackRate={anchorPlaybackRate}
+                  onAnchorChange={handleAnchorIdChange}
+                  onStyleChange={handleAnchorStyleChange}
+                  onPlaybackRateChange={handleAnchorPlaybackRateChange}
+                />
+              ) : (
+                <AiAnchorProLockCard onUpgrade={openProUpgrade} />
+              )}
+            </SettingsCollapsible>
+
             <SettingsCollapsible title="Pro 方案詳情" subtitle={isPro ? "Pro 已啟用" : "升級解鎖完整功能"}>
               <ProStatusCard
                 proStatus={proStatus}
@@ -2838,9 +3776,9 @@ ${newsText}
               ) : null}
             </SettingsCollapsible>
 
-            <SettingsCollapsible title="帳號同步" subtitle="雲端同步即將開放">
+            <SettingsCollapsible title="帳號" subtitle="登入功能即將開放">
               <div style={styles.settingHint}>
-                帳號同步功能即將開放，目前資料會保存在本機。
+                登入功能即將開放，目前你的資料會安全保存在這台裝置上。
               </div>
               <button
                 type="button"
@@ -3034,7 +3972,7 @@ ${newsText}
 
         {showFloatingPlayer ? (
           <FloatingPlayerBar
-            isPaused={isPaused}
+            playbackState={playbackState}
             playbackProgress={playbackProgress}
             remainingMs={remainingMs}
             speed={speed}
@@ -3073,6 +4011,14 @@ ${newsText}
           open={hiddenDevPanelOpen}
           onClose={() => setHiddenDevPanelOpen(false)}
           onStatusChanged={handleHiddenDevStatusChanged}
+          supabaseUserId={supabaseUserId}
+          todayServerScriptId={
+            serverSyncState === "ready" && scriptQueryDebug?.generationSource === "server"
+              ? scriptQueryDebug.scriptId
+              : null
+          }
+          onTriggerServerDailyRadio={handleTriggerServerDailyRadio}
+          onSimulateAiAnchorPushClick={handleSimulateAiAnchorPushClick}
         />
 
         {splashOpen ? <SplashScreen /> : null}
@@ -3209,11 +4155,154 @@ function WaveformBars({ active }: { active: boolean }) {
   );
 }
 
+function BackupTextToSpeechSection({
+  defaultOpen,
+  playbackState,
+  playbackProgress,
+  remainingMs,
+  speed,
+  aiScript,
+  selectedNewsCount,
+  voiceName,
+  voices,
+  onVoiceChange,
+  onSpeedChange,
+  onTogglePlayPause,
+  onStop,
+  onStart,
+}: {
+  defaultOpen: boolean;
+  playbackState: PlaybackState;
+  playbackProgress: number;
+  remainingMs: number;
+  speed: number;
+  aiScript: string;
+  selectedNewsCount: number;
+  voiceName: string;
+  voices: SpeechSynthesisVoice[];
+  onVoiceChange: (name: string) => void;
+  onSpeedChange: (rate: number) => void;
+  onTogglePlayPause: () => void;
+  onStop: () => void;
+  onStart: () => void;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const active = isPlaybackActiveState(playbackState);
+  const canPlay = aiScript.trim().length > 0 || selectedNewsCount > 0;
+  const stopDisabled = !canStopPlayback(playbackState);
+  const showAltPlay = canRestartPlayback(playbackState) && canPlay;
+
+  useEffect(() => {
+    if (defaultOpen) setOpen(true);
+  }, [defaultOpen]);
+
+  const primaryLabel =
+    playbackState === "loading"
+      ? "準備中…"
+      : playbackState === "paused"
+        ? "▶ 繼續"
+        : playbackState === "playing"
+          ? "⏸ 暫停"
+          : "▶ 播放";
+
+  return (
+    <section style={styles.backupTtsSection}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        style={styles.backupTtsToggle}
+      >
+        <span>備用文字朗讀 · {speed.toFixed(2)}x</span>
+        <span>{open ? "▲" : "▼"}</span>
+      </button>
+      {open ? (
+        <div style={styles.backupTtsBody}>
+          {active ? (
+            <div style={styles.playerProgressTrackLarge}>
+              <div
+                style={{
+                  ...styles.playerProgressFill,
+                  width: `${Math.round(playbackProgress * 100)}%`,
+                }}
+              />
+            </div>
+          ) : null}
+          <div style={styles.playerControlRow}>
+            <button
+              type="button"
+              onClick={onTogglePlayPause}
+              disabled={playbackState === "loading" || (!canPlay && !active)}
+              style={{
+                ...styles.playerPlayBtn,
+                opacity:
+                  playbackState === "loading" || (!canPlay && !active) ? 0.45 : 1,
+                cursor:
+                  playbackState === "loading" || (!canPlay && !active)
+                    ? "not-allowed"
+                    : "pointer",
+              }}
+            >
+              {primaryLabel}
+            </button>
+            <button
+              type="button"
+              onClick={onStop}
+              disabled={stopDisabled}
+              style={{
+                ...styles.playerStopBtn,
+                opacity: stopDisabled ? 0.45 : 1,
+                cursor: stopDisabled ? "not-allowed" : "pointer",
+              }}
+            >
+              ■ 停止
+            </button>
+            {showAltPlay ? (
+              <button
+                type="button"
+                onClick={onStart}
+                disabled={!canPlay}
+                style={{
+                  ...styles.playerAltPlayBtn,
+                  opacity: canPlay ? 1 : 0.5,
+                }}
+              >
+                {aiScript.trim() ? "AI 稿" : "新聞"}
+              </button>
+            ) : null}
+          </div>
+          <select
+            value={voiceName}
+            onChange={(e) => onVoiceChange(e.target.value)}
+            style={styles.select}
+          >
+            {voices.map((voice) => (
+              <option key={voice.name} value={voice.name}>
+                {voice.name}（{voice.lang}）
+              </option>
+            ))}
+          </select>
+          <div style={styles.speedRow}>
+            <span>語速 {speed.toFixed(2)}x</span>
+            <input
+              type="range"
+              min={String(SPEED_MIN)}
+              max={String(SPEED_MAX)}
+              step={String(SPEED_STEP)}
+              value={speed}
+              onChange={(e) => onSpeedChange(Number(e.target.value))}
+              style={{ width: "58%" }}
+            />
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function PlayerDeck({
-  isSpeaking,
-  isPaused,
-  playbackCompleted,
-  playbackError,
+  playbackState,
+  radioSlot,
+  dailyRadioReady,
   playbackProgress,
   remainingMs,
   speed,
@@ -3232,10 +4321,9 @@ function PlayerDeck({
   onOpenAnalysis,
   aiLoading,
 }: {
-  isSpeaking: boolean;
-  isPaused: boolean;
-  playbackCompleted: boolean;
-  playbackError: string | null;
+  playbackState: PlaybackState;
+  radioSlot: RadioSlot | null;
+  dailyRadioReady: boolean;
   playbackProgress: number;
   remainingMs: number;
   speed: number;
@@ -3255,24 +4343,37 @@ function PlayerDeck({
   aiLoading: boolean;
 }) {
   const [voiceOpen, setVoiceOpen] = useState(false);
-  const active = isSpeaking || isPaused;
+  const active = isPlaybackActiveState(playbackState);
   const canPlay = aiScript.trim().length > 0 || selectedNewsCount > 0;
-  const statusLabel = playbackError
-    ? playbackError
-    : isPaused
-      ? "已暫停"
-      : isSpeaking
-        ? playbackMode === "ai"
-          ? "AI 主播稿播放中"
-          : "新聞播放中"
-        : playbackCompleted
-          ? "已播放完成"
-          : "待播放";
+  const slot = radioSlot ?? "morning";
+  const readyIdle =
+    dailyRadioReady &&
+    canPlay &&
+    (playbackState === "idle" ||
+      playbackState === "stopped" ||
+      playbackState === "completed" ||
+      playbackState === "error");
+  const statusLabel = readyIdle
+    ? radioSlotCompletedTitle(slot)
+    : playbackState === "idle"
+      ? "待播放"
+      : playbackPageTitle(playbackState);
+  const stopDisabled = !canStopPlayback(playbackState);
+  const showAltPlay = canRestartPlayback(playbackState) && canPlay;
+
+  const primaryLabel =
+    playbackState === "loading"
+      ? "準備中…"
+      : playbackState === "paused"
+        ? "▶ 繼續"
+        : playbackState === "playing"
+          ? "⏸ 暫停"
+          : "▶ 播放";
 
   return (
     <section style={styles.playerDeck}>
       <div style={styles.playerDeckTop}>
-        <WaveformBars active={isSpeaking && !isPaused} />
+        <WaveformBars active={playbackState === "playing"} />
         <div style={styles.playerDeckMeta}>
           <div style={styles.playerStatus}>{statusLabel}</div>
           <div style={styles.playerSubMeta}>
@@ -3297,23 +4398,32 @@ function PlayerDeck({
         <button
           type="button"
           onClick={onTogglePlayPause}
-          disabled={!active && !canPlay}
-          style={styles.playerPlayBtn}
+          disabled={playbackState === "loading" || (!canPlay && !active)}
+          style={{
+            ...styles.playerPlayBtn,
+            opacity:
+              playbackState === "loading" || (!canPlay && !active) ? 0.45 : 1,
+            cursor:
+              playbackState === "loading" || (!canPlay && !active)
+                ? "not-allowed"
+                : "pointer",
+          }}
         >
-          {isPaused ? "▶ 繼續" : isSpeaking ? "⏸ 暫停" : "▶ 播放"}
+          {primaryLabel}
         </button>
         <button
           type="button"
           onClick={onStop}
-          disabled={!active}
+          disabled={stopDisabled}
           style={{
             ...styles.playerStopBtn,
-            opacity: active ? 1 : 0.45,
+            opacity: stopDisabled ? 0.45 : 1,
+            cursor: stopDisabled ? "not-allowed" : "pointer",
           }}
         >
           ■ 停止
         </button>
-        {!active ? (
+        {showAltPlay ? (
           <button
             type="button"
             onClick={onStart}
@@ -3368,7 +4478,7 @@ function PlayerDeck({
 }
 
 function FloatingPlayerBar({
-  isPaused,
+  playbackState,
   playbackProgress,
   remainingMs,
   speed,
@@ -3377,7 +4487,7 @@ function FloatingPlayerBar({
   onStop,
   onOpenPlayer,
 }: {
-  isPaused: boolean;
+  playbackState: PlaybackState;
   playbackProgress: number;
   remainingMs: number;
   speed: number;
@@ -3386,13 +4496,16 @@ function FloatingPlayerBar({
   onStop: () => void;
   onOpenPlayer: () => void;
 }) {
+  const playDisabled = isPlayPrimaryDisabled(playbackState);
+  const stopDisabled = !canStopPlayback(playbackState);
+
   return (
     <div style={styles.floatingPlayer} role="region" aria-label="迷你播放器">
       <button type="button" onClick={onOpenPlayer} style={styles.floatingPlayerMain}>
-        <WaveformBars active={!isPaused} />
+        <WaveformBars active={playbackState === "playing"} />
         <div style={styles.floatingPlayerText}>
           <span style={styles.floatingPlayerTitle}>
-            {isPaused ? "已暫停" : playbackMode === "ai" ? "AI 主播稿" : "新聞播放"}
+            {playbackPageTitle(playbackState)}
           </span>
           <span style={styles.floatingPlayerSub}>
             {speed.toFixed(2)}x · {formatRemainingTime(remainingMs)}
@@ -3407,10 +4520,29 @@ function FloatingPlayerBar({
           />
         </div>
       </button>
-      <button type="button" onClick={onTogglePlayPause} style={styles.floatingIconBtn}>
-        {isPaused ? "▶" : "⏸"}
+      <button
+        type="button"
+        onClick={onTogglePlayPause}
+        disabled={playDisabled && playbackState !== "playing" && playbackState !== "paused"}
+        style={{
+          ...styles.floatingIconBtn,
+          opacity:
+            playDisabled && playbackState !== "playing" && playbackState !== "paused"
+              ? 0.45
+              : 1,
+        }}
+      >
+        {playbackState === "paused" ? "▶" : playbackState === "playing" ? "⏸" : "▶"}
       </button>
-      <button type="button" onClick={onStop} style={styles.floatingIconBtnStop}>
+      <button
+        type="button"
+        onClick={onStop}
+        disabled={stopDisabled}
+        style={{
+          ...styles.floatingIconBtnStop,
+          opacity: stopDisabled ? 0.45 : 1,
+        }}
+      >
         ■
       </button>
     </div>
@@ -3518,13 +4650,14 @@ function CollapsibleHighlightsSection({ highlights }: { highlights: AiHighlight[
 }
 
 const PRO_SELL_POINTS = [
-  "解鎖 5 分鐘深度主播稿",
-  "每日 10 次 AI 產生額度",
+  "解鎖 5 / 10 / 15 分鐘專屬 AI 電台",
+  "每日 10 次 AI 產生額度（手動重新生成）",
   "最多 10 個追蹤主題（含自訂關鍵字）",
   "AI 今日洞察",
   "無廣告閱讀體驗",
   "移除推薦 App 與廣告版位",
   "收藏與 AI 歷史保留更久",
+  "後續：自訂每日生成時間",
 ] as const;
 
 function RestorePurchasesButton({
@@ -3625,7 +4758,7 @@ function ProUpgradeCard({
       {!compact ? (
         <>
           <p style={styles.proUpgradeSubtitle}>
-            解鎖 5 分鐘深度主播稿、10 個追蹤主題、AI 今日洞察與無廣告閱讀體驗。
+            解鎖 5 / 10 / 15 分鐘專屬 AI 電台、10 個追蹤主題、AI 今日洞察與無廣告閱讀體驗。
           </p>
           <ul style={styles.proUpgradeList}>
             {PRO_SELL_POINTS.map((p) => (
@@ -3635,7 +4768,7 @@ function ProUpgradeCard({
         </>
       ) : (
         <p style={styles.proUpgradeCompactSub}>
-          解鎖 5 分鐘深度主播稿、10 個追蹤主題、AI 今日洞察與無廣告閱讀體驗
+          解鎖 5 / 10 / 15 分鐘專屬 AI 電台、10 個追蹤主題、AI 今日洞察與無廣告閱讀體驗
         </p>
       )}
       <ProPlanPicker selectedPlan={selectedPlan} onSelectPlan={setSelectedPlan} />
@@ -3760,7 +4893,7 @@ function ProStatusCard({
             <strong>推薦 App / 廣告：</strong>顯示中
           </div>
           <div style={styles.settingHint}>
-            升級 Pro，打造你的個人 AI 情報台：解鎖 5 分鐘深度主播稿、10 個追蹤主題、AI 今日洞察與無廣告閱讀體驗
+            升級 Pro，打造你的個人 AI 情報台：解鎖 5 / 10 / 15 分鐘專屬 AI 電台、10 個追蹤主題、AI 今日洞察與無廣告閱讀體驗
           </div>
         </>
       )}
@@ -3835,19 +4968,19 @@ function UpgradeModal({
             <div style={styles.proModalFocusTitle}>今日免費 AI 次數已用完</div>
             <p style={styles.proModalFocusBody}>明天會自動重置</p>
             <p style={styles.proModalFocusBody}>
-              升級 Pro 可獲得每日 10 次 AI 額度、5 分鐘深度主播稿與 AI 今日洞察
+              升級 Pro 可獲得每日 10 次 AI 額度、5 / 10 / 15 分鐘版本與 AI 今日洞察
             </p>
           </>
         );
-      case "five_minute":
+      case "pro_duration":
         return (
           <>
-            <div style={styles.proModalFocusTitle}>5 分鐘深度新聞稿為 Pro 專屬</div>
+            <div style={styles.proModalFocusTitle}>5 / 10 / 15 分鐘新聞稿為 Pro 專屬</div>
             <p style={styles.proModalFocusBody}>
-              適合通勤、開車、運動時完整收聽今日重點。
+              升級 Pro 可解鎖更完整、更深入的專屬 AI 電台體驗。
             </p>
             <p style={styles.proModalFocusBody}>
-              升級 Pro 可解鎖 5 分鐘深度主播稿、每日 10 次 AI 額度、10 個追蹤主題與 AI 今日洞察。
+              升級 Pro 可解鎖 5 / 10 / 15 分鐘版本、每日 10 次 AI 額度、10 個追蹤主題與 AI 今日洞察。
             </p>
           </>
         );
@@ -3862,7 +4995,7 @@ function UpgradeModal({
     kind === "keyword" ||
     kind === "deep" ||
     kind === "quota" ||
-    kind === "five_minute";
+    kind === "pro_duration";
 
   return (
     <div style={styles.proModalBackdrop} onClick={onClose} role="presentation">
@@ -4071,7 +5204,7 @@ function SettingsCollapsibleAiHistorySection({
               </div>
               {hiddenOlderCount > 0 ? (
                 <div style={styles.aiHistoryOlderNote}>
-                  另有 {hiddenOlderCount} 筆較早紀錄仍保存在本機，升級 Pro 後可在此查看更長時間
+                  另有 {hiddenOlderCount} 筆較早紀錄，升級 Pro 後可保留更長時間
                 </div>
               ) : null}
             </div>
@@ -4234,8 +5367,8 @@ function AuthComingSoonModal({ onClose }: { onClose: () => void }) {
         aria-modal="true"
         aria-label="帳號同步"
       >
-        <div style={styles.authModalTitle}>帳號同步功能即將開放</div>
-        <div style={styles.authModalBody}>目前所有資料會安全保存在本機</div>
+        <div style={styles.authModalTitle}>登入功能即將開放</div>
+        <div style={styles.authModalBody}>目前所有資料會安全保存在你的裝置上</div>
         <button type="button" onClick={onClose} style={styles.authModalPrimary}>
           我知道了
         </button>
@@ -4270,7 +5403,7 @@ function OnboardingModal({
     },
     {
       title: "AI 主播稿",
-      body: "一鍵產生 1／3／5 分鐘重點與主播稿。",
+      body: "打開 App 一鍵生成 3 分鐘專屬早報，也可手動選更長版本。",
       icon: "✨",
     },
     {
@@ -4358,7 +5491,7 @@ function SplashScreen() {
           🎙️
         </div>
         <div style={styles.splashTitle}>AI個人新聞台</div>
-        <div style={styles.splashSubtitle}>為你整理今日重點</div>
+        <div style={styles.splashSubtitle}>打開 App，你的專屬 AI 電台即刻準備</div>
         <div style={styles.splashLoader} aria-hidden>
           <span className="splash-dot" />
           <span className="splash-dot" />
@@ -4370,59 +5503,201 @@ function SplashScreen() {
 }
 
 function HomeStationHero({
+  newsCount,
   selectedCount,
+  scriptDuration,
+  radioStatus,
+  generationSource,
+  serverConfigured,
+  serverSyncState,
+  newsFetchStatus,
+  supabaseUserId,
+  scriptQueryDebug,
   aiQuotaRemaining,
   aiDailyLimit,
   isPro,
+  voiceFeatureEnabled,
+  anchorName,
+  anchorAudioReady,
+  scriptAudioLoading,
+  scriptAudioStaleReason,
+  homeAnchorPlaying,
   hasScript,
   aiLoading,
-  onGenerate,
+  radioSlot,
+  onPlayNow,
+  onStartDaily,
+  onRegenerate,
+  onRegenerateAnchor,
   onRefresh,
   onSettingsTopics,
-  onContinuePlay,
   loadingNews,
 }: {
+  newsCount: number;
   selectedCount: number;
+  scriptDuration: AiDuration | null;
+  radioStatus: ReturnType<typeof dailyRadioHeroStatus>;
+  generationSource: import("./dailyRadio").DailyRadioGenerationSource;
+  serverConfigured: boolean;
+  serverSyncState: import("./dailyRadio").ServerSyncStatus;
+  newsFetchStatus: import("./dailyRadio").NewsFetchStatus;
+  supabaseUserId: string | null;
+  scriptQueryDebug: import("./dailyRadioApi").DailyScriptQueryDebug | null;
   aiQuotaRemaining: number;
   aiDailyLimit: number;
   isPro: boolean;
+  voiceFeatureEnabled: boolean;
+  anchorName: string;
+  anchorAudioReady: boolean;
+  scriptAudioLoading: boolean;
+  scriptAudioStaleReason: import("./aiAnchorSettings").ScriptAudioStaleReason;
+  homeAnchorPlaying: boolean;
   hasScript: boolean;
   aiLoading: boolean;
-  onGenerate: () => void;
+  radioSlot: import("./radioSlot").RadioSlot | null;
+  onPlayNow: () => void;
+  onStartDaily: () => void;
+  onRegenerate: () => void;
+  onRegenerateAnchor: () => void;
   onRefresh: () => void;
   onSettingsTopics: () => void;
-  onContinuePlay: () => void;
   loadingNews: boolean;
 }) {
+  const ready = radioStatus === "ready" && hasScript;
+  const generating =
+    radioStatus === "generating" || aiLoading || (voiceFeatureEnabled && scriptAudioLoading);
+  const proAudioPreparing =
+    voiceFeatureEnabled && ready && !anchorAudioReady && scriptAudioLoading;
+  const { title, body, showRefresh } = dailyRadioHeroDisplay({
+    ready,
+    generating,
+    failed: radioStatus === "failed",
+    serverSyncState,
+    newsFetchStatus,
+    serverConfigured,
+    generationSource,
+    scriptDuration: scriptDuration ?? DAILY_AUTO_DURATION,
+    newsCount,
+    selectedCount,
+    radioSlot,
+    voiceFeatureEnabled,
+    anchorName,
+    anchorAudioReady,
+    anchorAudioLoading: scriptAudioLoading,
+  });
+
+  const slotLabel = radioSlot === "evening" ? "晚報" : "早報";
+  const duration = scriptDuration ?? DAILY_AUTO_DURATION;
+
+  const primaryCtaLabel = generating
+    ? voiceFeatureEnabled && hasScript && scriptAudioLoading
+      ? "AI 主播準備中…"
+      : "準備中…"
+    : ready
+      ? voiceFeatureEnabled
+        ? homeAnchorPlaying
+          ? "🎙 播放中…"
+          : anchorAudioReady
+            ? "🎙 收聽今日 AI 主播"
+            : proAudioPreparing
+              ? "AI 主播準備中…"
+              : "🎙 收聽今日 AI 主播"
+        : "▶ 立即播放"
+      : "立即生成";
+
+  const playDisabled =
+    generating ||
+    (voiceFeatureEnabled && ready && !anchorAudioReady && scriptAudioLoading);
+
+  const shortUserId = supabaseUserId
+    ? `${supabaseUserId.slice(0, 8)}…`
+    : "—";
+  const debugLine = scriptQueryDebug
+    ? `查詢 ${scriptQueryDebug.scriptDate} · ${scriptQueryDebug.rowCount} 筆 · ${scriptQueryDebug.status ?? "無"} · ${scriptQueryDebug.generationSource ?? "—"} · ${scriptQueryDebug.radioSlot ?? "—"}`
+    : serverSyncState === "loading"
+      ? "同步中…"
+      : "尚未查詢";
+
+  if (import.meta.env.DEV && serverConfigured) {
+    console.log("[Hero Debug]", {
+      userId: supabaseUserId,
+      serverSyncState,
+      debugLine,
+    });
+  }
+
   return (
     <section style={styles.stationHero}>
       <div style={styles.stationHeroGlow} aria-hidden />
-      <h2 style={styles.stationHeroTitle}>今日重點已準備好</h2>
-      <p style={styles.stationHeroBody}>
-        已選 {selectedCount} 則新聞，可產生 1 / 3 / 5 分鐘 AI 新聞稿。
-      </p>
+      <div style={styles.stationHeroKicker}>你的專屬 AI 電台</div>
+      <h2 style={styles.stationHeroTitle}>{title}</h2>
+      <p style={styles.stationHeroBody}>{body}</p>
       <div style={styles.stationHeroMeta}>
-        今日剩餘 {aiQuotaRemaining} / {aiDailyLimit} 次 · {isPro ? "Pro" : "Free"}
+        {generationSource === "server"
+          ? "伺服器已生成"
+          : generationSource === "app"
+            ? "本機已生成"
+            : serverConfigured
+              ? serverSyncState === "loading"
+                ? "同步稿件中"
+                : serverSyncState === "not_found"
+                  ? "此裝置尚無今日稿件"
+                  : serverSyncState === "no_user"
+                    ? "未登入 Supabase"
+                    : "等待伺服器或手動生成"
+              : "本機 fallback"}{" "}
+        · {slotLabel} · 手動重新生成剩餘 {aiQuotaRemaining} / {aiDailyLimit} 次 · {isPro ? "Pro" : "Free"}
       </div>
+      {import.meta.env.DEV && serverConfigured ? (
+        <div style={styles.stationHeroDebug} aria-label="Supabase 除錯資訊">
+          Debug · user {shortUserId} · sync {serverSyncState} · {debugLine}
+        </div>
+      ) : null}
       <button
         type="button"
-        onClick={onGenerate}
-        disabled={aiLoading || selectedCount === 0}
+        onClick={ready ? onPlayNow : onStartDaily}
+        disabled={playDisabled}
         style={{
           ...styles.stationHeroCta,
-          opacity: aiLoading || selectedCount === 0 ? 0.6 : 1,
-          cursor: aiLoading || selectedCount === 0 ? "not-allowed" : "pointer",
+          opacity: playDisabled ? 0.6 : 1,
+          cursor: playDisabled ? "not-allowed" : "pointer",
         }}
       >
-        {aiLoading ? "AI 分析中…" : "產生 AI 新聞稿"}
+        {primaryCtaLabel}
       </button>
-      {hasScript ? (
-        <button type="button" onClick={onContinuePlay} style={styles.stationHeroSecondaryCta}>
-          繼續播放
+      {ready && voiceFeatureEnabled && anchorAudioReady ? (
+        <div style={styles.stationHeroPlaySubtitle}>
+          {anchorName} 已準備好今天 {duration} 分鐘新聞
+        </div>
+      ) : null}
+      {ready && voiceFeatureEnabled && scriptAudioStaleReason ? (
+        <button
+          type="button"
+          onClick={onRegenerateAnchor}
+          disabled={generating || scriptAudioLoading}
+          style={styles.stationHeroSecondaryCta}
+        >
+          重新生成 AI 主播
         </button>
-      ) : (
-        <p style={styles.stationHeroHint}>產生新聞稿後即可播放</p>
-      )}
+      ) : ready ? (
+        <button
+          type="button"
+          onClick={onRegenerate}
+          disabled={generating || selectedCount === 0}
+          style={styles.stationHeroSecondaryCta}
+        >
+          {isPro ? "重新生成 / 更長版本" : "重新生成（消耗 AI 次數）"}
+        </button>
+      ) : showRefresh ? (
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={loadingNews}
+          style={styles.stationHeroSecondaryCta}
+        >
+          {loadingNews ? "重新整理中…" : "重新整理"}
+        </button>
+      ) : null}
       <div style={styles.stationHeroActions}>
         <button
           type="button"
@@ -4486,7 +5761,7 @@ function SettingsSummaryGrid({
     },
     {
       title: "AI 歷史",
-      lines: [`最近 ${historyDays} 天`, "預設收合"],
+      lines: [`最近 ${historyDays} 天`, "設定頁可展開查看"],
     },
     {
       title: "播放設定",
@@ -4632,6 +5907,20 @@ function AiSummaryPanel({
   onOpenProModal,
   aiFavorited,
   onToggleAiFavorite,
+  voiceFeatureEnabled = false,
+  anchor,
+  anchorStyle,
+  anchorPlaybackRate = 1.0,
+  onAnchorPlaybackRateChange,
+  anchorVolumeGain = 1.5,
+  onAnchorVolumeGainChange,
+  scriptAudioUrl = null,
+  scriptAudioLoading = false,
+  scriptAudioError = null,
+  scriptAudioStaleReason = null,
+  onGenerateScriptAudio,
+  anchorAudioReady = false,
+  onRegenerateAnchor,
 }: {
   variant?: "home" | "player" | "full";
   aiLoading: boolean;
@@ -4655,6 +5944,20 @@ function AiSummaryPanel({
   onOpenProModal: () => void;
   aiFavorited: boolean;
   onToggleAiFavorite: () => void;
+  voiceFeatureEnabled?: boolean;
+  anchor?: AiAnchorVoice;
+  anchorStyle?: AiAnchorStyle;
+  anchorPlaybackRate?: AiAnchorPlaybackRate;
+  onAnchorPlaybackRateChange?: (rate: AiAnchorPlaybackRate) => void;
+  anchorVolumeGain?: AiAnchorVolumeGain;
+  onAnchorVolumeGainChange?: (gain: AiAnchorVolumeGain) => void;
+  scriptAudioUrl?: string | null;
+  scriptAudioLoading?: boolean;
+  scriptAudioError?: string | null;
+  scriptAudioStaleReason?: ScriptAudioStaleReason;
+  onGenerateScriptAudio?: () => void;
+  anchorAudioReady?: boolean;
+  onRegenerateAnchor?: () => void;
 }) {
   const scriptFontPx = SCRIPT_FONT_PX[scriptFontSize];
   const playbackActive = isSpeaking || isPaused;
@@ -4721,29 +6024,49 @@ function AiSummaryPanel({
                   ) : null}
                 </div>
                 <div style={styles.aiScriptActions}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const s = aiScript.trim();
-                      if (!s) {
-                        alert("尚無 AI 主播稿可播放");
-                        return;
-                      }
-                      onPlayScript(s);
-                    }}
-                    style={styles.aiScriptPlayBtn}
-                    disabled={playbackActive}
-                  >
-                    {playbackActive ? "播放中" : "▶ 播放"}
-                  </button>
-                  {playbackActive ? (
+                  {!isPlayer && !voiceFeatureEnabled ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const s = aiScript.trim();
+                          if (!s) {
+                            alert("尚無 AI 主播稿可播放");
+                            return;
+                          }
+                          onPlayScript(s);
+                        }}
+                        style={styles.aiScriptPlayBtn}
+                        disabled={playbackActive}
+                      >
+                        {playbackActive ? "朗讀中" : "▶ 文字朗讀"}
+                      </button>
+                      {playbackActive ? (
+                        <button
+                          type="button"
+                          onClick={onStopScript}
+                          style={styles.aiScriptStopBtn}
+                        >
+                          ■ 停止
+                        </button>
+                      ) : null}
+                    </>
+                  ) : null}
+                  {isHome && voiceFeatureEnabled && scriptAudioStaleReason ? (
                     <button
                       type="button"
-                      onClick={onStopScript}
-                      style={styles.aiScriptStopBtn}
+                      onClick={() => onRegenerateAnchor?.()}
+                      disabled={scriptAudioLoading}
+                      style={styles.aiScriptPlayBtn}
                     >
-                      ■ 停止
+                      {scriptAudioLoading ? "準備中…" : "重新生成 AI 主播"}
                     </button>
+                  ) : null}
+                  {isHome && voiceFeatureEnabled && anchorAudioReady ? (
+                    <span style={styles.aiAnchorReadyHint}>🎙 AI 主播音訊已就緒</span>
+                  ) : null}
+                  {isHome && voiceFeatureEnabled && scriptAudioLoading && !anchorAudioReady ? (
+                    <span style={styles.aiAnchorReadyHint}>AI 主播準備中…</span>
                   ) : null}
                   <button
                     type="button"
@@ -4769,7 +6092,7 @@ function AiSummaryPanel({
           </>
         ) : isHome ? null : (
           <div style={styles.aiHintMuted}>
-            勾選新聞後點「產生 AI 新聞稿」，選擇 1／3／5 分鐘。
+            勾選新聞後可手動重新生成，選擇 3／5／10／15 分鐘。
           </div>
         )}
 
@@ -4843,9 +6166,9 @@ function AiDurationSheet({
         aria-label="選擇 AI 分析長度"
       >
         <div style={styles.aiSheetHandle} />
-        <div style={styles.aiSheetTitle}>選擇分析長度</div>
+        <div style={styles.aiSheetTitle}>選擇新聞稿長度</div>
         <p style={styles.aiSheetDesc}>
-          將為已勾選的新聞產生重點摘要與 AI 主播稿
+          打開 App 生成 3 分鐘早報；手動重新生成可選更長版本（消耗 AI 次數）
         </p>
         <div style={styles.aiSheetModeRow}>
           <button
@@ -4879,8 +6202,9 @@ function AiDurationSheet({
           </button>
         </div>
         <div style={styles.aiSheetOptions}>
-          {([1, 3, 5] as const).map((d) => {
-            const locked = !isPro && d === 5;
+          {AI_DURATIONS.map((d) => {
+            const locked = isProDuration(d) && !isPro;
+            const badge = d === 5 ? "推薦" : d >= 10 ? "Pro" : null;
             return (
               <button
                 key={d}
@@ -4890,7 +6214,7 @@ function AiDurationSheet({
                 onClick={() => {
                   if (locked) {
                     onClose();
-                    onOpenProModal("five_minute");
+                    onOpenProModal("pro_duration");
                     return;
                   }
                   onSelect(d);
@@ -4902,15 +6226,11 @@ function AiDurationSheet({
               >
                 <span style={styles.aiSheetOptionMain}>
                   {d} 分鐘{" "}
-                  {locked ? <span style={styles.proLockTag}>Pro 專屬</span> : null}
+                  {badge ? (
+                    <span style={styles.proLockTag}>{locked ? "Pro 專屬" : badge}</span>
+                  ) : null}
                 </span>
-                <span style={styles.aiSheetOptionSub}>
-                  {d === 1
-                    ? "快報"
-                    : d === 3
-                      ? "平衡"
-                      : "深度 · 通勤完整收聽"}
-                </span>
+                <span style={styles.aiSheetOptionSub}>{durationOptionSubtitle(d)}</span>
               </button>
             );
           })}
@@ -5096,7 +6416,9 @@ function SiteFooter() {
 function NewsList({
   title,
   news,
+  totalNewsCount,
   loading,
+  newsFetchStatus,
   toggleNews,
   toggleFavorite,
   emptyText = "沒有新聞",
@@ -5107,10 +6429,14 @@ function NewsList({
   homeToolbar,
   playingIndex = -1,
   emptyHint,
+  onRefreshNews,
+  onSettingsTopics,
 }: {
   title: string;
   news: NewsItem[];
+  totalNewsCount?: number;
   loading: boolean;
+  newsFetchStatus?: import("./dailyRadio").NewsFetchStatus;
   toggleNews: (id: string) => void;
   toggleFavorite: (item: NewsItem) => void;
   emptyText?: string;
@@ -5125,7 +6451,18 @@ function NewsList({
   };
   playingIndex?: number;
   emptyHint?: string;
+  onRefreshNews?: () => void;
+  onSettingsTopics?: () => void;
 }) {
+  const resolvedTotalNewsCount = totalNewsCount ?? news.length;
+  const globalEmptyText =
+    newsFetchStatus === "empty"
+      ? "目前沒有抓到符合主題的新聞"
+      : newsFetchStatus === "timeout"
+        ? "新聞讀取失敗，請稍後再試"
+        : newsFetchStatus === "error"
+          ? "新聞讀取失敗，請點重新整理"
+          : emptyText;
   const selectedCount = news.filter((n) => n.selected).length;
   const allSelected = news.length > 0 && selectedCount === news.length;
   const newsById = useMemo(() => new Map(news.map((n) => [n.id, n])), [news]);
@@ -5258,17 +6595,38 @@ function NewsList({
       ) : null}
 
       {loading && (
-        <div style={homeToolbar ? styles.loadingSlim : styles.loading}>新聞讀取中...</div>
-      )}
-
-      {!loading && news.length === 0 && (
-        <div style={styles.emptyStateBox}>
-          <div>{emptyText}</div>
-          {emptyHint ? <div style={styles.emptyStateHint}>{emptyHint}</div> : null}
+        <div style={homeToolbar ? styles.loadingSlim : styles.loading}>
+          {newsFetchStatus === "loading" ? "正在讀取新聞…" : "新聞讀取中…"}
         </div>
       )}
 
-      {!loading && groupedMode ? (
+      {!loading && resolvedTotalNewsCount === 0 && (
+        <div style={styles.emptyStateBox}>
+          <div>{globalEmptyText}</div>
+          {emptyHint ? <div style={styles.emptyStateHint}>{emptyHint}</div> : null}
+          {newsFetchStatus === "empty" ||
+          newsFetchStatus === "error" ||
+          newsFetchStatus === "timeout" ? (
+            <div style={styles.emptyStateActions}>
+              {onRefreshNews ? (
+                <button type="button" onClick={onRefreshNews} style={styles.emptyStateBtn}>
+                  重新整理
+                </button>
+              ) : null}
+              {onSettingsTopics ? (
+                <button type="button" onClick={onSettingsTopics} style={styles.emptyStateBtn}>
+                  修改主題
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          {newsFetchStatus === "empty" ? (
+            <div style={styles.emptyStateHint}>也可在上方搜尋框手動輸入關鍵字後按「更新」</div>
+          ) : null}
+        </div>
+      )}
+
+      {!loading && resolvedTotalNewsCount > 0 && groupedMode ? (
         <div style={homeToolbar ? styles.topicNewsGroupsHome : styles.topicNewsGroups}>
           {topicSections!.map((section) => {
             const sectionItems = section.itemIds
@@ -5292,9 +6650,7 @@ function NewsList({
                   <span style={styles.topicNewsGroupCount}>{sectionItems.length} 則</span>
                 </div>
                 {sectionItems.length === 0 ? (
-                  <div style={styles.topicNewsGroupEmpty}>
-                    目前沒有找到與此主題相關的新新聞
-                  </div>
+                  <div style={styles.topicNewsGroupEmpty}>此分類目前沒有新聞</div>
                 ) : (
                   <div style={denseCards ? styles.newsListDense : styles.newsList}>
                     {sectionItems.map((item) => {
@@ -5307,11 +6663,11 @@ function NewsList({
             );
           })}
         </div>
-      ) : (
+      ) : !loading && resolvedTotalNewsCount > 0 ? (
         <div style={denseCards ? styles.newsListDense : styles.newsList}>
           {news.map((item, index) => renderNewsCard(item, index))}
         </div>
-      )}
+      ) : null}
     </>
   );
 }
@@ -5394,6 +6750,14 @@ const styles: Record<string, CSSProperties> = {
     background: "radial-gradient(circle, rgba(99,102,241,.2) 0%, transparent 70%)",
     pointerEvents: "none",
   },
+  stationHeroKicker: {
+    fontSize: "12px",
+    fontWeight: 800,
+    letterSpacing: "0.06em",
+    textTransform: "uppercase" as const,
+    color: "#818CF8",
+    marginBottom: "6px",
+  },
   stationHeroTitle: {
     margin: 0,
     fontSize: "18px",
@@ -5413,6 +6777,18 @@ const styles: Record<string, CSSProperties> = {
     fontWeight: 700,
     color: TOKENS.textMuted,
   },
+  stationHeroDebug: {
+    marginTop: "8px",
+    padding: "8px 10px",
+    borderRadius: "8px",
+    background: "rgba(15,23,42,.55)",
+    border: `1px dashed ${TOKENS.cardBorder}`,
+    fontSize: "11px",
+    fontWeight: 600,
+    color: "#94A3B8",
+    lineHeight: 1.45,
+    wordBreak: "break-all" as const,
+  },
   stationHeroCta: {
     display: "block",
     width: "100%",
@@ -5426,6 +6802,14 @@ const styles: Record<string, CSSProperties> = {
     fontWeight: 900,
     cursor: "pointer",
     boxShadow: "0 8px 24px rgba(16,185,129,.28)",
+  },
+  stationHeroPlaySubtitle: {
+    marginTop: "8px",
+    fontSize: "13px",
+    fontWeight: 700,
+    color: "#99F6E4",
+    textAlign: "center",
+    lineHeight: 1.45,
   },
   stationHeroSecondaryCta: {
     display: "block",
@@ -5569,6 +6953,23 @@ const styles: Record<string, CSSProperties> = {
     fontSize: "12px",
     color: TOKENS.textMuted,
     fontWeight: 600,
+  },
+  emptyStateActions: {
+    display: "flex",
+    flexWrap: "wrap" as const,
+    justifyContent: "center",
+    gap: "8px",
+    marginTop: "12px",
+  },
+  emptyStateBtn: {
+    padding: "8px 14px",
+    borderRadius: "10px",
+    border: `1px solid ${TOKENS.cardBorder}`,
+    background: "rgba(99,102,241,.18)",
+    color: "#E0E7FF",
+    fontSize: "13px",
+    fontWeight: 700,
+    cursor: "pointer",
   },
   homeNewsSelected: {
     fontSize: "12px",
@@ -6227,6 +7628,13 @@ const styles: Record<string, CSSProperties> = {
     fontSize: "13px",
     lineHeight: 1.5,
   },
+  settingHintMuted: {
+    color: "#94A3B8",
+    fontSize: "12px",
+    lineHeight: 1.45,
+    marginTop: "4px",
+    marginBottom: "8px",
+  },
   planQuotaRow: {
     display: "flex",
     gap: "12px",
@@ -6452,6 +7860,13 @@ const styles: Record<string, CSSProperties> = {
     cursor: "pointer",
     color: "#0F172A",
     background: "linear-gradient(135deg, #60A5FA, #A78BFA)",
+  },
+  settingLabel: {
+    display: "block",
+    marginTop: "12px",
+    fontSize: "13px",
+    fontWeight: 700,
+    color: "#CBD5E1",
   },
   settingInput: {
     width: "100%",
@@ -6874,6 +8289,12 @@ const styles: Record<string, CSSProperties> = {
     fontSize: "12px",
     cursor: "pointer",
   },
+  aiAnchorReadyHint: {
+    fontSize: "12px",
+    fontWeight: 700,
+    color: "#5EEAD4",
+    padding: "9px 4px",
+  },
   aiScriptCopyBtn: {
     background: "rgba(255,255,255,.1)",
     color: "#E2E8F0",
@@ -6893,6 +8314,50 @@ const styles: Record<string, CSSProperties> = {
     fontWeight: 800,
     fontSize: "12px",
     cursor: "pointer",
+  },
+  scriptAudioSection: {
+    marginBottom: "12px",
+    padding: "12px",
+    borderRadius: "14px",
+    background: "rgba(255,255,255,.04)",
+    border: "1px solid rgba(255,255,255,.08)",
+  },
+  scriptAudioTitle: {
+    fontSize: "13px",
+    fontWeight: 800,
+    color: "#E2E8F0",
+    marginBottom: "4px",
+  },
+  scriptAudioHint: {
+    fontSize: "11px",
+    color: "#94A3B8",
+    lineHeight: 1.4,
+    marginBottom: "8px",
+  },
+  scriptAudioBtn: {
+    background: "linear-gradient(135deg, #0D9488, #0891B2)",
+    color: "white",
+    border: "none",
+    borderRadius: "12px",
+    padding: "9px 14px",
+    fontWeight: 800,
+    fontSize: "12px",
+    cursor: "pointer",
+  },
+  scriptAudioLoading: {
+    fontSize: "13px",
+    color: "#94A3B8",
+    lineHeight: 1.5,
+  },
+  scriptAudioError: {
+    marginTop: "8px",
+    fontSize: "12px",
+    color: "#FCA5A5",
+    lineHeight: 1.45,
+  },
+  scriptAudioPlayer: {
+    width: "100%",
+    marginTop: "4px",
   },
   aiHintMuted: {
     fontSize: "12px",
@@ -7190,6 +8655,48 @@ const styles: Record<string, CSSProperties> = {
     background: "linear-gradient(165deg, rgba(30,41,59,.95) 0%, rgba(15,23,42,.92) 100%)",
     border: "1px solid rgba(255,255,255,.1)",
     boxShadow: "0 12px 40px rgba(0,0,0,.35)",
+  },
+  playerVoicePrimary: {
+    marginTop: "4px",
+    marginBottom: "12px",
+  },
+  anchorFallbackHint: {
+    marginTop: "8px",
+    padding: "10px 12px",
+    borderRadius: "12px",
+    background: "rgba(251,191,36,.1)",
+    border: "1px solid rgba(251,191,36,.25)",
+    fontSize: "13px",
+    fontWeight: 700,
+    color: "#FCD34D",
+    lineHeight: 1.45,
+  },
+  backupTtsSection: {
+    marginBottom: "12px",
+    padding: "12px 14px",
+    borderRadius: "16px",
+    background: "rgba(30,41,59,.55)",
+    border: "1px solid rgba(255,255,255,.08)",
+  },
+  backupTtsToggle: {
+    width: "100%",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "8px",
+    background: "transparent",
+    border: "none",
+    color: "#CBD5E1",
+    fontSize: "13px",
+    fontWeight: 800,
+    cursor: "pointer",
+    padding: "2px 0",
+  },
+  backupTtsBody: {
+    marginTop: "12px",
+    display: "flex",
+    flexDirection: "column",
+    gap: "10px",
   },
   playerDeckTop: {
     display: "flex",

@@ -17,8 +17,8 @@ const FONT =
 
 const SCENES = [
   { id: 1, caption: "追蹤主題，瀏覽今日新聞" },
-  { id: 2, caption: "勾選新聞，一鍵產生主播稿" },
-  { id: 3, caption: "AI 主播稿產生結果" },
+  { id: 2, caption: "打開 App，一鍵生成今日早報" },
+  { id: 3, caption: "3 / 5 / 10 / 15 分鐘 AI 電台" },
   { id: 4, caption: "播放朗讀，調整語速" },
   { id: 5, caption: "今日洞察、收藏與歷史" },
 ] as const;
@@ -281,10 +281,10 @@ function SceneSelectNews({ device }: { device: "iphone" | "ipad" }) {
             fontWeight: 900,
           }}
         >
-          ✨ 產生 AI 主播稿
+          開始生成今日早報
         </div>
         <div style={{ textAlign: "center", marginTop: 10, fontSize: Math.round(22 * s), color: TOKENS.textMuted }}>
-          今日剩餘 2 / 2 次
+          打開 App 生成 3 分鐘 · 手動重新生成 2 / 2 次
         </div>
       </div>
       <BottomNav device={device} active="home" />
@@ -300,7 +300,7 @@ function SceneAiScript({ device }: { device: "iphone" | "ipad" }) {
       <div style={{ padding: `${Math.round(16 * s)}px ${Math.round(24 * s)}px` }}>
         <div style={{ fontSize: Math.round(36 * s), fontWeight: 900 }}>AI 主播稿</div>
         <div style={{ display: "flex", gap: Math.round(10 * s), marginTop: Math.round(14 * s) }}>
-          {(["1 分鐘", "3 分鐘", "5 分鐘 Pro"] as const).map((label, i) => (
+          {(["3 分鐘", "5 分鐘", "10/15 Pro"] as const).map((label, i) => (
             <span
               key={label}
               style={{

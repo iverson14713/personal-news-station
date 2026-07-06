@@ -82,7 +82,7 @@ export function TopicOnboardingScreen({
       <div style={obStyles.panel}>
         <div style={obStyles.brand}>AI個人新聞台</div>
         <h1 style={obStyles.title}>先選你想追蹤的主題</h1>
-        <p style={obStyles.subtitle}>AI 會幫你整理成 1 / 3 分鐘個人新聞稿</p>
+        <p style={obStyles.subtitle}>AI 會在你打開 App 後，整理成 3 分鐘專屬 AI 電台</p>
 
         <div style={obStyles.counter}>
           已選 {draft.length} / {requiredCount}

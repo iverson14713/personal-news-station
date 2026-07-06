@@ -13,12 +13,26 @@ type HiddenDevPanelProps = {
   open: boolean;
   onClose: () => void;
   onStatusChanged: () => void;
+  supabaseUserId?: string | null;
+  todayServerScriptId?: string | null;
+  onTriggerServerDailyRadio?: () => Promise<void>;
+  onSimulateAiAnchorPushClick?: () => Promise<void>;
 };
 
-export function HiddenDevPanel({ open, onClose, onStatusChanged }: HiddenDevPanelProps) {
+export function HiddenDevPanel({
+  open,
+  onClose,
+  onStatusChanged,
+  supabaseUserId,
+  todayServerScriptId,
+  onTriggerServerDailyRadio,
+  onSimulateAiAnchorPushClick,
+}: HiddenDevPanelProps) {
   const [code, setCode] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [triggerBusy, setTriggerBusy] = useState(false);
+  const [simulatePushBusy, setSimulatePushBusy] = useState(false);
 
   if (!open) return null;
 
@@ -45,6 +59,30 @@ export function HiddenDevPanel({ open, onClose, onStatusChanged }: HiddenDevPane
     clearInternalAccess();
     setMessage("已關閉本機 Pro");
     onStatusChanged();
+  };
+
+  const handleTriggerServer = () => {
+    if (!onTriggerServerDailyRadio) return;
+    setTriggerBusy(true);
+    void onTriggerServerDailyRadio()
+      .catch((e) => {
+        setMessage(e instanceof Error ? e.message : "觸發失敗");
+      })
+      .finally(() => {
+        setTriggerBusy(false);
+      });
+  };
+
+  const handleSimulatePush = () => {
+    if (!onSimulateAiAnchorPushClick) return;
+    setSimulatePushBusy(true);
+    void onSimulateAiAnchorPushClick()
+      .catch((e) => {
+        setMessage(e instanceof Error ? e.message : "模擬失敗");
+      })
+      .finally(() => {
+        setSimulatePushBusy(false);
+      });
   };
 
   return (
@@ -93,6 +131,39 @@ export function HiddenDevPanel({ open, onClose, onStatusChanged }: HiddenDevPane
         />
 
         {message ? <p style={styles.message}>{message}</p> : null}
+
+        {onTriggerServerDailyRadio || onSimulateAiAnchorPushClick ? (
+          <div style={styles.devActionBox}>
+            <div style={styles.statusHint}>
+              user_id: {supabaseUserId ? `${supabaseUserId.slice(0, 8)}…` : "未登入"}
+            </div>
+            {todayServerScriptId ? (
+              <div style={styles.statusHint}>
+                server script: {todayServerScriptId.slice(0, 8)}…
+              </div>
+            ) : null}
+            {onTriggerServerDailyRadio ? (
+              <button
+                type="button"
+                disabled={triggerBusy || !supabaseUserId}
+                onClick={handleTriggerServer}
+                style={styles.secondary}
+              >
+                {triggerBusy ? "生成中…" : "立即生成今日 Server 稿 + MP3"}
+              </button>
+            ) : null}
+            {onSimulateAiAnchorPushClick ? (
+              <button
+                type="button"
+                disabled={simulatePushBusy || !supabaseUserId}
+                onClick={handleSimulatePush}
+                style={styles.secondary}
+              >
+                {simulatePushBusy ? "模擬中…" : "模擬點擊 AI 主播推播"}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
 
         <div style={styles.actions}>
           <button type="button" disabled={busy || !code.trim()} onClick={handleSubmit} style={styles.primary}>
@@ -183,6 +254,12 @@ const styles: Record<string, CSSProperties> = {
     fontSize: 13,
     color: "#A5B4FC",
     margin: "0 0 12px",
+  },
+  devActionBox: {
+    marginBottom: 14,
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
   },
   actions: {
     display: "flex",

@@ -46,4 +46,29 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         return ApplicationDelegateProxy.shared.application(application, continue: userActivity, restorationHandler: restorationHandler)
     }
 
+    func application(
+        _ application: UIApplication,
+        didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
+    ) {
+        let tokenPrefix = deviceToken.prefix(8).map { String(format: "%02X", $0) }.joined()
+        print("[Push][Native] didRegisterForRemoteNotificationsWithDeviceToken bytes=\(deviceToken.count) prefix=\(tokenPrefix)")
+        NotificationCenter.default.post(
+            name: .capacitorDidRegisterForRemoteNotifications,
+            object: deviceToken
+        )
+        print("[Push][Native] posted capacitorDidRegisterForRemoteNotifications")
+    }
+
+    func application(
+        _ application: UIApplication,
+        didFailToRegisterForRemoteNotificationsWithError error: Error
+    ) {
+        print("[Push][Native] didFailToRegisterForRemoteNotificationsWithError: \(error.localizedDescription)")
+        NotificationCenter.default.post(
+            name: .capacitorDidFailToRegisterForRemoteNotifications,
+            object: error
+        )
+        print("[Push][Native] posted capacitorDidFailToRegisterForRemoteNotifications")
+    }
+
 }
