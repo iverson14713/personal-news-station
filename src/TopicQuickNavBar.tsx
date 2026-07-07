@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import type { CSSProperties } from "react";
 import { TOKENS } from "./theme";
 
-const STICKY_TOP_EXTRA_PX = 4;
+const STICKY_TOP_EXTRA_PX = 8;
 const PHONE_MAX_WIDTH = 460;
 const BOTTOM_NAV_CLEARANCE_PX = 72;
 
@@ -39,9 +39,15 @@ export type TopicNavItem = {
 
 type TopicQuickNavBarProps = {
   items: TopicNavItem[];
+  /** 首頁主垂直捲動容器（.page）；未傳則 fallback window */
+  scrollRootRef?: RefObject<HTMLElement | null>;
 };
 
-export function TopicQuickNavBar({ items }: TopicQuickNavBarProps) {
+function getScrollElement(scrollRootRef?: RefObject<HTMLElement | null>): HTMLElement | Window {
+  return scrollRootRef?.current ?? window;
+}
+
+export function TopicQuickNavBar({ items, scrollRootRef }: TopicQuickNavBarProps) {
   const [activeLabel, setActiveLabel] = useState(items[0]?.label ?? "");
   const [barHeight, setBarHeight] = useState(52);
   const [stickyTopPx, setStickyTopPx] = useState(STICKY_TOP_EXTRA_PX);
@@ -96,6 +102,7 @@ export function TopicQuickNavBar({ items }: TopicQuickNavBarProps) {
     ratiosRef.current = new Map(items.map((item) => [item.label, 0]));
 
     const scrollMargin = stickyTopPx + barHeight + 8;
+    const scrollRoot = scrollRootRef?.current ?? null;
 
     const pickActiveFromRatios = () => {
       if (clickLockRef.current) return;
@@ -125,7 +132,7 @@ export function TopicQuickNavBar({ items }: TopicQuickNavBarProps) {
         pickActiveFromRatios();
       },
       {
-        root: null,
+        root: scrollRoot,
         rootMargin: `-${scrollMargin}px 0px -52% 0px`,
         threshold: [0, 0.05, 0.1, 0.25, 0.5, 0.75, 1],
       }
@@ -133,7 +140,7 @@ export function TopicQuickNavBar({ items }: TopicQuickNavBarProps) {
 
     sectionEls.forEach((el) => observer.observe(el));
     return () => observer.disconnect();
-  }, [items, stickyTopPx, barHeight]);
+  }, [items, stickyTopPx, barHeight, scrollRootRef]);
 
   useEffect(() => {
     const chip = chipRefs.current.get(activeLabel);
@@ -164,20 +171,34 @@ export function TopicQuickNavBar({ items }: TopicQuickNavBarProps) {
         const topPx = measureSafeAreaTopPx();
         const h = barRef.current?.offsetHeight ?? barHeight;
         const offset = topPx + h + 8;
+        const scroller = getScrollElement(scrollRootRef);
 
         clickLockRef.current = true;
         setActiveLabel(label);
 
         el.style.scrollMarginTop = `${offset}px`;
-        const targetTop = el.getBoundingClientRect().top + window.scrollY - offset;
-        window.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
+
+        if (scroller instanceof Window) {
+          const targetTop = el.getBoundingClientRect().top + window.scrollY - offset;
+          window.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
+        } else {
+          const scrollerRect = scroller.getBoundingClientRect();
+          const elRect = el.getBoundingClientRect();
+          const targetTop =
+            scroller.scrollTop + (elRect.top - scrollerRect.top) - offset;
+          scroller.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
+        }
 
         window.setTimeout(() => {
           const rect = el.getBoundingClientRect();
           const bottomLimit = window.innerHeight - BOTTOM_NAV_CLEARANCE_PX;
           if (rect.bottom > bottomLimit) {
             const adjust = rect.bottom - bottomLimit + 8;
-            window.scrollBy({ top: adjust, behavior: "smooth" });
+            if (scroller instanceof Window) {
+              window.scrollBy({ top: adjust, behavior: "smooth" });
+            } else {
+              scroller.scrollBy({ top: adjust, behavior: "smooth" });
+            }
           }
           clickLockRef.current = false;
         }, 450);
@@ -195,7 +216,7 @@ export function TopicQuickNavBar({ items }: TopicQuickNavBarProps) {
         if (retryEl) scrollToElement(retryEl);
       }, 120);
     },
-    [barHeight]
+    [barHeight, scrollRootRef]
   );
 
   if (items.length === 0) return null;
@@ -205,7 +226,7 @@ export function TopicQuickNavBar({ items }: TopicQuickNavBarProps) {
       ref={barRef}
       style={{
         ...navStyles.stickyShell,
-        top: `${stickyTopPx}px`,
+        top: `calc(env(safe-area-inset-top, 0px) + ${STICKY_TOP_EXTRA_PX}px)`,
       }}
       aria-label="主題快速導覽"
     >
@@ -239,7 +260,7 @@ export function TopicQuickNavBar({ items }: TopicQuickNavBarProps) {
 const navStyles: Record<string, CSSProperties> = {
   stickyShell: {
     position: "sticky",
-    zIndex: 40,
+    zIndex: 12,
     marginTop: "4px",
     marginBottom: "6px",
     width: "100%",
@@ -261,6 +282,7 @@ const navStyles: Record<string, CSSProperties> = {
     WebkitBackdropFilter: "blur(12px)",
     borderBottom: "1px solid rgba(148,163,184,.22)",
     boxShadow: "0 8px 22px rgba(2,6,23,.55)",
+    pointerEvents: "auto",
   },
   scroller: {
     display: "flex",
@@ -273,7 +295,6 @@ const navStyles: Record<string, CSSProperties> = {
     alignItems: "center",
     padding: "0 2px",
     WebkitOverflowScrolling: "touch",
-    touchAction: "pan-x",
   },
   chip: {
     flexShrink: 0,

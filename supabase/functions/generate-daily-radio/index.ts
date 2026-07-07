@@ -86,11 +86,45 @@ type ProcessOptions = {
   sendTestPush: boolean;
   targetRadioSlot?: RadioSlot;
   pushDedup: PushDedupState;
+  pushTokenIndex: Map<string, number>;
+  finalPushCount: { value: number };
 };
 
 type PushDedupState = {
   sentDeviceKeys: Set<string>;
 };
+
+type DailyRadioPushAttemptLog = {
+  event: "daily_radio_push_attempt";
+  user_id: string;
+  display_name: string;
+  user_plan: "free" | "pro";
+  radio_slot: RadioSlot;
+  script_date: string;
+  script_id: string | null;
+  trigger_path: string;
+  push_sent_at_before: string | null;
+  claim_success: boolean | null;
+  skipped_reason: string | null;
+  device_token_prefix: string | null;
+  token_count_before_dedupe: number;
+  token_count_after_dedupe: number;
+  final_push_count: number;
+};
+
+function logDailyRadioPushAttempt(log: DailyRadioPushAttemptLog): void {
+  console.log(JSON.stringify(log));
+}
+
+function buildPushTokenIndex(users: UserPrefs[]): Map<string, number> {
+  const index = new Map<string, number>();
+  for (const user of users) {
+    const token = user.push_token?.trim();
+    if (!token) continue;
+    index.set(token, (index.get(token) ?? 0) + 1);
+  }
+  return index;
+}
 
 function userPlanLabel(user: UserPrefs): "free" | "pro" {
   return isVoiceFeatureEnabled(user) ? "pro" : "free";
@@ -175,6 +209,8 @@ Deno.serve(async (req) => {
     targetRadioSlot:
       targetSlot === "morning" || targetSlot === "evening" ? targetSlot : undefined,
     pushDedup: { sentDeviceKeys: new Set<string>() },
+    pushTokenIndex: new Map<string, number>(),
+    finalPushCount: { value: 0 },
   };
 
   console.log("Daily Radio started", {
@@ -287,6 +323,26 @@ Deno.serve(async (req) => {
   }
 
   const enabledUsers = (users ?? []) as UserPrefs[];
+  processOptions.pushTokenIndex = buildPushTokenIndex(enabledUsers);
+
+  const duplicateTokenGroups = [...processOptions.pushTokenIndex.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([token, count]) => ({
+      device_token_prefix: tokenPrefix(token),
+      token_count_before_dedupe: count,
+      token_count_after_dedupe: 1,
+    }));
+
+  if (duplicateTokenGroups.length > 0) {
+    console.log(
+      JSON.stringify({
+        event: "daily_radio_push_token_dedupe_preview",
+        duplicate_token_groups: duplicateTokenGroups.length,
+        groups: duplicateTokenGroups,
+      })
+    );
+  }
+
   console.log("preferences loaded", {
     total_preferences_count: totalPreferencesCount ?? 0,
     enabled_users_count: enabledUsers.length,
@@ -350,6 +406,9 @@ Deno.serve(async (req) => {
     totalTimeMs,
     force: processOptions.force,
     send_test_push: processOptions.sendTestPush,
+    final_push_count: processOptions.finalPushCount.value,
+    unique_push_tokens: processOptions.pushTokenIndex.size,
+    duplicate_token_groups: duplicateTokenGroups.length,
   });
 
   return new Response(
@@ -1179,36 +1238,59 @@ async function sendDailyRadioPush(
   const deviceKey = pushToken
     ? `${scriptDate}:${radioSlot}:${pushToken}`
     : `${scriptDate}:${radioSlot}:no_token:${user.user_id}`;
+  const tokenCountBeforeDedupe = pushToken
+    ? (options.pushTokenIndex.get(pushToken) ?? 1)
+    : 0;
+  const tokenAlreadySentInRun = pushToken
+    ? options.pushDedup.sentDeviceKeys.has(deviceKey)
+    : false;
+  const tokenCountAfterDedupe =
+    pushToken && !tokenAlreadySentInRun && !forceTestPush ? 1 : pushToken ? 0 : 0;
 
-  const logBase = {
+  const baseAttempt = {
     user_id: user.user_id,
+    display_name: user.display_name?.trim() || "朋友",
     user_plan: userPlan,
     radio_slot: radioSlot,
-    trigger_path: triggerPath,
     script_date: scriptDate,
     script_id: resolvedScriptId,
-    display_name: user.display_name?.trim() || "朋友",
-    audioReady: pushMeta?.audioReady === true,
-    openTarget: pushMeta?.audioReady === true ? "ai_anchor_audio" : null,
-    source: forceTestPush ? "test_push" : "server_push",
-    device_token_prefix: pushToken ? tokenPrefix(pushToken) : null,
+    trigger_path: triggerPath,
     push_sent_at_before: serverRow?.push_sent_at ?? null,
+    device_token_prefix: pushToken ? tokenPrefix(pushToken) : null,
+    token_count_before_dedupe: tokenCountBeforeDedupe,
+    token_count_after_dedupe: tokenCountAfterDedupe,
+  };
+
+  const logAttempt = (
+    fields: Partial<DailyRadioPushAttemptLog>
+  ) => {
+    logDailyRadioPushAttempt({
+      event: "daily_radio_push_attempt",
+      claim_success: null,
+      skipped_reason: null,
+      final_push_count: 0,
+      ...baseAttempt,
+      ...fields,
+    });
   };
 
   if (!forceTestPush && serverRow?.push_sent_at) {
-    console.log("push skipped: duplicate guard (row already sent)", {
-      ...logBase,
-      push_reason: "already_sent",
-      skipped_due_to_duplicate_guard: true,
+    logAttempt({
+      claim_success: false,
+      skipped_reason: "push_already_sent",
+      final_push_count: 0,
+      push_sent_at_before: serverRow.push_sent_at,
+      token_count_after_dedupe: 0,
     });
     return { push_status: "sent" };
   }
 
   if (!forceTestPush && options.pushDedup.sentDeviceKeys.has(deviceKey)) {
-    console.log("push skipped: duplicate device token in cron run", {
-      ...logBase,
-      push_reason: "duplicate_device_token",
-      skipped_due_to_duplicate_guard: true,
+    logAttempt({
+      claim_success: false,
+      skipped_reason: "duplicate_device_token",
+      final_push_count: 0,
+      token_count_after_dedupe: 0,
     });
     return { push_status: "sent" };
   }
@@ -1227,27 +1309,15 @@ async function sendDailyRadioPush(
     pushSentAtBefore = claim.pushSentAtBefore;
     claimed = claim.claimed;
     if (!claimed) {
-      console.log("push skipped: duplicate guard (atomic claim failed)", {
-        ...logBase,
-        push_reason: "claim_failed",
+      logAttempt({
         push_sent_at_before: pushSentAtBefore,
-        skipped_due_to_duplicate_guard: true,
+        token_count_after_dedupe: 0,
+        claim_success: false,
+        skipped_reason: "push_already_sent",
+        final_push_count: 0,
       });
       return { push_status: "sent" };
     }
-  }
-
-  if (forceTestPush) {
-    console.log("send_test_push: sending daily_radio_completed push", {
-      ...logBase,
-      push_reason: "test_push",
-    });
-  } else {
-    console.log("push sending", {
-      ...logBase,
-      push_reason: "daily_radio_ready",
-      push_sent_at_before: pushSentAtBefore,
-    });
   }
 
   const pushResult = await sendDailyRadioCompletedPush(
@@ -1269,12 +1339,13 @@ async function sendDailyRadioPush(
     if (!forceTestPush) {
       options.pushDedup.sentDeviceKeys.add(deviceKey);
     }
-    console.log("push sent", {
-      ...logBase,
-      push_reason: forceTestPush ? "test_push" : "daily_radio_ready",
-      push_status: pushResult.push_status,
-      push_sent_at_after: new Date().toISOString(),
-      skipped_due_to_duplicate_guard: false,
+    options.finalPushCount.value += 1;
+    logAttempt({
+      push_sent_at_before: pushSentAtBefore,
+      claim_success: forceTestPush ? null : true,
+      skipped_reason: null,
+      final_push_count: 1,
+      token_count_after_dedupe: pushToken ? 1 : 0,
     });
   } else {
     if (!forceTestPush && claimed) {
@@ -1287,10 +1358,12 @@ async function sendDailyRadioPush(
         .eq("generation_source", SERVER_SOURCE)
         .eq("radio_slot", radioSlot);
     }
-    console.log("push failed", {
-      ...logBase,
-      push_status: pushResult.push_status,
-      push_error: pushResult.push_error,
+    logAttempt({
+      push_sent_at_before: pushSentAtBefore,
+      claim_success: forceTestPush ? null : claimed,
+      skipped_reason: pushToken ? "push_send_failed" : "no_push_token",
+      final_push_count: 0,
+      token_count_after_dedupe: 0,
     });
   }
 

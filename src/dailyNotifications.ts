@@ -75,7 +75,13 @@ export async function cancelLocalDailyReminder(): Promise<void> {
       notifications: [{ id: DAILY_REMINDER_NOTIFICATION_ID }],
     });
     lastScheduledTime = null;
-    console.log("[LocalNotifications] cancelled local daily reminder");
+    console.log(
+      JSON.stringify({
+        event: "local_daily_reminder_cancelled",
+        notification_id: DAILY_REMINDER_NOTIFICATION_ID,
+        title: buildLocalReminderNotification().title,
+      })
+    );
   } catch {
     /* ignore */
   }
@@ -87,7 +93,12 @@ async function scheduleDailyRadioReminderInternal(): Promise<void> {
   if (!shouldUseLocalDailyReminder()) {
     await cancelLocalDailyReminder();
     console.log(
-      "[LocalNotifications] skip schedule: server AI push enabled (supabase configured)"
+      JSON.stringify({
+        event: "local_daily_reminder_skipped",
+        reason: "server_push_enabled",
+        supabase_configured: isSupabaseConfigured(),
+        title: buildLocalReminderNotification().title,
+      })
     );
     return;
   }

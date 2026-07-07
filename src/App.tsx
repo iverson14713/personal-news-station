@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type { CSSProperties } from "react";
 import { Headphones, Home, Settings, Star } from "lucide-react";
 import {
@@ -55,6 +55,7 @@ import {
 } from "./dailyRadio";
 import { initDailyNotificationsOnce, maybeRescheduleDailyRadioReminder } from "./dailyNotifications";
 import { initRemotePush, dailyRadioPushPayloadToOpenInfo, type DailyRadioPushOpenInfo } from "./remotePush";
+import { audioUrlPrefix, logPushOpenReceived, playErrorFields } from "./pushOpenDebug";
 import { ensureSupabaseUser, getSupabaseAuthUserId, initSupabaseAuth, isSupabaseConfigured } from "./supabaseClient";
 import {
   fetchServerDailyScript,
@@ -150,6 +151,7 @@ import {
   getTopicSectionDomId,
   TopicQuickNavBar,
 } from "./TopicQuickNavBar";
+import { logScrollDebug } from "./scrollDebug";
 import {
   ONBOARDING_TOPIC_PICK_COUNT,
   readOnboardingCompleted,
@@ -965,6 +967,7 @@ export default function App() {
   const pendingAnchorAutoplayRef = useRef(false);
   const pendingHomeAnchorPlayRef = useRef(false);
   const autoAudioEnsuredRef = useRef<string | null>(null);
+  const pageScrollRef = useRef<HTMLDivElement>(null);
   const [pushManualPlayVisible, setPushManualPlayVisible] = useState(false);
 
   const {
@@ -1993,6 +1996,21 @@ export default function App() {
     [anchorActions, buildPlayRequest, play]
   );
 
+  const playScriptDraft = useCallback(
+    (script?: string) => {
+      anchorActions.pause();
+      const scriptText = (script ?? aiScript).trim();
+      if (!scriptText) {
+        alert("尚無 AI 主播稿可播放");
+        return;
+      }
+      const request = buildPlayRequest(scriptText, { withIntro: false });
+      if (!request) return;
+      void play(request);
+    },
+    [anchorActions, aiScript, buildPlayRequest, play]
+  );
+
   const stopPlayback = useCallback(() => {
     cancelScheduledAutoplay();
     void stop();
@@ -2712,9 +2730,34 @@ ${newsText}
         if (pendingAnchorAutoplayRef.current || pendingHomeAnchorPlayRef.current) {
           pendingAnchorAutoplayRef.current = false;
           pendingHomeAnchorPlayRef.current = false;
+          logPushOpenReceived({
+            phase: "anchor_play_call_after_generate",
+            anchorPlayer_play_called: true,
+            audio_url_exists: true,
+            audio_url_prefix: audioUrlPrefix(result.audioUrl),
+          });
           void anchorActions.play(result.audioUrl).then(
-            () => setPushManualPlayVisible(false),
-            () => setPushManualPlayVisible(true)
+            () => {
+              logPushOpenReceived({
+                phase: "anchor_play_result_after_generate",
+                anchorPlayer_play_called: true,
+                play_promise_resolved: true,
+                play_promise_rejected: false,
+                fallback_button_shown: false,
+              });
+              setPushManualPlayVisible(false);
+            },
+            (err) => {
+              logPushOpenReceived({
+                phase: "anchor_play_result_after_generate",
+                anchorPlayer_play_called: true,
+                play_promise_resolved: false,
+                play_promise_rejected: true,
+                fallback_button_shown: true,
+                ...playErrorFields(err),
+              });
+              setPushManualPlayVisible(true);
+            }
           );
         }
         return true;
@@ -2895,13 +2938,6 @@ ${newsText}
 
   const handlePushOpenAnchorPlay = useCallback(
     async (script: ServerDailyScript, audioReadyFromPush?: boolean) => {
-      console.log("[PushOpen] push open received");
-      console.log("[PushOpen] audioReady", audioReadyFromPush ?? false);
-      console.log("[PushOpen] script loaded", {
-        scriptId: script.id,
-        scriptDate: script.scriptDate,
-      });
-
       const playbackVoice = voiceFeatureEnabled
         ? selectedAnchor.voice
         : DEFAULT_AI_ANCHOR_SETTINGS.voice;
@@ -2924,16 +2960,25 @@ ${newsText}
       const shouldTryMp3 =
         hasPlayableUrl && (audioUrlReady || audioReadyFromPush === true);
 
-      console.log("[PushOpen] anchor audio url exists", hasPlayableUrl);
-      console.log("[PushOpen] shouldTryMp3", shouldTryMp3);
+      logPushOpenReceived({
+        phase: "anchor_play_prepare",
+        scriptId: script.id,
+        script_date: script.scriptDate,
+        audioReady: audioReadyFromPush ?? false,
+        audio_url_exists: hasPlayableUrl,
+        audio_url_prefix: audioUrlPrefix(script.audioUrl),
+        shouldTryMp3,
+        anchorPlayer_play_called: false,
+        play_promise_resolved: false,
+        play_promise_rejected: false,
+        fallback_button_shown: false,
+      });
 
       pushAutoplayScheduledRef.current = true;
       pushAnchorAutoplayPendingRef.current = false;
       setPushManualPlayVisible(false);
 
       if (shouldTryMp3 && script.audioUrl) {
-        console.log("[PushOpen] anchorPlayer.play called");
-        console.log("[PushOpen] skip speechSynthesis");
         stopPlayback();
         setDisplayScriptSource("server");
         bindScriptAudio(script.audioUrl, buildServerScriptFingerprint(script.id), {
@@ -2941,23 +2986,48 @@ ${newsText}
           style: script.audioStyle ?? playbackStyle,
         });
         anchorActions.setAudioUrl(script.audioUrl);
+
+        logPushOpenReceived({
+          phase: "anchor_play_call",
+          scriptId: script.id,
+          audio_url_exists: true,
+          audio_url_prefix: audioUrlPrefix(script.audioUrl),
+          anchorPlayer_play_called: true,
+        });
+
         try {
           await anchorActions.play(script.audioUrl);
-          console.log("[PushOpen] autoplay success");
+          logPushOpenReceived({
+            phase: "anchor_play_result",
+            scriptId: script.id,
+            audio_url_exists: true,
+            audio_url_prefix: audioUrlPrefix(script.audioUrl),
+            anchorPlayer_play_called: true,
+            play_promise_resolved: true,
+            play_promise_rejected: false,
+            fallback_button_shown: false,
+          });
           setPushManualPlayVisible(false);
           return;
         } catch (err) {
-          console.log(
-            "[PushOpen] autoplay blocked",
-            err instanceof Error ? err.message : String(err)
-          );
+          const errFields = playErrorFields(err);
+          logPushOpenReceived({
+            phase: "anchor_play_result",
+            scriptId: script.id,
+            audio_url_exists: true,
+            audio_url_prefix: audioUrlPrefix(script.audioUrl),
+            anchorPlayer_play_called: true,
+            play_promise_resolved: false,
+            play_promise_rejected: true,
+            fallback_button_shown: true,
+            ...errFields,
+          });
           setPushManualPlayVisible(true);
           return;
         }
       }
 
       if (voiceFeatureEnabled) {
-        console.log("[PushOpen] AI anchor audio preparing — generating MP3");
         pendingAnchorAutoplayRef.current = true;
         stopPlayback();
 
@@ -2967,16 +3037,37 @@ ${newsText}
         });
 
         if (generated) {
+          logPushOpenReceived({
+            phase: "anchor_play_mp3_generated",
+            scriptId: script.id,
+            audio_url_exists: true,
+            anchorPlayer_play_called: true,
+            play_promise_resolved: true,
+            fallback_button_shown: false,
+          });
           return;
         }
 
         pendingAnchorAutoplayRef.current = false;
-        console.log("[PushOpen] MP3 generation failed — show manual play prompt");
+        logPushOpenReceived({
+          phase: "anchor_play_mp3_failed",
+          scriptId: script.id,
+          audio_url_exists: hasPlayableUrl,
+          audio_url_prefix: audioUrlPrefix(script.audioUrl),
+          anchorPlayer_play_called: false,
+          fallback_button_shown: true,
+        });
         setPushManualPlayVisible(true);
         return;
       }
 
-      console.log("[PushOpen] no MP3 available — show manual play prompt (no TTS autoplay)");
+      logPushOpenReceived({
+        phase: "anchor_play_no_mp3",
+        scriptId: script.id,
+        audio_url_exists: hasPlayableUrl,
+        anchorPlayer_play_called: false,
+        fallback_button_shown: true,
+      });
       setPushManualPlayVisible(true);
     },
     [
@@ -2998,11 +3089,21 @@ ${newsText}
     (source: "local_reminder" | "server_completed" | DailyRadioPushOpenInfo) => {
       void (async () => {
         if (typeof source === "object") {
-          console.log("[PushOpen] normalized openInfo", source);
           const preferAnchorAudio =
             source.openTarget === "ai_anchor_audio" ||
             source.autoPlay === true ||
             source.audioReady === true;
+
+          logPushOpenReceived({
+            phase: "handler_start",
+            normalized_openInfo: source,
+            openTarget: source.openTarget ?? null,
+            radio_slot: source.radioSlot ?? null,
+            scriptId: source.scriptId ?? null,
+            autoPlay: source.autoPlay ?? false,
+            audioReady: source.audioReady ?? false,
+            navigate_to_play_page: false,
+          });
 
           cancelScheduledAutoplay();
           stopPlayback();
@@ -3026,10 +3127,25 @@ ${newsText}
           if (!ready) {
             pushAnchorAutoplayPendingRef.current = false;
             clearAutoplayAnchorAudioFlag();
+            logPushOpenReceived({
+              phase: "handler_script_load_failed",
+              normalized_openInfo: source,
+              scriptId: source.scriptId ?? null,
+              navigate_to_play_page: false,
+            });
             return;
           }
 
           setTab("player");
+          logPushOpenReceived({
+            phase: "handler_navigate_player",
+            normalized_openInfo: source,
+            openTarget: source.openTarget ?? null,
+            scriptId: ready.id,
+            autoPlay: source.autoPlay ?? false,
+            audioReady: source.audioReady ?? false,
+            navigate_to_play_page: true,
+          });
 
           if (preferAnchorAudio) {
             await handlePushOpenAnchorPlay(ready, source.audioReady);
@@ -3037,17 +3153,32 @@ ${newsText}
           return;
         }
         if (source === "server_completed") {
-          console.log("[DailyRadio] opened from legacy server push notification");
           cancelScheduledAutoplay();
           stopPlayback();
           setPushManualPlayVisible(false);
           const ready = await refreshServerDailyScript();
-          if (!ready) return;
+          if (!ready) {
+            logPushOpenReceived({
+              phase: "handler_legacy_script_load_failed",
+              type: "daily_radio_completed",
+              navigate_to_play_page: false,
+            });
+            return;
+          }
           setTab("player");
+          logPushOpenReceived({
+            phase: "handler_navigate_player",
+            type: "daily_radio_completed",
+            navigate_to_play_page: true,
+            audioReady: true,
+          });
           await handlePushOpenAnchorPlay(ready, true);
           return;
         }
-        console.log("[DailyRadio] opened from local reminder (not assuming server ready)");
+        logPushOpenReceived({
+          phase: "handler_local_reminder",
+          navigate_to_play_page: false,
+        });
         void refreshServerDailyScript();
       })();
     },
@@ -3378,10 +3509,20 @@ ${newsText}
             ? "收藏新聞"
             : "個人設定";
 
+  useEffect(() => {
+    if (tab !== "home") return;
+    const run = () => {
+      logScrollDebug("home mount", pageScrollRef.current, null);
+    };
+    run();
+    const t = window.setTimeout(run, 800);
+    return () => window.clearTimeout(t);
+  }, [tab, news.length, loading]);
+
   const showFloatingPlayer = playbackActive && tab !== "player";
 
   return (
-    <div style={styles.page}>
+    <div ref={pageScrollRef} style={styles.page}>
       <SettingsToastHost />
       <div
         style={{
@@ -3499,10 +3640,7 @@ ${newsText}
               onScriptFontSizeChange={setScriptFontSize}
               isSpeaking={playbackActive}
               isPaused={playbackState === "paused"}
-              onPlayScript={(script) => {
-                startPlayback(script);
-                setTab("player");
-              }}
+              onPlayScript={playScriptDraft}
               onStopScript={stopPlayback}
               onCopyScript={() => void copyAiScript()}
               onOpenAnalysis={openAiAnalysis}
@@ -3564,6 +3702,7 @@ ${newsText}
               denseCards
               isPro={isPro}
               topicSections={topicNewsSections}
+              scrollRootRef={pageScrollRef}
               homeToolbar={{
                 selectAll,
                 clearAll,
@@ -3692,7 +3831,7 @@ ${newsText}
               onScriptFontSizeChange={setScriptFontSize}
               isSpeaking={playbackActive}
               isPaused={playbackState === "paused"}
-              onPlayScript={(script) => startPlayback(script)}
+              onPlayScript={playScriptDraft}
               onStopScript={stopPlayback}
               onCopyScript={() => void copyAiScript()}
               onOpenAnalysis={openAiAnalysis}
@@ -6232,33 +6371,25 @@ function AiSummaryPanel({
                   ) : null}
                 </div>
                 <div style={styles.aiScriptActions}>
-                  {!isPlayer && !voiceFeatureEnabled ? (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const s = aiScript.trim();
-                          if (!s) {
-                            alert("尚無 AI 主播稿可播放");
-                            return;
-                          }
-                          onPlayScript(s);
-                        }}
-                        style={styles.aiScriptPlayBtn}
-                        disabled={playbackActive}
-                      >
-                        {playbackActive ? "朗讀中" : "▶ 文字朗讀"}
-                      </button>
-                      {playbackActive ? (
-                        <button
-                          type="button"
-                          onClick={onStopScript}
-                          style={styles.aiScriptStopBtn}
-                        >
-                          ■ 停止
-                        </button>
-                      ) : null}
-                    </>
+                  {!isPlayer && hasContent ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (playbackActive) {
+                          onStopScript();
+                          return;
+                        }
+                        const s = aiScript.trim();
+                        if (!s) {
+                          alert("尚無 AI 主播稿可播放");
+                          return;
+                        }
+                        onPlayScript(s);
+                      }}
+                      style={styles.aiScriptPlayBtn}
+                    >
+                      {playbackActive ? "停止播放" : "▶ 播放稿件"}
+                    </button>
                   ) : null}
                   {isHome && voiceFeatureEnabled && scriptAudioStaleReason ? (
                     <button
@@ -6651,6 +6782,7 @@ function NewsList({
   emptyHint,
   onRefreshNews,
   onSettingsTopics,
+  scrollRootRef,
 }: {
   title: string;
   news: NewsItem[];
@@ -6673,6 +6805,7 @@ function NewsList({
   emptyHint?: string;
   onRefreshNews?: () => void;
   onSettingsTopics?: () => void;
+  scrollRootRef?: RefObject<HTMLElement | null>;
 }) {
   const resolvedTotalNewsCount = totalNewsCount ?? news.length;
   const globalEmptyText =
@@ -6811,7 +6944,7 @@ function NewsList({
       )}
 
       {!loading && groupedMode && topicNavItems.length > 0 ? (
-        <TopicQuickNavBar items={topicNavItems} />
+        <TopicQuickNavBar items={topicNavItems} scrollRootRef={scrollRootRef} />
       ) : null}
 
       {loading && (
@@ -6897,9 +7030,13 @@ const styles: Record<string, CSSProperties> = {
     boxSizing: "border-box",
     width: "100%",
     maxWidth: "100%",
+    height: "100%",
     minHeight: "100%",
     margin: 0,
     padding: 0,
+    overflowX: "hidden",
+    overflowY: "auto",
+    WebkitOverflowScrolling: "touch",
     background: TOKENS.bgPage,
     color: TOKENS.textPrimary,
     fontFamily:

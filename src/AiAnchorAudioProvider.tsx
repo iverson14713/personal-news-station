@@ -244,10 +244,20 @@ export function AiAnchorAudioProvider({ children }: { children: ReactNode }) {
         logAiAnchorGlobalPlayer("play", { currentTime: audio.currentTime });
       } catch (err) {
         syncFromAudio();
+        const errName = err instanceof Error ? err.name : null;
+        const errMessage = err instanceof Error ? err.message : String(err);
         logAiAnchorGlobalPlayer("error", {
           phase: "play",
-          message: err instanceof Error ? err.message : String(err),
+          message: errMessage,
         });
+        console.log(
+          JSON.stringify({
+            event: "anchor_player_play",
+            play_promise_rejected: true,
+            play_error_name: errName,
+            play_error_message: errMessage,
+          })
+        );
         throw err;
       }
     },

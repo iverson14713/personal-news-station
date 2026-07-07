@@ -7,6 +7,7 @@ import type { PluginListenerHandle } from "@capacitor/core";
 import { syncPushTokenToSupabase } from "./dailyRadioApi";
 import type { RadioSlot } from "./radioSlot";
 import { ensureSupabaseUser, isSupabaseConfigured } from "./supabaseClient";
+import { logPushOpenReceived } from "./pushOpenDebug";
 
 let cachedPushToken: string | null = null;
 let initialized = false;
@@ -138,13 +139,20 @@ async function handleRegistrationToken(tokenValue: string): Promise<void> {
 function notifyPushOpen(raw: unknown): void {
   const data = extractPushData(raw);
   const info = parsePushOpenInfo(raw);
-  console.log("[Push] push open received", {
-    normalized: info,
-    rawKeys: data ? Object.keys(data) : [],
+  const typeRaw = data
+    ? String(data.type ?? data.action ?? "").trim() || null
+    : null;
+  logPushOpenReceived({
+    phase: "notification_tapped",
+    raw_payload: data ?? raw,
+    normalized_openInfo: info,
+    openTarget: info.openTarget ?? null,
+    type: typeRaw,
+    radio_slot: info.radioSlot ?? null,
+    scriptId: info.scriptId ?? null,
+    autoPlay: info.autoPlay ?? false,
+    audioReady: info.audioReady ?? false,
   });
-  console.log("[PushOpen] openTarget", info.openTarget ?? null);
-  console.log("[PushOpen] audioReady", info.audioReady ?? false);
-  console.log("[PushOpen] autoplay requested", info.autoPlay ?? false);
   onOpenDailyHandler?.(info);
 }
 

@@ -113,10 +113,29 @@ export function formatRemainingTime(ms: number): string {
 
 /** 裝置文字朗讀（speechSynthesis）專用；真人 MP3 語音不走此路徑 */
 export function sanitizeForDeviceSpeechSynthesis(text: string): string {
-  return text
-    .replace(/<\s*\/?\s*speak[^>]*>/gi, "")
-    .replace(/</g, "＜")
-    .replace(/>/g, "＞");
+  let s = String(text ?? "");
+
+  // 常見 HTML entity → 純文字，避免 iOS 當成 SSML/XML 解析
+  s = s
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'")
+    .replace(/&#(\d+);/g, (match, code) => {
+      const n = Number(code);
+      return Number.isFinite(n) ? String.fromCharCode(n) : match;
+    })
+    .replace(/&#x([\da-f]+);/gi, (match, hex) => {
+      const n = parseInt(hex, 16);
+      return Number.isFinite(n) ? String.fromCharCode(n) : match;
+    });
+
+  // 移除 SSML/XML 標籤（speak、break、prosody 等），只保留純文字
+  s = s.replace(/<\s*\/?\s*[a-zA-Z][\w:-]*(?:\s+[^<>]*?)?\/?\s*>/g, "");
+
+  // 中性化殘留的 XML 特殊字元，避免 TextToSpeech.SSMLParserError
+  return s.replace(/</g, "＜").replace(/>/g, "＞").replace(/&/g, "＆");
 }
 
 export async function stopSpeechSynthesis(): Promise<void> {
