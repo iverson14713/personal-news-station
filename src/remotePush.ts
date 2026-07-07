@@ -37,22 +37,56 @@ function isDailyRadioCompletedPayload(data: Record<string, unknown> | undefined)
   );
 }
 
-function parsePushOpenInfo(data: Record<string, unknown> | undefined): DailyRadioPushOpenInfo {
-  const radioSlotRaw = String(data?.radio_slot ?? "").trim();
+function extractPushData(raw: unknown): Record<string, unknown> | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const root = raw as Record<string, unknown>;
+
+  const candidates: Record<string, unknown>[] = [root];
+  const data = root.data;
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    candidates.push(data as Record<string, unknown>);
+  }
+  const aps = root.aps;
+  if (aps && typeof aps === "object" && !Array.isArray(aps)) {
+    const apsData = (aps as Record<string, unknown>).data;
+    if (apsData && typeof apsData === "object" && !Array.isArray(apsData)) {
+      candidates.push(apsData as Record<string, unknown>);
+    }
+  }
+
+  const merged: Record<string, unknown> = {};
+  for (const candidate of candidates) {
+    Object.assign(merged, candidate);
+  }
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
+function parsePushOpenInfo(raw: unknown): DailyRadioPushOpenInfo {
+  const data = extractPushData(raw) ?? {};
+  const radioSlotRaw = String(data.radio_slot ?? data.radioSlot ?? "").trim();
   const radioSlot =
     radioSlotRaw === "evening" || radioSlotRaw === "morning"
       ? (radioSlotRaw as RadioSlot)
       : undefined;
-  const scriptId = String(data?.script_id ?? data?.scriptId ?? "").trim() || undefined;
-  const openTargetRaw = String(data?.openTarget ?? "").trim();
+  const scriptId =
+    String(data.script_id ?? data.scriptId ?? "").trim() || undefined;
+  const openTargetRaw = String(data.openTarget ?? data.open_target ?? "").trim();
   const openTarget: DailyRadioPushOpenTarget | undefined =
     openTargetRaw === "ai_anchor_audio"
       ? "ai_anchor_audio"
       : openTargetRaw === "text_playback"
         ? "text_playback"
         : undefined;
-  const autoPlay = data?.autoPlay === true || data?.autoPlay === "true";
-  const audioReady = data?.audioReady === true || data?.audioReady === "true";
+  const autoPlay =
+    data.autoPlay === true ||
+    data.autoPlay === "true" ||
+    data.auto_play === true ||
+    data.auto_play === "true";
+  const audioReady =
+    data.audioReady === true ||
+    data.audioReady === "true" ||
+    data.audio_ready === true ||
+    data.audio_ready === "true";
   return { source: "server_completed", radioSlot, scriptId, openTarget, autoPlay, audioReady };
 }
 
@@ -101,10 +135,16 @@ async function handleRegistrationToken(tokenValue: string): Promise<void> {
   }
 }
 
-function notifyPushOpen(info: DailyRadioPushOpenInfo): void {
-  console.log("[Push] opened from daily_radio push", info);
+function notifyPushOpen(raw: unknown): void {
+  const data = extractPushData(raw);
+  const info = parsePushOpenInfo(raw);
+  console.log("[Push] push open received", {
+    normalized: info,
+    rawKeys: data ? Object.keys(data) : [],
+  });
   console.log("[PushOpen] openTarget", info.openTarget ?? null);
   console.log("[PushOpen] audioReady", info.audioReady ?? false);
+  console.log("[PushOpen] autoplay requested", info.autoPlay ?? false);
   onOpenDailyHandler?.(info);
 }
 
@@ -145,9 +185,9 @@ function attachPushListenersOnce(): PluginListenerHandle[] {
 
   attach("pushNotificationReceived", () =>
     PushNotifications.addListener("pushNotificationReceived", (event) => {
-      const data = event.notification.data as Record<string, unknown> | undefined;
+      const data = extractPushData(event.notification);
       if (isDailyRadioCompletedPayload(data)) {
-        const info = parsePushOpenInfo(data);
+        const info = parsePushOpenInfo(event.notification);
         console.log("[Push] received daily_radio while app open", info);
       }
     })
@@ -155,9 +195,9 @@ function attachPushListenersOnce(): PluginListenerHandle[] {
 
   attach("pushNotificationActionPerformed", () =>
     PushNotifications.addListener("pushNotificationActionPerformed", (event) => {
-      const data = event.notification.data as Record<string, unknown> | undefined;
+      const data = extractPushData(event.notification);
       if (isDailyRadioCompletedPayload(data)) {
-        notifyPushOpen(parsePushOpenInfo(data));
+        notifyPushOpen(event.notification);
       }
     })
   );

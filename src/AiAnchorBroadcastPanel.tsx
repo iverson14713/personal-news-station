@@ -14,6 +14,8 @@ import {
 } from "./aiAnchorSettings";
 
 import type { ScriptAudioStaleReason } from "./aiAnchorSettings";
+import type { DisplayScriptSource } from "./scriptAudioBinding";
+import type { RadioSlot } from "./radioSlot";
 import { useAiAnchorPlayer, useAiAnchorPlayerActions } from "./AiAnchorAudioProvider";
 import { isCapacitorNativePlatform } from "./useAiAnchorAudioGain";
 
@@ -31,6 +33,10 @@ type AiAnchorBroadcastPanelProps = {
   onGenerate: () => void;
   autoPlay?: boolean;
   onAutoPlayHandled?: () => void;
+  /** 推播開啟後 iOS 擋 autoplay 時由外層顯示手動播放 */
+  forceManualPlayPrompt?: boolean;
+  displayScriptSource?: DisplayScriptSource;
+  radioSlot?: RadioSlot | null;
 };
 
 const panelStyles: Record<string, CSSProperties> = {
@@ -219,16 +225,39 @@ export function AiAnchorBroadcastPanel({
   onGenerate,
   autoPlay = false,
   onAutoPlayHandled,
+  forceManualPlayPrompt = false,
+  displayScriptSource = "manual",
+  radioSlot = null,
 }: AiAnchorBroadcastPanelProps) {
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const nativePlatform = isCapacitorNativePlatform();
   const anchorActions = useAiAnchorPlayerActions();
 
   const hasReadyAudio = Boolean(audioUrl && !staleReason && !loading);
-  const generateLabel = staleReason ? "重新生成 AI 主播語音" : "生成 AI 主播語音";
+  const showManualPlayButton = autoplayBlocked || forceManualPlayPrompt;
+  const generateLabel = staleReason
+    ? "重新生成 AI 真人語音"
+    : displayScriptSource === "manual"
+      ? "🎙️ 生成這篇 AI 真人語音"
+      : "🎙️ 生成 AI 真人語音";
+  const readyLabel =
+    displayScriptSource === "server" && radioSlot === "evening"
+      ? "🎧 晚報 AI 音訊已就緒"
+      : displayScriptSource === "server"
+        ? "🎧 早報 AI 音訊已就緒"
+        : "🎧 這篇 AI 音訊已就緒";
+  const playLabel =
+    displayScriptSource === "server" && radioSlot === "evening"
+      ? "▶ 播放晚報 AI 真人語音"
+      : displayScriptSource === "server"
+        ? "▶ 播放早報 AI 真人語音"
+        : "▶ 播放 AI 真人語音";
 
   useEffect(() => {
-    if (!hasReadyAudio || !audioUrl) return;
+    if (!hasReadyAudio || !audioUrl) {
+      anchorActions.setAudioUrl(null);
+      return;
+    }
     anchorActions.setAudioUrl(audioUrl);
   }, [anchorActions, audioUrl, hasReadyAudio]);
 
@@ -279,13 +308,13 @@ export function AiAnchorBroadcastPanel({
       </div>
 
       {loading ? (
-        <div style={panelStyles.loading}>準備 AI 主播語音…</div>
+        <div style={panelStyles.loading}>AI 真人語音生成中…</div>
       ) : hasReadyAudio ? (
         <>
-          <div style={panelStyles.readyLabel}>今日新聞已準備好</div>
-          {autoplayBlocked ? (
+          <div style={panelStyles.readyLabel}>{readyLabel}</div>
+          {showManualPlayButton ? (
             <button type="button" onClick={handleManualPlay} style={panelStyles.playTodayBtn}>
-              ▶ 播放今日 AI 主播
+              {playLabel}
             </button>
           ) : null}
           <div ref={playerHostRef} style={panelStyles.player} />

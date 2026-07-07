@@ -2,6 +2,7 @@
  * 本機排程提醒（非伺服器生成完成通知）
  *
  * 伺服器真正生成完成後的 Push 由 Edge Function + APNs 發送。
+ * 當 Supabase 遠端推播已啟用時，不再排程本機「早報時間到了」提醒，避免重複通知。
  */
 import { Capacitor } from "@capacitor/core";
 import type { PluginListenerHandle } from "@capacitor/core";
@@ -9,6 +10,7 @@ import {
   markDailyNotificationSent,
   readDailyRadioState,
 } from "./dailyRadio";
+import { isSupabaseConfigured } from "./supabaseClient";
 
 const DAILY_REMINDER_NOTIFICATION_ID = 9002;
 
@@ -24,6 +26,11 @@ let scheduleInFlight: Promise<void> | null = null;
 type DailyOpenSource = "local_reminder" | "server_completed";
 
 let onOpenDailyHandler: ((source: DailyOpenSource) => void) | null = null;
+
+/** 遠端 AI 主播推播已啟用時，停用本機早報提醒 */
+export function shouldUseLocalDailyReminder(): boolean {
+  return !isSupabaseConfigured();
+}
 
 async function getLocalNotifications() {
   if (localNotificationsModule) return localNotificationsModule;
@@ -59,8 +66,31 @@ export function buildLocalReminderNotification(): { title: string; body: string 
   };
 }
 
+export async function cancelLocalDailyReminder(): Promise<void> {
+  if (!Capacitor.isNativePlatform()) return;
+  const mod = await getLocalNotifications();
+  if (!mod) return;
+  try {
+    await mod.LocalNotifications.cancel({
+      notifications: [{ id: DAILY_REMINDER_NOTIFICATION_ID }],
+    });
+    lastScheduledTime = null;
+    console.log("[LocalNotifications] cancelled local daily reminder");
+  } catch {
+    /* ignore */
+  }
+}
+
 async function scheduleDailyRadioReminderInternal(): Promise<void> {
   if (!Capacitor.isNativePlatform()) return;
+
+  if (!shouldUseLocalDailyReminder()) {
+    await cancelLocalDailyReminder();
+    console.log(
+      "[LocalNotifications] skip schedule: server AI push enabled (supabase configured)"
+    );
+    return;
+  }
 
   const state = readDailyRadioState();
   const scheduledTime = state.scheduledTime;
@@ -108,6 +138,10 @@ async function scheduleDailyRadioReminderInternal(): Promise<void> {
 
       lastScheduledTime = scheduledTime;
       markDailyNotificationSent();
+      console.log("[LocalNotifications] scheduled local daily reminder", {
+        scheduledTime,
+        source: "local_notification",
+      });
     } catch {
       /* ignore */
     }
@@ -125,6 +159,10 @@ export async function maybeRescheduleDailyRadioReminder(
   scheduledTime: string
 ): Promise<void> {
   if (!initialized) return;
+  if (!shouldUseLocalDailyReminder()) {
+    await cancelLocalDailyReminder();
+    return;
+  }
   if (lastScheduledTime === scheduledTime) return;
   await scheduleDailyRadioReminderInternal();
 }
@@ -143,9 +181,8 @@ async function registerDailyNotificationListenerOnce(): Promise<void> {
         ?.action;
       const handler = onOpenDailyHandler;
       if (!handler) return;
-      if (action === "daily_radio_completed") {
-        handler("server_completed");
-      } else if (action === "open_daily") {
+      if (action === "open_daily") {
+        console.log("[LocalNotifications] opened from local reminder");
         handler("local_reminder");
       }
     }
@@ -173,7 +210,9 @@ export async function initDailyNotificationsOnce(
   }
 
   initPromise = (async () => {
-    console.log("[LocalNotifications] init once");
+    console.log("[LocalNotifications] init once", {
+      useLocalReminder: shouldUseLocalDailyReminder(),
+    });
     await requestDailyNotificationPermissionOnce();
     await registerDailyNotificationListenerOnce();
     await scheduleDailyRadioReminderInternal();

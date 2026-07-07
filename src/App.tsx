@@ -69,6 +69,7 @@ import { AiAnchorAudioProvider, useAiAnchorPlayer, useAiAnchorPlayerActions } fr
 import { MORNING_RADIO_TIME, EVENING_RADIO_TIME, radioSlotCompletedTitle, type RadioSlot } from "./radioSlot";
 import { appendRadioClosing } from "./radioClosing";
 import {
+  DEFAULT_AI_ANCHOR_SETTINGS,
   formatAnchorPlaybackRate,
   getAnchorById,
   getScriptAudioStaleReason,
@@ -95,6 +96,12 @@ import {
   AiAnchorSettingsIntro,
 } from "./AiAnchorBroadcastPanel";
 import { generateScriptAudio, isScriptUuid, pingVercelApi } from "./scriptAudioApi";
+import {
+  buildManualScriptFingerprint,
+  buildServerScriptFingerprint,
+  isScriptAudioBound,
+  type DisplayScriptSource,
+} from "./scriptAudioBinding";
 import { isInternalAccessActive } from "./hiddenDevUnlock";
 import { hourInTimezone, DAILY_SCRIPT_TIMEZONE, todayYmdLocal } from "./dateLocal";
 import { buildPlaybackIntro, prependPlaybackIntro } from "./playbackIntro";
@@ -925,6 +932,8 @@ export default function App() {
   const [cachedScriptAudioStyle, setCachedScriptAudioStyle] = useState<string | null>(null);
   const [scriptAudioLoading, setScriptAudioLoading] = useState(false);
   const [scriptAudioError, setScriptAudioError] = useState<string | null>(null);
+  const [displayScriptSource, setDisplayScriptSource] = useState<DisplayScriptSource>("server");
+  const [audioBoundFingerprint, setAudioBoundFingerprint] = useState<string | null>(null);
   const [anchorId, setAnchorId] = useState(readAnchorId);
   const [anchorStyleId, setAnchorStyleId] = useState(readAnchorStyleId);
   const [anchorPlaybackRate, setAnchorPlaybackRate] = useState<AiAnchorPlaybackRate>(
@@ -955,6 +964,8 @@ export default function App() {
   >(() => {});
   const pendingAnchorAutoplayRef = useRef(false);
   const pendingHomeAnchorPlayRef = useRef(false);
+  const autoAudioEnsuredRef = useRef<string | null>(null);
+  const [pushManualPlayVisible, setPushManualPlayVisible] = useState(false);
 
   const {
     playbackState,
@@ -999,6 +1010,25 @@ export default function App() {
   const voiceFeatureEnabled = isPro || isInternalAccessActive();
   const selectedAnchor = useMemo(() => getAnchorById(anchorId), [anchorId]);
   const selectedAnchorStyle = useMemo(() => getStyleById(anchorStyleId), [anchorStyleId]);
+
+  const currentScriptFingerprint = useMemo(() => {
+    if (
+      displayScriptSource === "server" &&
+      isScriptUuid(dailyRadioState.lastEntryId ?? "")
+    ) {
+      return buildServerScriptFingerprint(dailyRadioState.lastEntryId!);
+    }
+    if (aiLastFp && typeof aiLastSavedAt === "number") {
+      return buildManualScriptFingerprint(aiLastSavedAt, aiLastFp);
+    }
+    return null;
+  }, [
+    displayScriptSource,
+    dailyRadioState.lastEntryId,
+    aiLastFp,
+    aiLastSavedAt,
+  ]);
+
   const scriptAudioStaleReason = useMemo(
     () =>
       getScriptAudioStaleReason(
@@ -1016,7 +1046,38 @@ export default function App() {
       anchorStyleId,
     ]
   );
-  const anchorAudioReady = Boolean(activeScriptAudioUrl && !scriptAudioStaleReason);
+  const anchorAudioReady = isScriptAudioBound(
+    audioBoundFingerprint,
+    currentScriptFingerprint,
+    activeScriptAudioUrl,
+    scriptAudioStaleReason
+  );
+
+  const clearScriptAudioBinding = useCallback(() => {
+    setActiveScriptAudioUrl(null);
+    setCachedScriptAudioVoice(null);
+    setCachedScriptAudioStyle(null);
+    setAudioBoundFingerprint(null);
+    setScriptAudioError(null);
+    autoAudioEnsuredRef.current = null;
+    anchorActions.stop();
+    anchorActions.setAudioUrl(null);
+  }, [anchorActions]);
+
+  const bindScriptAudio = useCallback(
+    (
+      audioUrl: string,
+      fingerprint: string,
+      meta?: { voice?: string; style?: string }
+    ) => {
+      setActiveScriptAudioUrl(audioUrl);
+      setCachedScriptAudioVoice(meta?.voice ?? null);
+      setCachedScriptAudioStyle(meta?.style ?? null);
+      setAudioBoundFingerprint(fingerprint);
+      setScriptAudioError(null);
+    },
+    []
+  );
   const syncAnchorPrefsToCloud = useCallback(() => {
     if (!isSupabaseConfigured()) return;
     void syncUserNewsPreferences({
@@ -2009,6 +2070,8 @@ export default function App() {
 
   const loadAiHistoryEntry = useCallback((entry: AiHistoryEntry) => {
     const parsed = parseAiSummaryContent(entry.script, entry.highlights);
+    setDisplayScriptSource("manual");
+    clearScriptAudioBinding();
     setAiScript(parsed.script);
     setAiHighlights(
       parsed.highlights.length > 0 ? parsed.highlights : entry.highlights ?? []
@@ -2019,7 +2082,7 @@ export default function App() {
     setAiError(null);
     setActiveAiHistoryId(entry.id);
     setTab("player");
-  }, []);
+  }, [clearScriptAudioBinding]);
 
   const copyAiScriptText = async (text: string) => {
     const t = text.trim();
@@ -2038,6 +2101,8 @@ export default function App() {
   const playAiHistoryEntry = useCallback(
     (entry: AiHistoryEntry) => {
       const parsed = parseAiSummaryContent(entry.script, entry.highlights);
+      setDisplayScriptSource("manual");
+      clearScriptAudioBinding();
       setAiScript(parsed.script);
       setAiHighlights(
         parsed.highlights.length > 0 ? parsed.highlights : entry.highlights ?? []
@@ -2050,7 +2115,7 @@ export default function App() {
       setTab("player");
       startPlayback(parsed.script);
     },
-    [startPlayback]
+    [startPlayback, clearScriptAudioBinding]
   );
 
   const openAiAnalysis = () => {
@@ -2220,6 +2285,8 @@ ${newsText}
           if (!cached.script) {
             /* 快取損壞，改走 API */
           } else {
+          setDisplayScriptSource("manual");
+          clearScriptAudioBinding();
           setAiError(null);
           setAiScript(cached.script);
           setAiHighlights(cached.highlights);
@@ -2247,16 +2314,10 @@ ${newsText}
       setAiScript("");
       setAiHighlights([]);
       setAiJsonFallback(false);
-      setActiveScriptAudioUrl(null);
-      setCachedScriptAudioVoice(null);
-      setCachedScriptAudioStyle(null);
-      setScriptAudioError(null);
+      clearScriptAudioBinding();
     } else {
       setAiLoading(true);
-      setActiveScriptAudioUrl(null);
-      setCachedScriptAudioVoice(null);
-      setCachedScriptAudioStyle(null);
-      setScriptAudioError(null);
+      clearScriptAudioBinding();
     }
     try {
       const res = await fetch(apiUrl("summary"), {
@@ -2265,6 +2326,8 @@ ${newsText}
         body: JSON.stringify({
           duration,
           deepMode,
+          displayName: readUserDisplayName(),
+          anchorName: selectedAnchor.name,
           items: buildSummaryApiItems(picked, {
             keyword: customKeyword,
             topics: selectedTopics,
@@ -2364,6 +2427,7 @@ ${newsText}
         setActiveScriptAudioUrl(null);
         setCachedScriptAudioVoice(null);
         setCachedScriptAudioStyle(null);
+        setAudioBoundFingerprint(null);
         setScriptAudioError(null);
         setDailyRadioState(
           markDailyGenerationComplete(
@@ -2372,7 +2436,12 @@ ${newsText}
             "app"
           )
         );
+        if (serverId) {
+          setDisplayScriptSource("server");
+        }
       } else {
+        setDisplayScriptSource("manual");
+        clearScriptAudioBinding();
         setAiQuota((prev) => {
           const today = todayYmdLocal();
           const base = prev.date === today ? prev : { date: today, used: 0 };
@@ -2429,16 +2498,34 @@ ${newsText}
 
     if (result.kind === "ready") {
       const s = result.script;
+      setDisplayScriptSource("server");
       setAiScript(s.scriptText);
       setAiHighlights([]);
       setAiJsonFallback(false);
       setSelectedScriptDuration(DAILY_AUTO_DURATION);
       setAiDuration(DAILY_AUTO_DURATION);
       setAiError(null);
-      setActiveScriptAudioUrl(s.audioUrl ?? null);
-      setCachedScriptAudioVoice(s.audioVoice ?? null);
-      setCachedScriptAudioStyle(s.audioStyle ?? null);
-      setScriptAudioError(null);
+      const serverFingerprint = buildServerScriptFingerprint(s.id);
+      if (
+        s.audioUrl &&
+        isTodayScriptAudioReady(
+          s.scriptDate,
+          todayDailyScriptYmd(),
+          s.audioUrl,
+          s.audioExpiresAt,
+          s.audioVoice ?? null,
+          s.audioStyle ?? null,
+          selectedAnchor.voice,
+          anchorStyleId
+        )
+      ) {
+        bindScriptAudio(s.audioUrl, serverFingerprint, {
+          voice: s.audioVoice ?? undefined,
+          style: s.audioStyle ?? undefined,
+        });
+      } else {
+        clearScriptAudioBinding();
+      }
       setDailyRadioState(
         markDailyGenerationComplete(
           s.id,
@@ -2479,7 +2566,7 @@ ${newsText}
       setServerSyncState("idle");
     }
     return null;
-  }, []);
+  }, [bindScriptAudio, clearScriptAudioBinding, selectedAnchor.voice, anchorStyleId]);
 
   const currentAiFavoriteId = useMemo(() => {
     if (!aiLastFp) return null;
@@ -2503,6 +2590,8 @@ ${newsText}
     if (!voiceFeatureEnabled) return;
     if (anchorAudioReady && activeScriptAudioUrl) {
       anchorActions.setAudioUrl(activeScriptAudioUrl);
+    } else {
+      anchorActions.setAudioUrl(null);
     }
   }, [voiceFeatureEnabled, anchorAudioReady, activeScriptAudioUrl, anchorActions]);
 
@@ -2541,35 +2630,28 @@ ${newsText}
     setScriptAudioLoading(true);
 
     try {
-      let scriptId =
-        override?.scriptId ??
-        (isScriptUuid(dailyRadioState.lastEntryId) ? dailyRadioState.lastEntryId : null);
+      let scriptId = override?.scriptId ?? null;
 
       if (!scriptId) {
-        console.log("[RealVoice] no UUID scriptId, saving app script first");
-        const savedId = await saveAppGeneratedDailyScript({
-          scriptText: script,
-          title:
-            dailyRadioState.lastRadioSlot === "evening"
-              ? "今日 AI 晚報"
-              : "今日 AI 早報",
-          radioSlot: dailyRadioState.lastRadioSlot ?? "morning",
-          sourceNews: selectedNews.map((n) => ({
-            title: n.title,
-            source: n.source,
-            topic: n.topic,
-          })),
-        });
-        if (savedId) {
-          scriptId = savedId;
-          setDailyRadioState(
-            markDailyGenerationComplete(
-              savedId,
-              selectedScriptDuration ?? aiDuration,
-              dailyRadioState.generationSource ?? "app",
-              dailyRadioState.lastRadioSlot ?? "morning"
-            )
-          );
+        if (
+          displayScriptSource === "server" &&
+          isScriptUuid(dailyRadioState.lastEntryId ?? "")
+        ) {
+          scriptId = dailyRadioState.lastEntryId;
+        } else {
+          console.log("[RealVoice] saving manual script before audio generation");
+          const savedId = await saveAppGeneratedDailyScript({
+            scriptText: script,
+            title: "手動生成 AI 主播稿",
+            sourceNews: selectedNews.map((n) => ({
+              title: n.title,
+              source: n.source,
+              topic: n.topic,
+            })),
+          });
+          if (savedId) {
+            scriptId = savedId;
+          }
         }
       }
 
@@ -2617,14 +2699,23 @@ ${newsText}
       });
 
       if (result.ok) {
-        setActiveScriptAudioUrl(result.audioUrl);
-        setCachedScriptAudioVoice(result.voice ?? voice);
-        setCachedScriptAudioStyle(result.style ?? style);
-        setScriptAudioError(null);
+        const fingerprint =
+          displayScriptSource === "server" && isScriptUuid(scriptId)
+            ? buildServerScriptFingerprint(scriptId)
+            : typeof aiLastSavedAt === "number" && aiLastFp
+              ? buildManualScriptFingerprint(aiLastSavedAt, aiLastFp)
+              : `adhoc:${scriptId}`;
+        bindScriptAudio(result.audioUrl, fingerprint, {
+          voice: result.voice ?? voice,
+          style: result.style ?? style,
+        });
         if (pendingAnchorAutoplayRef.current || pendingHomeAnchorPlayRef.current) {
           pendingAnchorAutoplayRef.current = false;
           pendingHomeAnchorPlayRef.current = false;
-          void anchorActions.play(result.audioUrl);
+          void anchorActions.play(result.audioUrl).then(
+            () => setPushManualPlayVisible(false),
+            () => setPushManualPlayVisible(true)
+          );
         }
         return true;
       }
@@ -2640,11 +2731,13 @@ ${newsText}
   }, [
     aiScript,
     aiDuration,
+    aiLastFp,
+    aiLastSavedAt,
     anchorId,
     anchorStyleId,
-    dailyRadioState.generationSource,
+    bindScriptAudio,
+    displayScriptSource,
     dailyRadioState.lastEntryId,
-    dailyRadioState.lastRadioSlot,
     openProUpgrade,
     selectedNews,
     selectedScriptDuration,
@@ -2652,11 +2745,13 @@ ${newsText}
     currentAiIsFavorited,
     selectedAnchor.voice,
     anchorActions,
+    setPushManualPlayVisible,
   ]);
 
   const ensureDailyAnchorAudio = useCallback(
     async (serverScript?: ServerDailyScript | null) => {
       if (!voiceFeatureEnabled) return;
+      if (displayScriptSource !== "server") return;
       if (serverScript) {
         if (
           isTodayScriptAudioReady(
@@ -2679,6 +2774,7 @@ ${newsText}
     },
     [
       voiceFeatureEnabled,
+      displayScriptSource,
       selectedAnchor.voice,
       anchorStyleId,
       anchorAudioReady,
@@ -2799,11 +2895,19 @@ ${newsText}
 
   const handlePushOpenAnchorPlay = useCallback(
     async (script: ServerDailyScript, audioReadyFromPush?: boolean) => {
+      console.log("[PushOpen] push open received");
       console.log("[PushOpen] audioReady", audioReadyFromPush ?? false);
       console.log("[PushOpen] script loaded", {
         scriptId: script.id,
         scriptDate: script.scriptDate,
       });
+
+      const playbackVoice = voiceFeatureEnabled
+        ? selectedAnchor.voice
+        : DEFAULT_AI_ANCHOR_SETTINGS.voice;
+      const playbackStyle = voiceFeatureEnabled
+        ? anchorStyleId
+        : DEFAULT_AI_ANCHOR_SETTINGS.style;
 
       const audioUrlReady = isTodayScriptAudioReady(
         script.scriptDate,
@@ -2812,60 +2916,76 @@ ${newsText}
         script.audioExpiresAt,
         script.audioVoice,
         script.audioStyle,
-        selectedAnchor.voice,
-        anchorStyleId
+        playbackVoice,
+        playbackStyle
       );
 
-      console.log("[PushOpen] audio_url exists", audioUrlReady);
+      const hasPlayableUrl = Boolean(script.audioUrl?.trim());
+      const shouldTryMp3 =
+        hasPlayableUrl && (audioUrlReady || audioReadyFromPush === true);
+
+      console.log("[PushOpen] anchor audio url exists", hasPlayableUrl);
+      console.log("[PushOpen] shouldTryMp3", shouldTryMp3);
 
       pushAutoplayScheduledRef.current = true;
       pushAnchorAutoplayPendingRef.current = false;
+      setPushManualPlayVisible(false);
 
-      if (audioUrlReady && script.audioUrl) {
-        console.log("[PushOpen] play AI MP3");
+      if (shouldTryMp3 && script.audioUrl) {
+        console.log("[PushOpen] anchorPlayer.play called");
         console.log("[PushOpen] skip speechSynthesis");
         stopPlayback();
+        setDisplayScriptSource("server");
+        bindScriptAudio(script.audioUrl, buildServerScriptFingerprint(script.id), {
+          voice: script.audioVoice ?? playbackVoice,
+          style: script.audioStyle ?? playbackStyle,
+        });
         anchorActions.setAudioUrl(script.audioUrl);
-        await anchorActions.play(script.audioUrl);
+        try {
+          await anchorActions.play(script.audioUrl);
+          console.log("[PushOpen] autoplay success");
+          setPushManualPlayVisible(false);
+          return;
+        } catch (err) {
+          console.log(
+            "[PushOpen] autoplay blocked",
+            err instanceof Error ? err.message : String(err)
+          );
+          setPushManualPlayVisible(true);
+          return;
+        }
+      }
+
+      if (voiceFeatureEnabled) {
+        console.log("[PushOpen] AI anchor audio preparing — generating MP3");
+        pendingAnchorAutoplayRef.current = true;
+        stopPlayback();
+
+        const generated = await handleGenerateScriptAudio({
+          scriptId: script.id,
+          scriptText: script.scriptText,
+        });
+
+        if (generated) {
+          return;
+        }
+
+        pendingAnchorAutoplayRef.current = false;
+        console.log("[PushOpen] MP3 generation failed — show manual play prompt");
+        setPushManualPlayVisible(true);
         return;
       }
 
-      if (!voiceFeatureEnabled) {
-        console.log(
-          "[PushOpen] fallback to text speech only because user is not Pro"
-        );
-        pushAutoplayScheduledRef.current = false;
-        schedulePushAutoplay();
-        return;
-      }
-
-      console.log("[PushOpen] AI anchor audio preparing — generating MP3");
-      pendingAnchorAutoplayRef.current = true;
-      stopPlayback();
-
-      const generated = await handleGenerateScriptAudio({
-        scriptId: script.id,
-        scriptText: script.scriptText,
-      });
-
-      if (generated) {
-        return;
-      }
-
-      pendingAnchorAutoplayRef.current = false;
-      console.log(
-        "[PushOpen] fallback to text speech only because MP3 generation failed"
-      );
-      pushAutoplayScheduledRef.current = false;
-      schedulePushAutoplay();
+      console.log("[PushOpen] no MP3 available — show manual play prompt (no TTS autoplay)");
+      setPushManualPlayVisible(true);
     },
     [
       selectedAnchor.voice,
       anchorStyleId,
       voiceFeatureEnabled,
+      bindScriptAudio,
       stopPlayback,
       anchorActions,
-      schedulePushAutoplay,
       handleGenerateScriptAudio,
     ]
   );
@@ -2878,12 +2998,15 @@ ${newsText}
     (source: "local_reminder" | "server_completed" | DailyRadioPushOpenInfo) => {
       void (async () => {
         if (typeof source === "object") {
+          console.log("[PushOpen] normalized openInfo", source);
           const preferAnchorAudio =
-            source.openTarget === "ai_anchor_audio" || source.autoPlay === true;
-          console.log("[PushOpen] openTarget", source.openTarget ?? null);
+            source.openTarget === "ai_anchor_audio" ||
+            source.autoPlay === true ||
+            source.audioReady === true;
 
           cancelScheduledAutoplay();
           stopPlayback();
+          setPushManualPlayVisible(false);
 
           if (preferAnchorAudio) {
             pushAnchorAutoplayPendingRef.current = true;
@@ -2891,7 +3014,8 @@ ${newsText}
             clearAutoplayDailyFlag();
           } else {
             pushAnchorAutoplayPendingRef.current = false;
-            setAutoplayDailyFlag();
+            clearAutoplayDailyFlag();
+            clearAutoplayAnchorAudioFlag();
           }
 
           const ready = await refreshServerDailyScript({
@@ -2899,39 +3023,28 @@ ${newsText}
             radioSlot: source.radioSlot,
           });
 
-          if (!ready) return;
+          if (!ready) {
+            pushAnchorAutoplayPendingRef.current = false;
+            clearAutoplayAnchorAudioFlag();
+            return;
+          }
 
           setTab("player");
 
           if (preferAnchorAudio) {
             await handlePushOpenAnchorPlay(ready, source.audioReady);
-          } else if (consumeAutoplayDailyFlag()) {
-            if (voiceFeatureEnabled) {
-              console.log(
-                "[PushOpen] skip speechSynthesis for Pro on fallback text push"
-              );
-            } else {
-              schedulePushAutoplay();
-            }
           }
           return;
         }
         if (source === "server_completed") {
-          setAutoplayDailyFlag();
-          console.log("[DailyRadio] opened from server push notification");
+          console.log("[DailyRadio] opened from legacy server push notification");
+          cancelScheduledAutoplay();
+          stopPlayback();
+          setPushManualPlayVisible(false);
           const ready = await refreshServerDailyScript();
-          if (ready) {
-            setTab("player");
-            if (consumeAutoplayDailyFlag()) {
-              if (voiceFeatureEnabled) {
-                console.log(
-                  "[PushOpen] skip speechSynthesis for Pro on legacy text push"
-                );
-              } else {
-                schedulePushAutoplay();
-              }
-            }
-          }
+          if (!ready) return;
+          setTab("player");
+          await handlePushOpenAnchorPlay(ready, true);
           return;
         }
         console.log("[DailyRadio] opened from local reminder (not assuming server ready)");
@@ -2943,8 +3056,6 @@ ${newsText}
       stopPlayback,
       refreshServerDailyScript,
       handlePushOpenAnchorPlay,
-      schedulePushAutoplay,
-      voiceFeatureEnabled,
     ]
   );
 
@@ -3080,11 +3191,11 @@ ${newsText}
     voiceFeatureEnabled,
   ]);
 
-  const autoAudioEnsuredRef = useRef<string | null>(null);
   useEffect(() => {
     if (!voiceFeatureEnabled) return;
     if (pushAnchorAutoplayPendingRef.current) return;
     if (pushAutoplayScheduledRef.current) return;
+    if (displayScriptSource !== "server") return;
     if (dailyRadioState.status !== "ready") return;
     if (!aiScript.trim()) return;
     if (anchorAudioReady || scriptAudioLoading) return;
@@ -3100,6 +3211,7 @@ ${newsText}
     anchorAudioReady,
     scriptAudioLoading,
     ensureDailyAnchorAudio,
+    displayScriptSource,
   ]);
 
   useEffect(() => {
@@ -3195,6 +3307,8 @@ ${newsText}
   const loadAiFavorite = useCallback(
     (fav: AiFavoriteEntry, autoplay: boolean) => {
       const parsed = parseAiSummaryContent(fav.script, fav.highlights);
+      setDisplayScriptSource("manual");
+      clearScriptAudioBinding();
       setAiScript(parsed.script);
       setAiHighlights(
         parsed.highlights.length > 0 ? parsed.highlights : fav.highlights ?? []
@@ -3210,7 +3324,7 @@ ${newsText}
       setTab("player");
       if (autoplay) startPlayback(parsed.script);
     },
-    [startPlayback]
+    [startPlayback, clearScriptAudioBinding]
   );
 
   const handleSaveDisplayName = useCallback(
@@ -3360,6 +3474,7 @@ ${newsText}
               anchorAudioReady={anchorAudioReady}
               scriptAudioLoading={scriptAudioLoading}
               scriptAudioStaleReason={scriptAudioStaleReason}
+              displayScriptSource={displayScriptSource}
               homeAnchorPlaying={anchorPlayer.isPlaying}
               hasScript={aiScript.trim().length > 0}
               aiLoading={aiLoading}
@@ -3370,6 +3485,50 @@ ${newsText}
               onRefresh={updateMyNews}
               onSettingsTopics={() => setTab("settings")}
               loadingNews={loading}
+            />
+
+            <AiSummaryPanel
+              variant="home"
+              aiLoading={aiLoading}
+              aiError={aiError}
+              aiScript={aiScript}
+              aiHighlights={aiHighlights}
+              aiJsonFallback={aiJsonFallback}
+              selectedScriptDuration={selectedScriptDuration}
+              scriptFontSize={scriptFontSize}
+              onScriptFontSizeChange={setScriptFontSize}
+              isSpeaking={playbackActive}
+              isPaused={playbackState === "paused"}
+              onPlayScript={(script) => {
+                startPlayback(script);
+                setTab("player");
+              }}
+              onStopScript={stopPlayback}
+              onCopyScript={() => void copyAiScript()}
+              onOpenAnalysis={openAiAnalysis}
+              selectedNewsCount={selectedNews.length}
+              isPro={isPro}
+              aiQuotaRemaining={aiQuotaRemaining}
+              aiDailyLimit={aiDailyLimit}
+              onOpenProModal={openProUpgrade}
+              aiFavorited={currentAiIsFavorited}
+              onToggleAiFavorite={toggleAiFavorite}
+              voiceFeatureEnabled={voiceFeatureEnabled}
+              anchor={selectedAnchor}
+              anchorStyle={selectedAnchorStyle}
+              anchorPlaybackRate={anchorPlaybackRate}
+              onAnchorPlaybackRateChange={handleAnchorPlaybackRateChange}
+              anchorVolumeGain={anchorVolumeGain}
+              onAnchorVolumeGainChange={handleAnchorVolumeGainChange}
+              scriptAudioUrl={anchorAudioReady ? activeScriptAudioUrl : null}
+              scriptAudioLoading={scriptAudioLoading}
+              scriptAudioError={scriptAudioError}
+              scriptAudioStaleReason={scriptAudioStaleReason}
+              onGenerateScriptAudio={() => void handleGenerateScriptAudio()}
+              anchorAudioReady={anchorAudioReady}
+              displayScriptSource={displayScriptSource}
+              radioSlot={dailyRadioState.lastRadioSlot}
+              onRegenerateAnchor={() => void handleGenerateScriptAudio()}
             />
 
             <AiDailyInsightCard
@@ -3420,48 +3579,6 @@ ${newsText}
               onSettingsTopics={() => setTab("settings")}
             />
 
-            <AiSummaryPanel
-              variant="home"
-              aiLoading={aiLoading}
-              aiError={aiError}
-              aiScript={aiScript}
-              aiHighlights={aiHighlights}
-              aiJsonFallback={aiJsonFallback}
-              selectedScriptDuration={selectedScriptDuration}
-              scriptFontSize={scriptFontSize}
-              onScriptFontSizeChange={setScriptFontSize}
-              isSpeaking={playbackActive}
-              isPaused={playbackState === "paused"}
-              onPlayScript={(script) => {
-                startPlayback(script);
-                setTab("player");
-              }}
-              onStopScript={stopPlayback}
-              onCopyScript={() => void copyAiScript()}
-              onOpenAnalysis={openAiAnalysis}
-              selectedNewsCount={selectedNews.length}
-              isPro={isPro}
-              aiQuotaRemaining={aiQuotaRemaining}
-              aiDailyLimit={aiDailyLimit}
-              onOpenProModal={openProUpgrade}
-              aiFavorited={currentAiIsFavorited}
-              onToggleAiFavorite={toggleAiFavorite}
-              voiceFeatureEnabled={voiceFeatureEnabled}
-              anchor={selectedAnchor}
-              anchorStyle={selectedAnchorStyle}
-              anchorPlaybackRate={anchorPlaybackRate}
-              onAnchorPlaybackRateChange={handleAnchorPlaybackRateChange}
-              anchorVolumeGain={anchorVolumeGain}
-              onAnchorVolumeGainChange={handleAnchorVolumeGainChange}
-              scriptAudioUrl={activeScriptAudioUrl}
-              scriptAudioLoading={scriptAudioLoading}
-              scriptAudioError={scriptAudioError}
-              scriptAudioStaleReason={scriptAudioStaleReason}
-              onGenerateScriptAudio={() => void handleGenerateScriptAudio()}
-              anchorAudioReady={anchorAudioReady}
-              onRegenerateAnchor={() => void handleGenerateScriptAudio()}
-            />
-
             <SiteFooter />
           </>
         )}
@@ -3478,11 +3595,14 @@ ${newsText}
                     onPlaybackRateChange={handleAnchorPlaybackRateChange}
                     volumeGain={anchorVolumeGain}
                     onVolumeGainChange={handleAnchorVolumeGainChange}
-                    audioUrl={activeScriptAudioUrl}
+                    audioUrl={anchorAudioReady ? activeScriptAudioUrl : null}
                     loading={scriptAudioLoading}
                     error={scriptAudioError}
                     staleReason={scriptAudioStaleReason}
                     onGenerate={() => void handleGenerateScriptAudio()}
+                    forceManualPlayPrompt={pushManualPlayVisible}
+                    displayScriptSource={displayScriptSource}
+                    radioSlot={dailyRadioState.lastRadioSlot}
                   />
                   {scriptAudioError && !scriptAudioLoading ? (
                     <div style={styles.anchorFallbackHint}>
@@ -3491,6 +3611,25 @@ ${newsText}
                   ) : null}
                 </div>
               ) : null
+            ) : anchorAudioReady && activeScriptAudioUrl ? (
+              <div style={styles.playerVoicePrimary}>
+                <AiAnchorBroadcastPanel
+                  anchor={getAnchorById(DEFAULT_AI_ANCHOR_SETTINGS.anchorId)}
+                  style={getStyleById(DEFAULT_AI_ANCHOR_SETTINGS.style)}
+                  playbackRate={1.0}
+                  onPlaybackRateChange={() => {}}
+                  volumeGain={1.0}
+                  onVolumeGainChange={() => {}}
+                  audioUrl={activeScriptAudioUrl}
+                  loading={scriptAudioLoading}
+                  error={scriptAudioError}
+                  staleReason={scriptAudioStaleReason}
+                  onGenerate={() => {}}
+                  forceManualPlayPrompt={pushManualPlayVisible}
+                  displayScriptSource="server"
+                  radioSlot={dailyRadioState.lastRadioSlot}
+                />
+              </div>
             ) : (
               <div style={styles.playerVoicePrimary}>
                 <AiAnchorProLockCard onUpgrade={openProUpgrade} />
@@ -3571,11 +3710,14 @@ ${newsText}
               onAnchorPlaybackRateChange={handleAnchorPlaybackRateChange}
               anchorVolumeGain={anchorVolumeGain}
               onAnchorVolumeGainChange={handleAnchorVolumeGainChange}
-              scriptAudioUrl={activeScriptAudioUrl}
+              scriptAudioUrl={anchorAudioReady ? activeScriptAudioUrl : null}
               scriptAudioLoading={scriptAudioLoading}
               scriptAudioError={scriptAudioError}
               scriptAudioStaleReason={scriptAudioStaleReason}
               onGenerateScriptAudio={() => void handleGenerateScriptAudio()}
+              anchorAudioReady={anchorAudioReady}
+              displayScriptSource={displayScriptSource}
+              radioSlot={dailyRadioState.lastRadioSlot}
             />
 
             <NewsList
@@ -5559,6 +5701,7 @@ function HomeStationHero({
   anchorAudioReady,
   scriptAudioLoading,
   scriptAudioStaleReason,
+  displayScriptSource,
   homeAnchorPlaying,
   hasScript,
   aiLoading,
@@ -5589,6 +5732,7 @@ function HomeStationHero({
   anchorAudioReady: boolean;
   scriptAudioLoading: boolean;
   scriptAudioStaleReason: import("./aiAnchorSettings").ScriptAudioStaleReason;
+  displayScriptSource: import("./scriptAudioBinding").DisplayScriptSource;
   homeAnchorPlaying: boolean;
   hasScript: boolean;
   aiLoading: boolean;
@@ -5629,17 +5773,23 @@ function HomeStationHero({
 
   const primaryCtaLabel = generating
     ? voiceFeatureEnabled && hasScript && scriptAudioLoading
-      ? "AI 主播準備中…"
+      ? "AI 真人語音生成中…"
       : "準備中…"
     : ready
       ? voiceFeatureEnabled
         ? homeAnchorPlaying
           ? "🎙 播放中…"
           : anchorAudioReady
-            ? "🎙 收聽今日 AI 主播"
+            ? displayScriptSource === "server" && radioSlot === "evening"
+              ? "▶ 播放晚報 AI 真人語音"
+              : displayScriptSource === "server"
+                ? "▶ 播放早報 AI 真人語音"
+                : "▶ 播放 AI 真人語音"
             : proAudioPreparing
-              ? "AI 主播準備中…"
-              : "🎙 收聽今日 AI 主播"
+              ? "AI 真人語音生成中…"
+              : displayScriptSource === "manual"
+                ? "🎙️ 生成這篇 AI 真人語音"
+                : "🎙️ 生成 AI 真人語音"
         : "▶ 立即播放"
       : "立即生成";
 
@@ -5705,7 +5855,15 @@ function HomeStationHero({
       </button>
       {ready && voiceFeatureEnabled && anchorAudioReady ? (
         <div style={styles.stationHeroPlaySubtitle}>
-          {anchorName} 已準備好今天 {duration} 分鐘新聞
+          {displayScriptSource === "server" && radioSlot === "evening"
+            ? `🎧 晚報 AI 音訊已就緒 · ${anchorName} · ${duration} 分鐘`
+            : displayScriptSource === "server"
+              ? `🎧 早報 AI 音訊已就緒 · ${anchorName} · ${duration} 分鐘`
+              : `🎧 這篇 AI 音訊已就緒 · ${anchorName} · ${duration} 分鐘`}
+        </div>
+      ) : ready && voiceFeatureEnabled && !anchorAudioReady && !scriptAudioLoading && displayScriptSource === "manual" ? (
+        <div style={styles.stationHeroPlaySubtitle}>
+          新稿尚未生成 AI 真人語音，點上方按鈕開始生成
         </div>
       ) : null}
       {ready && voiceFeatureEnabled && scriptAudioStaleReason ? (
@@ -5959,6 +6117,8 @@ function AiSummaryPanel({
   onGenerateScriptAudio,
   anchorAudioReady = false,
   onRegenerateAnchor,
+  displayScriptSource = "manual",
+  radioSlot = null,
 }: {
   variant?: "home" | "player" | "full";
   aiLoading: boolean;
@@ -5996,6 +6156,8 @@ function AiSummaryPanel({
   onGenerateScriptAudio?: () => void;
   anchorAudioReady?: boolean;
   onRegenerateAnchor?: () => void;
+  displayScriptSource?: import("./scriptAudioBinding").DisplayScriptSource;
+  radioSlot?: import("./radioSlot").RadioSlot | null;
 }) {
   const scriptFontPx = SCRIPT_FONT_PX[scriptFontSize];
   const playbackActive = isSpeaking || isPaused;
@@ -6003,6 +6165,14 @@ function AiSummaryPanel({
   const isHome = variant === "home";
   const isPlayer = variant === "player";
   const [playerScriptOpen, setPlayerScriptOpen] = useState(true);
+  const audioReadyLabel =
+    displayScriptSource === "server" && radioSlot === "evening"
+      ? "🎧 晚報 AI 音訊已就緒"
+      : displayScriptSource === "server"
+        ? "🎧 早報 AI 音訊已就緒"
+        : "🎧 這篇 AI 音訊已就緒";
+  const audioGenerateLabel = "🎙️ 生成這篇 AI 真人語音";
+  const audioLoadingLabel = "AI 真人語音生成中…";
 
   if (isHome && !aiLoading && !aiError && !hasContent) {
     return null;
@@ -6101,10 +6271,22 @@ function AiSummaryPanel({
                     </button>
                   ) : null}
                   {isHome && voiceFeatureEnabled && anchorAudioReady ? (
-                    <span style={styles.aiAnchorReadyHint}>🎙 AI 主播音訊已就緒</span>
+                    <span style={styles.aiAnchorReadyHint}>{audioReadyLabel}</span>
                   ) : null}
                   {isHome && voiceFeatureEnabled && scriptAudioLoading && !anchorAudioReady ? (
-                    <span style={styles.aiAnchorReadyHint}>AI 主播準備中…</span>
+                    <span style={styles.aiAnchorReadyHint}>{audioLoadingLabel}</span>
+                  ) : null}
+                  {isHome && voiceFeatureEnabled && !anchorAudioReady && !scriptAudioLoading && hasContent && onGenerateScriptAudio ? (
+                    <button
+                      type="button"
+                      onClick={() => onGenerateScriptAudio()}
+                      style={styles.aiScriptPlayBtn}
+                    >
+                      {audioGenerateLabel}
+                    </button>
+                  ) : null}
+                  {isHome && voiceFeatureEnabled && scriptAudioError && !scriptAudioLoading ? (
+                    <span style={styles.aiSummaryError}>{scriptAudioError}</span>
                   ) : null}
                   <button
                     type="button"
@@ -6719,7 +6901,6 @@ const styles: Record<string, CSSProperties> = {
     height: "100%",
     margin: 0,
     padding: 0,
-    overflowX: "hidden",
     background: TOKENS.bgPage,
     color: TOKENS.textPrimary,
     fontFamily:
@@ -7035,6 +7216,10 @@ const styles: Record<string, CSSProperties> = {
     gap: "14px",
     marginTop: "4px",
     paddingBottom: "calc(96px + env(safe-area-inset-bottom, 0px))",
+  },
+  homeScriptSlotWrap: {
+    marginTop: "8px",
+    marginBottom: "10px",
   },
   topicNewsGroup: {
     borderRadius: "14px",

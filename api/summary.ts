@@ -59,13 +59,33 @@ const ENTITY_PRESERVATION_RULES = `【實體名稱保留｜硬性規則】
 若標題或摘要真的沒有姓名，才可保守寫「一名球員」等，且不可自行編造姓名。
 深度解析須以提供的標題、摘要、來源為基礎，不得補出原資料沒有的細節；分析可保守，不可把推測講成事實。`;
 
-const OUTPUT_SELF_CHECK = `【輸出前自我檢查】
+function buildAnchorNamingRules(listenerName: string, anchorName: string): string {
+  const listener = listenerName.trim() || "聽眾朋友";
+  const anchor = anchorName.trim() || "Emily";
+  return `【主播自稱｜硬性規則】
+聽眾稱呼（僅稱呼聽眾）：${listener}
+主播名稱（主播自稱用）：${anchor}
+開場可參考：「${listener}，歡迎收聽，我是主播 ${anchor}。」
+禁止主播自稱為聽眾名稱，禁止出現：
+- 「我是 ${listener}」
+- 「我是主播 ${listener}」
+- 「我是主持人 ${listener}」
+- 「我是你的 AI 主播 ${listener}」
+主播自稱必須使用 ${anchor}，聽眾稱呼只能使用 ${listener}。`;
+}
+
+const OUTPUT_SELF_CHECK = (listenerName: string, anchorName: string) => {
+  const listener = listenerName.trim() || "聽眾朋友";
+  const anchor = anchorName.trim() || "Emily";
+  return `【輸出前自我檢查】
 輸出 JSON 前請確認：
 1. 每則主要新聞是否都明確寫出人名、球隊、公司、幣種或事件名稱？
 2. 是否用「這位球員」「某公司」「該幣種」等取代原本應出現的名稱？
 3. 是否補充了原新聞沒有的細節（薪資、交易、季後賽等）？
 4. 是否保持新聞整理與市場觀察語氣，未把推測講成定論？
+5. 主播自稱是否使用主播名稱 ${anchor}，而非聽眾名稱 ${listener}？禁止「我是 ${listener}」「我是主播 ${listener}」「我是主持人 ${listener}」「我是你的 AI 主播 ${listener}」。
 若有上述問題，請修正 script 後再輸出。`;
+};
 
 function parseSummaryItem(o: Record<string, unknown>): SummaryItem | null {
   const title = String(o?.title ?? "").trim().slice(0, 500);
@@ -520,6 +540,8 @@ export default async function handler(req: any, res: any) {
   const kind = String(body.kind ?? "").trim();
   const duration = normalizeDuration(body.duration);
   const deepMode = body.deepMode === true || body.mode === "deep";
+  const listenerName = String(body.displayName ?? "").trim() || "聽眾朋友";
+  const anchorName = String(body.anchorName ?? "").trim() || "Emily";
   const rawItems = body.items;
   const itemLimit =
     kind === "dailyInsight" ? 20 : duration >= 10 ? 8 : 5;
@@ -686,6 +708,8 @@ ${listText}`;
 
 ${ENTITY_PRESERVATION_RULES}
 
+${buildAnchorNamingRules(listenerName, anchorName)}
+
 【本次參數】
 - 產稿類型：${outputKind}
 - 模式：${alloc.modeLabel}
@@ -715,7 +739,7 @@ ${financeDisclaimer}
 - 轉場範例：「首先帶您關注…」「接下來深入看…」「快速補充幾則…」「最後提醒…」
 - 字數/句數服務於「聽起來像 ${duration} 分鐘${durationFeel}」，勿為湊字數重複空話。
 
-${OUTPUT_SELF_CHECK}`;
+${OUTPUT_SELF_CHECK(listenerName, anchorName)}`;
 
   const userMsg = `以下為使用者選取的 ${n} 則新聞（含標題、來源、摘要等，請務必保留其中的專有名詞與人名）：
 請先判斷每則重要程度（🔥/⚠️/ℹ️），再依「${alloc.modeLabel}」撰寫。

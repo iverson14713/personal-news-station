@@ -175,15 +175,23 @@ export async function generateAudioForScript(
 
   const script = row as ScriptRow;
 
+  const dbText = (script.script_text || "").trim();
+  const reqText = (input.scriptText || "").trim();
   if (isAudioCacheHit(script, voice, style)) {
-    return {
-      ok: true,
-      audioUrl: script.audio_url!,
-      cached: true,
-      voice: script.audio_voice ?? voice,
-      style: script.audio_style ?? style,
-      audioExpiresAt: script.audio_expires_at,
-    };
+    if (dbText && reqText && dbText !== reqText) {
+      console.log("[generateAudioForScript] cache miss: script text changed", {
+        scriptId: input.scriptId,
+      });
+    } else {
+      return {
+        ok: true,
+        audioUrl: script.audio_url!,
+        cached: true,
+        voice: script.audio_voice ?? voice,
+        style: script.audio_style ?? style,
+        audioExpiresAt: script.audio_expires_at,
+      };
+    }
   }
 
   if (!input.skipQuotaCheck) {

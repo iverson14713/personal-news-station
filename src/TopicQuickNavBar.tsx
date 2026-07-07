@@ -4,9 +4,14 @@ import { TOKENS } from "./theme";
 
 const STICKY_TOP_EXTRA_PX = 4;
 const PHONE_MAX_WIDTH = 460;
+const BOTTOM_NAV_CLEARANCE_PX = 72;
 
 export function getTopicSectionDomId(label: string): string {
-  return `topic-section-${label.replace(/\s+/g, "-")}`;
+  const slug = label
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/[^\w\u4e00-\u9fff\u3400-\u4dbf-]/g, "");
+  return `topic-section-${slug || "unknown"}`;
 }
 
 function measureSafeAreaTopPx(): number {
@@ -56,6 +61,15 @@ export function TopicQuickNavBar({ items }: TopicQuickNavBarProps) {
     root.style.setProperty("--pns-topic-scroll-margin", `${topPx + height + 8}px`);
   }, []);
 
+  const updatePinned = useCallback(() => {
+    const anchor = anchorRef.current;
+    if (!anchor) return;
+    const topPx = measureSafeAreaTopPx();
+    setStickyTopPx(topPx);
+    const rect = anchor.getBoundingClientRect();
+    setPinned(rect.top <= topPx + 0.5);
+  }, []);
+
   useEffect(() => {
     if (items.length === 0) {
       setActiveLabel("");
@@ -82,16 +96,6 @@ export function TopicQuickNavBar({ items }: TopicQuickNavBarProps) {
   }, [items, pinned, syncLayoutVars]);
 
   useEffect(() => {
-    const anchor = anchorRef.current;
-    if (!anchor) return;
-
-    const updatePinned = () => {
-      const topPx = measureSafeAreaTopPx();
-      setStickyTopPx(topPx);
-      const rect = anchor.getBoundingClientRect();
-      setPinned(rect.top <= topPx + 0.5);
-    };
-
     updatePinned();
     window.addEventListener("scroll", updatePinned, { passive: true });
     window.addEventListener("resize", updatePinned);
@@ -99,7 +103,7 @@ export function TopicQuickNavBar({ items }: TopicQuickNavBarProps) {
       window.removeEventListener("scroll", updatePinned);
       window.removeEventListener("resize", updatePinned);
     };
-  }, [items]);
+  }, [items, updatePinned]);
 
   useEffect(() => {
     if (items.length === 0) return;
@@ -176,24 +180,45 @@ export function TopicQuickNavBar({ items }: TopicQuickNavBarProps) {
 
   const scrollToTopic = useCallback(
     (label: string) => {
-      const el = document.getElementById(getTopicSectionDomId(label));
-      if (!el) return;
+      const sectionId = getTopicSectionDomId(label);
+      const scrollToElement = (el: HTMLElement) => {
+        const topPx = measureSafeAreaTopPx();
+        const h = barRef.current?.offsetHeight ?? barHeight;
+        const offset = topPx + h + 8;
 
-      const topPx = measureSafeAreaTopPx();
-      const h = barRef.current?.offsetHeight ?? barHeight;
-      const offset = topPx + h + 8;
+        clickLockRef.current = true;
+        setActiveLabel(label);
+        setPinned(true);
 
-      clickLockRef.current = true;
-      setActiveLabel(label);
+        el.style.scrollMarginTop = `${offset}px`;
+        const targetTop = el.getBoundingClientRect().top + window.scrollY - offset;
+        window.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
 
-      const targetTop = el.getBoundingClientRect().top + window.scrollY - offset;
-      window.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
+        window.setTimeout(() => {
+          const rect = el.getBoundingClientRect();
+          const bottomLimit = window.innerHeight - BOTTOM_NAV_CLEARANCE_PX;
+          if (rect.bottom > bottomLimit) {
+            const adjust = rect.bottom - bottomLimit + 8;
+            window.scrollBy({ top: adjust, behavior: "smooth" });
+          }
+          updatePinned();
+          clickLockRef.current = false;
+        }, 450);
+      };
 
+      const el = document.getElementById(sectionId);
+      if (el) {
+        scrollToElement(el);
+        return;
+      }
+
+      console.warn("[TopicNav] section not found, retrying", { label, sectionId });
       window.setTimeout(() => {
-        clickLockRef.current = false;
-      }, 800);
+        const retryEl = document.getElementById(sectionId);
+        if (retryEl) scrollToElement(retryEl);
+      }, 120);
     },
-    [barHeight]
+    [barHeight, updatePinned]
   );
 
   if (items.length === 0) return null;
@@ -253,10 +278,16 @@ const navStyles: Record<string, CSSProperties> = {
     padding: 0,
   },
   inFlowShell: {
-    position: "relative",
-    zIndex: 20,
+    position: "sticky",
+    top: "var(--pns-sticky-top, env(safe-area-inset-top, 0px))",
+    zIndex: 40,
     marginTop: "4px",
     marginBottom: "6px",
+    width: "100%",
+    maxWidth: `${PHONE_MAX_WIDTH}px`,
+    marginLeft: "auto",
+    marginRight: "auto",
+    boxSizing: "border-box",
   },
   fixedShell: {
     position: "fixed",
@@ -277,7 +308,7 @@ const navStyles: Record<string, CSSProperties> = {
     paddingTop: "6px",
     paddingBottom: "6px",
     background:
-      "linear-gradient(180deg, rgba(2,6,23,.98) 0%, rgba(15,23,42,.96) 100%)",
+      "linear-gradient(180deg, rgba(2,6,23,.98) 0%, rgba(15,23,42,.97) 100%)",
     backdropFilter: "blur(12px)",
     WebkitBackdropFilter: "blur(12px)",
     borderBottom: "1px solid rgba(148,163,184,.22)",

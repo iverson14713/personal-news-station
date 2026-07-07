@@ -85,7 +85,20 @@ type ProcessOptions = {
   force: boolean;
   sendTestPush: boolean;
   targetRadioSlot?: RadioSlot;
+  pushDedup: PushDedupState;
 };
+
+type PushDedupState = {
+  sentDeviceKeys: Set<string>;
+};
+
+function userPlanLabel(user: UserPrefs): "free" | "pro" {
+  return isVoiceFeatureEnabled(user) ? "pro" : "free";
+}
+
+function tokenPrefix(token: string): string {
+  return token.slice(0, 8);
+}
 
 type ScriptRow = {
   id: string;
@@ -161,6 +174,7 @@ Deno.serve(async (req) => {
     sendTestPush: payload.send_test_push === true,
     targetRadioSlot:
       targetSlot === "morning" || targetSlot === "evening" ? targetSlot : undefined,
+    pushDedup: { sentDeviceKeys: new Set<string>() },
   };
 
   console.log("Daily Radio started", {
@@ -385,14 +399,8 @@ async function ensureAnchorAudioBeforePush(
   duration: number,
   radioSlot: RadioSlot
 ): Promise<AnchorAudioPrepareResult> {
-  if (!isVoiceFeatureEnabled(user)) {
-    console.log("[DailyRadioCron] skip anchor audio: voice feature disabled", {
-      user_id: user.user_id,
-      script_date: scriptDate,
-      radio_slot: radioSlot,
-    });
-    return { hasAnchorAudio: false, audioReady: false };
-  }
+  const anchorPrefs = resolveAnchorSettings(user);
+  const isPro = isVoiceFeatureEnabled(user);
 
   const scriptText = scriptRow.script_text?.trim();
   if (!scriptText) {
@@ -400,11 +408,10 @@ async function ensureAnchorAudioBeforePush(
       user_id: user.user_id,
       script_id: scriptRow.id,
       reason: "empty_script",
+      user_plan: userPlanLabel(user),
     });
     return { hasAnchorAudio: false, audioReady: false };
   }
-
-  const anchorPrefs = resolveAnchorSettings(user);
 
   if (isScriptAudioReady(scriptRow, anchorPrefs.voice, anchorPrefs.style)) {
     console.log("[DailyRadioCron] audio generated", {
@@ -412,6 +419,8 @@ async function ensureAnchorAudioBeforePush(
       script_id: scriptRow.id,
       script_date: scriptDate,
       cached: true,
+      user_plan: userPlanLabel(user),
+      anchor_name: anchorPrefs.anchorName,
     });
     return { hasAnchorAudio: true, audioReady: true };
   }
@@ -423,6 +432,8 @@ async function ensureAnchorAudioBeforePush(
     voice: anchorPrefs.voice,
     style: anchorPrefs.style,
     anchor_id: anchorPrefs.anchorId,
+    user_plan: userPlanLabel(user),
+    trigger_path: "ensure_audio_and_push",
   });
 
   const audioResult = await generateAudioForScript({
@@ -730,9 +741,11 @@ async function processUserSlot(
       );
     }
 
+    const anchorPrefs = resolveAnchorSettings(user);
     const { script, title } = await generateRadioScript(openaiKey, news, {
       radioSlot,
       displayName: user.display_name,
+      anchorName: anchorPrefs.anchorName,
       morningHeadlines: radioSlot === "evening" ? morningHeadlines : undefined,
     });
 
@@ -774,7 +787,6 @@ async function processUserSlot(
       source_news_count: news.length,
     });
 
-    const anchorPrefs = resolveAnchorSettings(user);
     const savedRow =
       (await fetchScriptBySource(
         supabase,
@@ -819,6 +831,7 @@ async function processUserSlot(
         audioReady,
         durationMinutes: duration,
         newsCount: news.length,
+        triggerPath: "generate_daily_radio",
       }
     );
 
@@ -941,6 +954,7 @@ async function ensureTodayAudioAndPush(
       audioReady,
       durationMinutes: duration,
       newsCount: sourceNewsCount(fullRow.source_news),
+      triggerPath: "ensure_audio_and_push",
     }
   );
 
@@ -1031,6 +1045,7 @@ async function sendTestPushForExistingScript(
       audioReady,
       durationMinutes: duration,
       newsCount: sourceNewsCount(fullRow.source_news),
+      triggerPath: "test_push",
     }
   );
 
@@ -1083,6 +1098,61 @@ async function sendTestPushForExistingScript(
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function claimPushSentAt(
+  supabase: any,
+  userId: string,
+  scriptDate: string,
+  duration: number,
+  radioSlot: RadioSlot
+): Promise<{ claimed: boolean; pushSentAtBefore: string | null; scriptId: string | null }> {
+  const { data: beforeRow } = await supabase
+    .from("news_daily_radio_scripts")
+    .select("id, push_sent_at")
+    .eq("user_id", userId)
+    .eq("script_date", scriptDate)
+    .eq("duration_minutes", duration)
+    .eq("generation_source", SERVER_SOURCE)
+    .eq("radio_slot", radioSlot)
+    .maybeSingle();
+
+  const pushSentAtBefore =
+    (beforeRow as { push_sent_at?: string | null } | null)?.push_sent_at ?? null;
+  const scriptId = (beforeRow as { id?: string } | null)?.id ?? null;
+
+  if (pushSentAtBefore) {
+    return { claimed: false, pushSentAtBefore, scriptId };
+  }
+
+  const now = new Date().toISOString();
+  const { data: claimedRow, error } = await supabase
+    .from("news_daily_radio_scripts")
+    .update({ push_sent_at: now })
+    .eq("user_id", userId)
+    .eq("script_date", scriptDate)
+    .eq("duration_minutes", duration)
+    .eq("generation_source", SERVER_SOURCE)
+    .eq("radio_slot", radioSlot)
+    .is("push_sent_at", null)
+    .select("id, push_sent_at")
+    .maybeSingle();
+
+  if (error) {
+    console.log("push claim failed", {
+      user_id: userId,
+      radio_slot: radioSlot,
+      error: error.message,
+    });
+    return { claimed: false, pushSentAtBefore, scriptId };
+  }
+
+  return {
+    claimed: Boolean(claimedRow),
+    pushSentAtBefore,
+    scriptId: (claimedRow as { id?: string } | null)?.id ?? scriptId,
+  };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function sendDailyRadioPush(
   supabase: any,
   user: UserPrefs,
@@ -1098,33 +1168,95 @@ async function sendDailyRadioPush(
     audioReady?: boolean;
     durationMinutes?: number;
     newsCount?: number;
+    triggerPath?: string;
   }
 ): Promise<PushSendResult> {
   const forceTestPush = options.sendTestPush;
+  const userPlan = userPlanLabel(user);
+  const triggerPath = pushMeta?.triggerPath ?? "generate_daily_radio";
+  const resolvedScriptId = scriptId ?? serverRow?.id ?? null;
+  const pushToken = user.push_token?.trim() ?? "";
+  const deviceKey = pushToken
+    ? `${scriptDate}:${radioSlot}:${pushToken}`
+    : `${scriptDate}:${radioSlot}:no_token:${user.user_id}`;
+
+  const logBase = {
+    user_id: user.user_id,
+    user_plan: userPlan,
+    radio_slot: radioSlot,
+    trigger_path: triggerPath,
+    script_date: scriptDate,
+    script_id: resolvedScriptId,
+    display_name: user.display_name?.trim() || "朋友",
+    audioReady: pushMeta?.audioReady === true,
+    openTarget: pushMeta?.audioReady === true ? "ai_anchor_audio" : null,
+    source: forceTestPush ? "test_push" : "server_push",
+    device_token_prefix: pushToken ? tokenPrefix(pushToken) : null,
+    push_sent_at_before: serverRow?.push_sent_at ?? null,
+  };
 
   if (!forceTestPush && serverRow?.push_sent_at) {
-    console.log("skip push: already sent", {
-      user_id: user.user_id,
-      radio_slot: radioSlot,
+    console.log("push skipped: duplicate guard (row already sent)", {
+      ...logBase,
+      push_reason: "already_sent",
+      skipped_due_to_duplicate_guard: true,
     });
     return { push_status: "sent" };
   }
 
+  if (!forceTestPush && options.pushDedup.sentDeviceKeys.has(deviceKey)) {
+    console.log("push skipped: duplicate device token in cron run", {
+      ...logBase,
+      push_reason: "duplicate_device_token",
+      skipped_due_to_duplicate_guard: true,
+    });
+    return { push_status: "sent" };
+  }
+
+  let claimed = forceTestPush;
+  let pushSentAtBefore = serverRow?.push_sent_at ?? null;
+
+  if (!forceTestPush) {
+    const claim = await claimPushSentAt(
+      supabase,
+      user.user_id,
+      scriptDate,
+      duration,
+      radioSlot
+    );
+    pushSentAtBefore = claim.pushSentAtBefore;
+    claimed = claim.claimed;
+    if (!claimed) {
+      console.log("push skipped: duplicate guard (atomic claim failed)", {
+        ...logBase,
+        push_reason: "claim_failed",
+        push_sent_at_before: pushSentAtBefore,
+        skipped_due_to_duplicate_guard: true,
+      });
+      return { push_status: "sent" };
+    }
+  }
+
   if (forceTestPush) {
     console.log("send_test_push: sending daily_radio_completed push", {
-      user_id: user.user_id,
-      radio_slot: radioSlot,
-      push_platform: user.push_platform ?? "ios",
+      ...logBase,
+      push_reason: "test_push",
+    });
+  } else {
+    console.log("push sending", {
+      ...logBase,
+      push_reason: "daily_radio_ready",
+      push_sent_at_before: pushSentAtBefore,
     });
   }
 
   const pushResult = await sendDailyRadioCompletedPush(
-    user.push_token,
+    pushToken || null,
     user.display_name,
     user.push_platform,
     {
       radioSlot,
-      scriptId: scriptId ?? undefined,
+      scriptId: resolvedScriptId ?? undefined,
       anchorName: pushMeta?.anchorName,
       hasAnchorAudio: pushMeta?.audioReady === true,
       audioReady: pushMeta?.audioReady === true,
@@ -1134,26 +1266,29 @@ async function sendDailyRadioPush(
   );
 
   if (pushResult.push_status === "sent") {
+    if (!forceTestPush) {
+      options.pushDedup.sentDeviceKeys.add(deviceKey);
+    }
     console.log("push sent", {
-      user_id: user.user_id,
-      radio_slot: radioSlot,
-      type: "daily_radio_completed",
-      test: forceTestPush,
+      ...logBase,
+      push_reason: forceTestPush ? "test_push" : "daily_radio_ready",
       push_status: pushResult.push_status,
+      push_sent_at_after: new Date().toISOString(),
+      skipped_due_to_duplicate_guard: false,
     });
-    await supabase
-      .from("news_daily_radio_scripts")
-      .update({ push_sent_at: new Date().toISOString() })
-      .eq("user_id", user.user_id)
-      .eq("script_date", scriptDate)
-      .eq("duration_minutes", duration)
-      .eq("generation_source", SERVER_SOURCE)
-      .eq("radio_slot", radioSlot);
   } else {
+    if (!forceTestPush && claimed) {
+      await supabase
+        .from("news_daily_radio_scripts")
+        .update({ push_sent_at: null })
+        .eq("user_id", user.user_id)
+        .eq("script_date", scriptDate)
+        .eq("duration_minutes", duration)
+        .eq("generation_source", SERVER_SOURCE)
+        .eq("radio_slot", radioSlot);
+    }
     console.log("push failed", {
-      user_id: user.user_id,
-      radio_slot: radioSlot,
-      test: forceTestPush,
+      ...logBase,
       push_status: pushResult.push_status,
       push_error: pushResult.push_error,
     });
