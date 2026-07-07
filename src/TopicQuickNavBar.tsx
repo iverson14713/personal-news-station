@@ -43,11 +43,9 @@ type TopicQuickNavBarProps = {
 
 export function TopicQuickNavBar({ items }: TopicQuickNavBarProps) {
   const [activeLabel, setActiveLabel] = useState(items[0]?.label ?? "");
-  const [pinned, setPinned] = useState(false);
   const [barHeight, setBarHeight] = useState(52);
   const [stickyTopPx, setStickyTopPx] = useState(STICKY_TOP_EXTRA_PX);
 
-  const anchorRef = useRef<HTMLDivElement>(null);
   const barRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const chipRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
@@ -59,15 +57,6 @@ export function TopicQuickNavBar({ items }: TopicQuickNavBarProps) {
     root.style.setProperty("--pns-sticky-top", `${topPx}px`);
     root.style.setProperty("--pns-topic-nav-height", `${height}px`);
     root.style.setProperty("--pns-topic-scroll-margin", `${topPx + height + 8}px`);
-  }, []);
-
-  const updatePinned = useCallback(() => {
-    const anchor = anchorRef.current;
-    if (!anchor) return;
-    const topPx = measureSafeAreaTopPx();
-    setStickyTopPx(topPx);
-    const rect = anchor.getBoundingClientRect();
-    setPinned(rect.top <= topPx + 0.5);
   }, []);
 
   useEffect(() => {
@@ -93,17 +82,7 @@ export function TopicQuickNavBar({ items }: TopicQuickNavBarProps) {
     measureBar();
     window.addEventListener("resize", measureBar);
     return () => window.removeEventListener("resize", measureBar);
-  }, [items, pinned, syncLayoutVars]);
-
-  useEffect(() => {
-    updatePinned();
-    window.addEventListener("scroll", updatePinned, { passive: true });
-    window.addEventListener("resize", updatePinned);
-    return () => {
-      window.removeEventListener("scroll", updatePinned);
-      window.removeEventListener("resize", updatePinned);
-    };
-  }, [items, updatePinned]);
+  }, [items, syncLayoutVars]);
 
   useEffect(() => {
     if (items.length === 0) return;
@@ -188,7 +167,6 @@ export function TopicQuickNavBar({ items }: TopicQuickNavBarProps) {
 
         clickLockRef.current = true;
         setActiveLabel(label);
-        setPinned(true);
 
         el.style.scrollMarginTop = `${offset}px`;
         const targetTop = el.getBoundingClientRect().top + window.scrollY - offset;
@@ -201,7 +179,6 @@ export function TopicQuickNavBar({ items }: TopicQuickNavBarProps) {
             const adjust = rect.bottom - bottomLimit + 8;
             window.scrollBy({ top: adjust, behavior: "smooth" });
           }
-          updatePinned();
           clickLockRef.current = false;
         }, 450);
       };
@@ -218,68 +195,50 @@ export function TopicQuickNavBar({ items }: TopicQuickNavBarProps) {
         if (retryEl) scrollToElement(retryEl);
       }, 120);
     },
-    [barHeight, updatePinned]
+    [barHeight]
   );
 
   if (items.length === 0) return null;
 
-  const shellStyle: CSSProperties = pinned
-    ? {
-        ...navStyles.fixedShell,
-        top: `${stickyTopPx}px`,
-      }
-    : navStyles.inFlowShell;
-
   return (
-    <>
-      <div ref={anchorRef} style={navStyles.anchor} aria-hidden />
-      {pinned ? <div style={{ height: barHeight, flexShrink: 0 }} aria-hidden /> : null}
-      <div
-        ref={barRef}
-        style={{
-          ...shellStyle,
-          ...navStyles.bar,
-        }}
-        aria-label="主題快速導覽"
-      >
-        <div ref={scrollRef} className="hide-scrollbar topic-nav-scroller" style={navStyles.scroller}>
-          {items.map((item) => {
-            const active = item.label === activeLabel;
-            return (
-              <button
-                key={item.label}
-                type="button"
-                ref={(node) => {
-                  if (node) chipRefs.current.set(item.label, node);
-                  else chipRefs.current.delete(item.label);
-                }}
-                onClick={() => scrollToTopic(item.label)}
-                aria-current={active ? "true" : undefined}
-                style={{
-                  ...navStyles.chip,
-                  ...(active ? navStyles.chipActive : {}),
-                }}
-              >
-                {item.label} ({item.count})
-              </button>
-            );
-          })}
-        </div>
+    <div
+      ref={barRef}
+      style={{
+        ...navStyles.stickyShell,
+        top: `${stickyTopPx}px`,
+      }}
+      aria-label="主題快速導覽"
+    >
+      <div ref={scrollRef} className="hide-scrollbar topic-nav-scroller" style={navStyles.scroller}>
+        {items.map((item) => {
+          const active = item.label === activeLabel;
+          return (
+            <button
+              key={item.label}
+              type="button"
+              ref={(node) => {
+                if (node) chipRefs.current.set(item.label, node);
+                else chipRefs.current.delete(item.label);
+              }}
+              onClick={() => scrollToTopic(item.label)}
+              aria-current={active ? "true" : undefined}
+              style={{
+                ...navStyles.chip,
+                ...(active ? navStyles.chipActive : {}),
+              }}
+            >
+              {item.label} ({item.count})
+            </button>
+          );
+        })}
       </div>
-    </>
+    </div>
   );
 }
 
 const navStyles: Record<string, CSSProperties> = {
-  anchor: {
-    height: 0,
-    width: "100%",
-    margin: 0,
-    padding: 0,
-  },
-  inFlowShell: {
+  stickyShell: {
     position: "sticky",
-    top: "var(--pns-sticky-top, env(safe-area-inset-top, 0px))",
     zIndex: 40,
     marginTop: "4px",
     marginBottom: "6px",
@@ -288,25 +247,14 @@ const navStyles: Record<string, CSSProperties> = {
     marginLeft: "auto",
     marginRight: "auto",
     boxSizing: "border-box",
-  },
-  fixedShell: {
-    position: "fixed",
-    left: "50%",
-    transform: "translateX(-50%)",
-    width: `min(${PHONE_MAX_WIDTH}px, 100%)`,
-    maxWidth: `${PHONE_MAX_WIDTH}px`,
-    paddingLeft: "max(16px, env(safe-area-inset-left, 0px))",
-    paddingRight: "max(16px, env(safe-area-inset-right, 0px))",
-    boxSizing: "border-box",
-    zIndex: 40,
-  },
-  bar: {
     minHeight: "48px",
     maxHeight: "56px",
     display: "flex",
     alignItems: "center",
     paddingTop: "6px",
     paddingBottom: "6px",
+    paddingLeft: "max(2px, env(safe-area-inset-left, 0px))",
+    paddingRight: "max(2px, env(safe-area-inset-right, 0px))",
     background:
       "linear-gradient(180deg, rgba(2,6,23,.98) 0%, rgba(15,23,42,.97) 100%)",
     backdropFilter: "blur(12px)",
@@ -325,6 +273,7 @@ const navStyles: Record<string, CSSProperties> = {
     alignItems: "center",
     padding: "0 2px",
     WebkitOverflowScrolling: "touch",
+    touchAction: "pan-x",
   },
   chip: {
     flexShrink: 0,

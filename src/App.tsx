@@ -6898,7 +6898,6 @@ const styles: Record<string, CSSProperties> = {
     width: "100%",
     maxWidth: "100%",
     minHeight: "100%",
-    height: "100%",
     margin: 0,
     padding: 0,
     background: TOKENS.bgPage,
