@@ -4,7 +4,7 @@ import { TOKENS } from "./theme";
 
 const STICKY_TOP_EXTRA_PX = 8;
 const PHONE_MAX_WIDTH = 460;
-const BOTTOM_NAV_CLEARANCE_PX = 72;
+const TOPIC_SCROLL_EXTRA_OFFSET_PX = 120;
 
 export function getTopicSectionDomId(label: string): string {
   const slug = label
@@ -26,7 +26,7 @@ function measureSafeAreaTopPx(): number {
 }
 
 export function getTopicScrollMarginPx(barHeightPx = 52): number {
-  return measureSafeAreaTopPx() + barHeightPx + 8;
+  return measureSafeAreaTopPx() + barHeightPx + 8 + TOPIC_SCROLL_EXTRA_OFFSET_PX;
 }
 
 /** @deprecated 請改用 CSS 變數 --pns-topic-scroll-margin */
@@ -62,7 +62,10 @@ export function TopicQuickNavBar({ items, scrollRootRef }: TopicQuickNavBarProps
     const root = document.documentElement;
     root.style.setProperty("--pns-sticky-top", `${topPx}px`);
     root.style.setProperty("--pns-topic-nav-height", `${height}px`);
-    root.style.setProperty("--pns-topic-scroll-margin", `${topPx + height + 8}px`);
+    root.style.setProperty(
+      "--pns-topic-scroll-margin",
+      `${topPx + height + 8 + TOPIC_SCROLL_EXTRA_OFFSET_PX}px`
+    );
   }, []);
 
   useEffect(() => {
@@ -170,7 +173,7 @@ export function TopicQuickNavBar({ items, scrollRootRef }: TopicQuickNavBarProps
       const scrollToElement = (el: HTMLElement) => {
         const topPx = measureSafeAreaTopPx();
         const h = barRef.current?.offsetHeight ?? barHeight;
-        const offset = topPx + h + 8;
+        const offset = topPx + h + 8 + TOPIC_SCROLL_EXTRA_OFFSET_PX;
         const scroller = getScrollElement(scrollRootRef);
 
         clickLockRef.current = true;
@@ -190,16 +193,6 @@ export function TopicQuickNavBar({ items, scrollRootRef }: TopicQuickNavBarProps
         }
 
         window.setTimeout(() => {
-          const rect = el.getBoundingClientRect();
-          const bottomLimit = window.innerHeight - BOTTOM_NAV_CLEARANCE_PX;
-          if (rect.bottom > bottomLimit) {
-            const adjust = rect.bottom - bottomLimit + 8;
-            if (scroller instanceof Window) {
-              window.scrollBy({ top: adjust, behavior: "smooth" });
-            } else {
-              scroller.scrollBy({ top: adjust, behavior: "smooth" });
-            }
-          }
           clickLockRef.current = false;
         }, 450);
       };

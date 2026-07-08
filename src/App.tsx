@@ -131,6 +131,11 @@ import { DisplayNameField } from "./DisplayNameField";
 import { SettingsToastHost, showSettingsToast } from "./SettingsToast";
 import { InternalPromotionBanner } from "./InternalPromotionBanner";
 import { apiUrl } from "./apiBase";
+import {
+  chineseVoiceOptionLabel,
+  filterChineseVoices,
+  pickDefaultChineseVoice,
+} from "./voiceSelection";
 import { restorePurchases, purchaseProSubscription, syncPurchasesOnLaunch } from "./iapRestore";
 import {
   getProUpgradeButtonLabel,
@@ -1035,6 +1040,7 @@ export default function App() {
     changeSpeed: changePlaybackSpeed,
     clearAutoplay: clearPlayerAutoplay,
   } = usePlaybackController({ speed, voiceName, voices });
+  const chineseVoices = useMemo(() => filterChineseVoices(voices), [voices]);
 
   const playbackActive = isPlaybackActiveState(playbackState);
 
@@ -1547,17 +1553,14 @@ export default function App() {
       const allVoices = window.speechSynthesis.getVoices();
       setVoices(allVoices);
 
-      if (!voiceName && allVoices.length > 0) {
-        const preferredVoice =
-          allVoices.find(
-            (v) =>
-              v.lang.includes("zh") &&
-              (v.name.includes("語舒") || v.name.includes("黎澈"))
-          ) ||
-          allVoices.find((v) => v.lang.includes("zh")) ||
-          allVoices[0];
-
-        setVoiceName(preferredVoice.name);
+      const chineseVoices = filterChineseVoices(allVoices);
+      if (chineseVoices.length > 0) {
+        const preferredVoice = pickDefaultChineseVoice(allVoices);
+        setVoiceName((current) => {
+          const currentVoice = allVoices.find((v) => v.name === current);
+          if (currentVoice?.lang?.toLowerCase().startsWith("zh")) return current;
+          return preferredVoice?.name ?? current;
+        });
       }
     };
 
@@ -4407,6 +4410,8 @@ ${newsText}
               title="語音設定"
               subtitle={`${shortVoiceLabel(voiceName)} · ${speed.toFixed(2)}x`}
             >
+              {/* 目前 AI 主播稿只支援中文內容，speechSynthesis 選單必須限制為中文語音。
+                  不可直接顯示 speechSynthesis.getVoices() 全部語音，否則中文稿會被非中文語音唸成異常聲音。 */}
               <select
                 value={voiceName}
                 onChange={(e) => {
@@ -4415,9 +4420,9 @@ ${newsText}
                 }}
                 style={styles.select}
               >
-                {voices.map((voice) => (
+                {chineseVoices.map((voice) => (
                   <option key={voice.name} value={voice.name}>
-                    {voice.name}（{voice.lang}）
+                    {chineseVoiceOptionLabel(voice)}
                   </option>
                 ))}
               </select>
@@ -4694,6 +4699,7 @@ function BackupTextToSpeechSection({
   const canPlay = aiScript.trim().length > 0 || selectedNewsCount > 0;
   const stopDisabled = !canStopPlayback(playbackState);
   const showAltPlay = canRestartPlayback(playbackState) && canPlay;
+  const chineseVoices = filterChineseVoices(voices);
 
   useEffect(() => {
     if (defaultOpen) setOpen(true);
@@ -4773,14 +4779,16 @@ function BackupTextToSpeechSection({
               </button>
             ) : null}
           </div>
+          {/* 目前 AI 主播稿只支援中文內容，speechSynthesis 選單必須限制為中文語音。
+              不可直接顯示 speechSynthesis.getVoices() 全部語音，否則中文稿會被非中文語音唸成異常聲音。 */}
           <select
             value={voiceName}
             onChange={(e) => onVoiceChange(e.target.value)}
             style={styles.select}
           >
-            {voices.map((voice) => (
+            {chineseVoices.map((voice) => (
               <option key={voice.name} value={voice.name}>
-                {voice.name}（{voice.lang}）
+                {chineseVoiceOptionLabel(voice)}
               </option>
             ))}
           </select>
@@ -4863,6 +4871,7 @@ function PlayerDeck({
       : playbackPageTitle(playbackState);
   const stopDisabled = !canStopPlayback(playbackState);
   const showAltPlay = canRestartPlayback(playbackState) && canPlay;
+  const chineseVoices = filterChineseVoices(voices);
 
   const primaryLabel =
     playbackState === "loading"
@@ -4951,14 +4960,16 @@ function PlayerDeck({
       </button>
       {voiceOpen ? (
         <>
+          {/* 目前 AI 主播稿只支援中文內容，speechSynthesis 選單必須限制為中文語音。
+              不可直接顯示 speechSynthesis.getVoices() 全部語音，否則中文稿會被非中文語音唸成異常聲音。 */}
           <select
             value={voiceName}
             onChange={(e) => onVoiceChange(e.target.value)}
             style={styles.select}
           >
-            {voices.map((voice) => (
+            {chineseVoices.map((voice) => (
               <option key={voice.name} value={voice.name}>
-                {voice.name}（{voice.lang}）
+                {chineseVoiceOptionLabel(voice)}
               </option>
             ))}
           </select>

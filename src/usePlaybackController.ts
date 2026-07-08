@@ -11,6 +11,7 @@ import {
   type PlaybackMode,
   type PlaybackState,
 } from "./playbackController";
+import { resolveChineseVoice } from "./voiceSelection";
 
 export type PlayRequest = {
   text: string;
@@ -232,7 +233,7 @@ export function usePlaybackController({
   const speakText = useCallback(
     (text: string, fullText: string, rate: number, generation: number) => {
       const safeText = sanitizeForDeviceSpeechSynthesis(text);
-      const selectedVoice = voices.find((v) => v.name === voiceName);
+      const selectedVoice = resolveChineseVoice(voices, voiceName);
       const utterance = new SpeechSynthesisUtterance(safeText);
       utterance.lang = "zh-TW";
       utterance.rate = rate;
