@@ -161,6 +161,65 @@ function sourceNewsCount(sourceNews: unknown): number | undefined {
   return sourceNews.length;
 }
 
+function parseNewsTime(value: string | null | undefined): number {
+  if (!value?.trim()) return 0;
+  const ts = Date.parse(value.trim());
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function newsSelectedTime(item: NewsItem): number {
+  return parseNewsTime(item.publishedAt) || parseNewsTime(item.fetchedAt);
+}
+
+function logDailyRadioNewsSelection(args: {
+  scriptId: string | null;
+  radioSlot: RadioSlot;
+  news: NewsItem[];
+}) {
+  console.log(
+    JSON.stringify({
+      event: "daily_radio_script_news_selection",
+      script_id: args.scriptId,
+      radio_slot: args.radioSlot,
+      selected_news_titles: args.news.map((n) => n.title),
+      selected_news_sources: args.news.map((n) => n.source),
+      selected_news_published_at: args.news.map((n) => n.publishedAt || null),
+      selected_news_fetched_at: args.news.map((n) => n.fetchedAt || null),
+    })
+  );
+}
+
+function logNewsFreshnessWarning(args: {
+  radioSlot: RadioSlot;
+  news: NewsItem[];
+  freshnessWindowHours: number;
+}) {
+  if (args.news.length === 0) return;
+  const selectedTimes = args.news.map(newsSelectedTime).filter((v) => v > 0);
+  if (selectedTimes.length === 0) return;
+  const oldestSelectedAt = Math.min(...selectedTimes);
+  const maxAgeMs = args.freshnessWindowHours * 60 * 60 * 1000;
+  if (Date.now() - oldestSelectedAt <= maxAgeMs) return;
+  const publishedTimes = args.news.map((n) => parseNewsTime(n.publishedAt)).filter((v) => v > 0);
+  const fetchedTimes = args.news.map((n) => parseNewsTime(n.fetchedAt)).filter((v) => v > 0);
+  console.log(
+    JSON.stringify({
+      event: "news_freshness_warning",
+      topic: [...new Set(args.news.map((n) => n.topic).filter(Boolean))].join(","),
+      radio_slot: args.radioSlot,
+      newest_published_at: publishedTimes.length
+        ? new Date(Math.max(...publishedTimes)).toISOString()
+        : null,
+      newest_fetched_at: fetchedTimes.length
+        ? new Date(Math.max(...fetchedTimes)).toISOString()
+        : null,
+      oldest_selected_at: new Date(oldestSelectedAt).toISOString(),
+      selected_news_count: args.news.length,
+      freshness_window_hours: args.freshnessWindowHours,
+    })
+  );
+}
+
 const FULL_SCRIPT_SELECT =
   "id, status, updated_at, push_sent_at, generation_source, radio_slot, script_date, script_text, audio_url, audio_voice, audio_style, audio_expires_at";
 
@@ -778,6 +837,7 @@ async function processUserSlot(
 
     const news: NewsItem[] = await collectNewsForUser(feeds, 2, 5, {
       radioSlot,
+      userId: user.user_id,
       excludeKeys,
       maxPerTopic: radioSlot === "evening" ? 4 : 2,
       maxTotal: radioSlot === "evening" ? 10 : 5,
@@ -799,6 +859,17 @@ async function processUserSlot(
           : "無法取得新聞"
       );
     }
+
+    logDailyRadioNewsSelection({
+      scriptId,
+      radioSlot,
+      news,
+    });
+    logNewsFreshnessWarning({
+      radioSlot,
+      news,
+      freshnessWindowHours: radioSlot === "evening" ? 24 : 36,
+    });
 
     const anchorPrefs = resolveAnchorSettings(user);
     const { script, title } = await generateRadioScript(openaiKey, news, {

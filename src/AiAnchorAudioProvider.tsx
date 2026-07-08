@@ -67,6 +67,7 @@ export function AiAnchorAudioProvider({ children }: { children: ReactNode }) {
   const currentUrlRef = useRef<string | null>(null);
   const stopTtsRef = useRef<(() => void) | null>(null);
   const initOnceRef = useRef(false);
+  const desiredPlaybackRateRef = useRef<AiAnchorPlaybackRate>(1);
 
   const [state, setState] = useState<AiAnchorPlayerState>({
     audioUrl: null,
@@ -140,14 +141,19 @@ export function AiAnchorAudioProvider({ children }: { children: ReactNode }) {
   const setAudioUrl = useCallback(
     (url: string | null) => {
       const audio = audioRef.current;
-      if (!audio) return;
+      if (!audio) {
+        return;
+      }
 
       const normalized = url?.trim() || null;
+      audio.playbackRate = desiredPlaybackRateRef.current;
       if (normalized === currentUrlRef.current) {
         logAiAnchorGlobalPlayer("route changed but keep playing", {
           src: normalized,
           currentTime: audio.currentTime,
+          playbackRate: audio.playbackRate,
         });
+        syncFromAudio();
         return;
       }
 
@@ -171,6 +177,7 @@ export function AiAnchorAudioProvider({ children }: { children: ReactNode }) {
     if (!audio) return;
     audio.volume = 1;
     audio.muted = false;
+    audio.playbackRate = desiredPlaybackRateRef.current;
   }, []);
 
   useEffect(() => {
@@ -182,6 +189,7 @@ export function AiAnchorAudioProvider({ children }: { children: ReactNode }) {
     audio.preload = "auto";
     audio.volume = 1;
     audio.muted = false;
+    audio.playbackRate = desiredPlaybackRateRef.current;
     hiddenHostRef.current.appendChild(audio);
     audioRef.current = audio;
 
@@ -191,7 +199,10 @@ export function AiAnchorAudioProvider({ children }: { children: ReactNode }) {
       ensureOutput();
       stopTtsRef.current?.();
       syncFromAudio();
-      logAiAnchorGlobalPlayer("play", { currentTime: audio.currentTime });
+      logAiAnchorGlobalPlayer("play", {
+        currentTime: audio.currentTime,
+        playbackRate: audio.playbackRate,
+      });
       logAiAnchorGlobalPlayer("currentTime", audio.currentTime);
     };
 
@@ -241,7 +252,10 @@ export function AiAnchorAudioProvider({ children }: { children: ReactNode }) {
       try {
         await audio.play();
         syncFromAudio();
-        logAiAnchorGlobalPlayer("play", { currentTime: audio.currentTime });
+        logAiAnchorGlobalPlayer("play", {
+          currentTime: audio.currentTime,
+          playbackRate: audio.playbackRate,
+        });
       } catch (err) {
         syncFromAudio();
         const errName = err instanceof Error ? err.name : null;
@@ -306,8 +320,12 @@ export function AiAnchorAudioProvider({ children }: { children: ReactNode }) {
 
   const setPlaybackRate = useCallback(
     (rate: AiAnchorPlaybackRate) => {
+      desiredPlaybackRateRef.current = rate;
       const audio = audioRef.current;
-      if (!audio) return;
+      if (!audio) {
+        setState((prev) => ({ ...prev, playbackRate: rate }));
+        return;
+      }
       audio.playbackRate = rate;
       syncFromAudio();
     },

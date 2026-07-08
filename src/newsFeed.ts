@@ -4,6 +4,7 @@ export type NewsItem = {
   link: string;
   source: string;
   pubDate: string;
+  fetchedAt: string;
   description: string;
   selected: boolean;
   favorite: boolean;
@@ -152,6 +153,7 @@ export function parseNewsRssXml(
         rawTitle.split(" - ").pop() ||
         "Google News";
       const pubDate = item.querySelector("pubDate")?.textContent || "";
+      const fetchedAt = new Date(nowMs).toISOString();
       const description = stripHtmlToText(
         item.querySelector("description")?.textContent || ""
       );
@@ -163,6 +165,7 @@ export function parseNewsRssXml(
         link,
         source,
         pubDate,
+        fetchedAt,
         description,
         selected: false,
         favorite: favoriteLinks.includes(link),
@@ -233,10 +236,11 @@ export function mergeTopicNewsFeeds(
           link: row.link,
           source: row.source,
           pubDate: row.pubDate,
+          fetchedAt: row.fetchedAt,
           description: row.description,
           topic: source.label,
           matchedTopics: [source.label],
-          selected: false,
+          selected: prev?.selected ?? false,
           favorite: prev?.favorite ?? row.favorite,
         };
         globalByKey.set(key, item);
@@ -257,11 +261,14 @@ export function mergeTopicNewsFeeds(
     newsById.set(item.id, item);
   }
 
-  applyDefaultTopicSelection(sections, newsById, selectedPerTopic);
+  const hasPreservedSelection = Array.from(newsById.values()).some((item) => item.selected);
+  if (!hasPreservedSelection) {
+    applyDefaultTopicSelection(sections, newsById, selectedPerTopic);
+  }
 
   const news = Array.from(globalByKey.values()).sort((a, b) => {
-    const ta = parseNewsPubDate(a.pubDate)?.getTime() ?? 0;
-    const tb = parseNewsPubDate(b.pubDate)?.getTime() ?? 0;
+    const ta = parseNewsPubDate(a.pubDate)?.getTime() ?? (Date.parse(a.fetchedAt) || 0);
+    const tb = parseNewsPubDate(b.pubDate)?.getTime() ?? (Date.parse(b.fetchedAt) || 0);
     return tb - ta;
   });
 

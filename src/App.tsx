@@ -142,6 +142,7 @@ import {
   buildSelectedTopicSummary,
   mergeTopicNewsFeeds,
   normalizeNewsKey,
+  parseNewsPubDate,
   parseNewsRssXml,
   type NewsFeedSource,
   type NewsItem,
@@ -265,6 +266,7 @@ function buildSummaryApiItems(
     if (summary) row.summary = summary.slice(0, 800);
     if (n.link) row.url = n.link;
     if (n.pubDate) row.publishedAt = n.pubDate;
+    if (n.fetchedAt) row.fetchedAt = n.fetchedAt;
     const itemTopic =
       n.matchedTopics.length > 0 ? n.matchedTopics.join("、") : n.topic || topicHint;
     if (itemTopic) row.topic = itemTopic;
@@ -275,6 +277,52 @@ function buildSummaryApiItems(
 /** AI 精華：相同選取結果快取時間 */
 const AI_SUMMARY_CACHE_KEY = "pns_ai_summary_v1";
 const AI_SUMMARY_CACHE_MS = 30 * 60 * 1000;
+const NEWS_REFRESH_STALE_MS = 15 * 60 * 1000;
+const NEWS_REFRESH_DEDUPE_MS = 5 * 60 * 1000;
+const NEWS_REFRESH_CHECK_MS = 15 * 60 * 1000;
+
+type NewsRefreshOptions = {
+  forceRefresh?: boolean;
+  reason?: "initial" | "manual" | "topic_change" | "foreground" | "timer" | "manual_generate_prepare" | "daily_auto_prepare";
+};
+
+function newsPublishedTime(item: NewsItem): number {
+  return parseNewsPubDate(item.pubDate)?.getTime() ?? 0;
+}
+
+function newsFetchedTime(item: NewsItem): number {
+  return Date.parse(item.fetchedAt || "") || 0;
+}
+
+function newsFreshSortTime(item: NewsItem): number {
+  return newsPublishedTime(item) || newsFetchedTime(item);
+}
+
+function newsIsoFromTime(ms: number): string | null {
+  return ms > 0 ? new Date(ms).toISOString() : null;
+}
+
+function selectedFreshnessStats(items: NewsItem[]) {
+  const publishedTimes = items
+    .map(newsPublishedTime)
+    .filter((v) => v > 0)
+    .sort((a, b) => a - b);
+  const fetchedTimes = items
+    .map(newsFetchedTime)
+    .filter((v) => v > 0)
+    .sort((a, b) => a - b);
+  const sortTimes = items
+    .map(newsFreshSortTime)
+    .filter((v) => v > 0)
+    .sort((a, b) => a - b);
+
+  return {
+    newestSelectedPublishedAt: newsIsoFromTime(publishedTimes[publishedTimes.length - 1] ?? 0),
+    oldestSelectedPublishedAt: newsIsoFromTime(publishedTimes[0] ?? 0),
+    newestSelectedFetchedAt: newsIsoFromTime(fetchedTimes[fetchedTimes.length - 1] ?? 0),
+    oldestSelectedAt: newsIsoFromTime(sortTimes[0] ?? 0),
+  };
+}
 const AI_HISTORY_KEY = "pns_ai_history_v1";
 const AI_HISTORY_MAX = 20;
 const AI_HISTORY_EXPANDED_KEY = "pns_settings_ai_history_expanded_v1";
@@ -944,7 +992,11 @@ export default function App() {
   const [anchorVolumeGain, setAnchorVolumeGain] = useState<AiAnchorVolumeGain>(readAnchorVolumeGain);
   const dailyGenRunningRef = useRef(false);
   const serverScriptReadyRef = useRef(false);
-  const fetchNewsRef = useRef<() => Promise<void>>(async () => {});
+  const lastNewsFetchAtRef = useRef<number | null>(null);
+  const newsFetchInFlightRef = useRef<Promise<void> | null>(null);
+  const fetchNewsRef = useRef<(options?: NewsRefreshOptions) => Promise<void>>(
+    async () => {}
+  );
   const topicSelectionKeyRef = useRef<string | null>(null);
   const newsRef = useRef<NewsItem[]>([]);
   const selectedNewsRef = useRef<NewsItem[]>([]);
@@ -1514,7 +1566,41 @@ export default function App() {
     setTimeout(loadVoices, 1000);
   }, []);
 
-  const fetchNews = async () => {
+  const fetchNews = async (options: NewsRefreshOptions = {}) => {
+    if (newsFetchInFlightRef.current) {
+      await newsFetchInFlightRef.current;
+      if (!options.forceRefresh) return;
+    }
+
+    const startedAt = Date.now();
+    const forceRefresh = options.forceRefresh === true;
+    const lastNewsFetchAt = lastNewsFetchAtRef.current;
+    if (
+      !forceRefresh &&
+      lastNewsFetchAt != null &&
+      startedAt - lastNewsFetchAt < NEWS_REFRESH_DEDUPE_MS
+    ) {
+      const currentNews = newsRef.current;
+      const publishedTimes = currentNews.map(newsPublishedTime).filter((v) => v > 0);
+      const fetchedTimes = currentNews.map(newsFetchedTime).filter((v) => v > 0);
+      console.log(
+        JSON.stringify({
+          event: "home_news_refresh",
+          topics: selectedTopicObjects.map((t) => t.label),
+          forceRefresh,
+          lastNewsFetchAt: new Date(lastNewsFetchAt).toISOString(),
+          fetchedAt: null,
+          fetchedCount: currentNews.length,
+          updatedCount: 0,
+          newestPublishedAt: newsIsoFromTime(Math.max(0, ...publishedTimes)),
+          newestFetchedAt: newsIsoFromTime(Math.max(0, ...fetchedTimes)),
+          usedCache: true,
+          reason: options.reason ?? "timer",
+        })
+      );
+      return;
+    }
+
     const custom = customKeyword.trim();
     const topicObjs = selectedTopicObjects;
     const feedSources = buildActiveNewsFeedSources(
@@ -1534,13 +1620,23 @@ export default function App() {
     setNewsFetchStatus("loading");
     console.log("[News] news fetch started", {
       topics: feedSources.map((s) => s.label),
+      forceRefresh,
+      lastNewsFetchAt: lastNewsFetchAt ? new Date(lastNewsFetchAt).toISOString() : null,
+      reason: options.reason ?? null,
     });
 
     const runFetch = async () => {
       const nowMs = Date.now();
+      const prevNews = newsRef.current;
+      const prevKeys = new Set(prevNews.map((n) => `${n.link || normalizeNewsKey(n.title)}`));
       const responseTexts = await Promise.all(
         feedSources.map(async (source) => {
-          const res = await fetch(apiUrl(`news?q=${encodeURIComponent(source.query)}`));
+          const res = await fetch(
+            apiUrl(
+              `news?q=${encodeURIComponent(source.query)}&fresh=${forceRefresh ? "1" : "0"}&_=${nowMs}`
+            ),
+            { cache: "no-store" }
+          );
           if (!res.ok) {
             throw new Error(`news fetch failed: ${res.status}`);
           }
@@ -1558,13 +1654,12 @@ export default function App() {
         ),
       }));
 
-      let mergedNews: NewsItem[] = [];
-      setNews((prev) => {
-        const merged = mergeTopicNewsFeeds(feeds, prev);
-        setTopicNewsSections(merged.sections);
-        mergedNews = merged.news;
-        return merged.news;
-      });
+      const merged = mergeTopicNewsFeeds(feeds, prevNews);
+      const mergedNews = merged.news;
+      setTopicNewsSections(merged.sections);
+      newsRef.current = mergedNews;
+      selectedNewsRef.current = mergedNews.filter((n) => n.selected);
+      setNews(mergedNews);
 
       if (!serverScriptReadyRef.current) {
         const todayEntry = findTodayDailyHistoryEntry(readAiHistory());
@@ -1591,10 +1686,32 @@ export default function App() {
         setNewsFetchStatus("success");
         console.log("[News] news fetch succeeded", { news_count: mergedNews.length });
       }
+
+      lastNewsFetchAtRef.current = nowMs;
+      const publishedTimes = mergedNews.map(newsPublishedTime).filter((v) => v > 0);
+      const fetchedTimes = mergedNews.map(newsFetchedTime).filter((v) => v > 0);
+      const updatedCount = mergedNews.filter(
+        (n) => !prevKeys.has(n.link || normalizeNewsKey(n.title))
+      ).length;
+      console.log(
+        JSON.stringify({
+          event: "home_news_refresh",
+          topics: feedSources.map((s) => s.label),
+          forceRefresh,
+          lastNewsFetchAt: lastNewsFetchAt ? new Date(lastNewsFetchAt).toISOString() : null,
+          fetchedAt: new Date(nowMs).toISOString(),
+          fetchedCount: mergedNews.length,
+          updatedCount,
+          newestPublishedAt: newsIsoFromTime(Math.max(0, ...publishedTimes)),
+          newestFetchedAt: newsIsoFromTime(Math.max(0, ...fetchedTimes)),
+          usedCache: false,
+          reason: options.reason ?? null,
+        })
+      );
     };
 
     try {
-      await Promise.race([
+      const task = Promise.race([
         runFetch(),
         new Promise<never>((_, reject) => {
           window.setTimeout(
@@ -1603,6 +1720,8 @@ export default function App() {
           );
         }),
       ]);
+      newsFetchInFlightRef.current = task.then(() => undefined);
+      await task;
     } catch (error) {
       const isTimeout =
         error instanceof Error && error.message === "news_fetch_timeout";
@@ -1618,6 +1737,7 @@ export default function App() {
       }
     }
 
+    newsFetchInFlightRef.current = null;
     setLoading(false);
   };
 
@@ -1735,7 +1855,7 @@ export default function App() {
     }
     void (async () => {
       await refreshServerDailyScript();
-      await fetchNews();
+      await fetchNews({ forceRefresh: true, reason: "initial" });
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1757,7 +1877,7 @@ export default function App() {
     topicSelectionKeyRef.current = key;
 
     const timer = window.setTimeout(() => {
-      void fetchNews();
+      void fetchNews({ forceRefresh: true, reason: "topic_change" });
     }, 450);
 
     return () => window.clearTimeout(timer);
@@ -1776,8 +1896,30 @@ export default function App() {
 
   const updateMyNews = () => {
     setTab("home");
-    void fetchNews();
+    void fetchNews({ forceRefresh: true, reason: "manual" });
   };
+
+  useEffect(() => {
+    if (topicOnboardingOpen || tab !== "home") return;
+    const timer = window.setInterval(() => {
+      const last = lastNewsFetchAtRef.current;
+      if (last != null && Date.now() - last < NEWS_REFRESH_STALE_MS) return;
+      void fetchNews({ forceRefresh: true, reason: "timer" });
+    }, NEWS_REFRESH_CHECK_MS);
+    return () => window.clearInterval(timer);
+  }, [tab, topicOnboardingOpen]);
+
+  useEffect(() => {
+    if (topicOnboardingOpen) return;
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== "visible") return;
+      const last = lastNewsFetchAtRef.current;
+      if (last != null && Date.now() - last < NEWS_REFRESH_STALE_MS) return;
+      void fetchNews({ forceRefresh: true, reason: "foreground" });
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, [topicOnboardingOpen]);
 
   const handleTopicOnboardingComplete = (topics: string[]) => {
     const key = [...topics].sort().join("\0");
@@ -1788,7 +1930,7 @@ export default function App() {
     writeOnboardingSeen(true);
     setTopicOnboardingOpen(false);
     setTab("home");
-    void fetchNews();
+    void fetchNews({ forceRefresh: true, reason: "topic_change" });
   };
 
   const resetTopicOnboarding = () => {
@@ -2239,7 +2381,35 @@ ${newsText}
   ) => {
     const duration = durationOverride ?? aiDuration;
     const pickLimit = duration >= 10 ? 8 : 5;
+
+    const beforeFetchAt = lastNewsFetchAtRef.current;
+    const newsTooOld =
+      beforeFetchAt == null || Date.now() - beforeFetchAt > NEWS_REFRESH_STALE_MS;
+    if (newsTooOld) {
+      await fetchNews({
+        forceRefresh: true,
+        reason: options?.isDailyAuto ? "daily_auto_prepare" : "manual_generate_prepare",
+      });
+    }
+
     const picked = selectedNewsRef.current.slice(0, pickLimit);
+    const freshness = selectedFreshnessStats(picked);
+    const afterFetchAt = lastNewsFetchAtRef.current;
+    const usedFreshNews =
+      afterFetchAt != null && Date.now() - afterFetchAt <= NEWS_REFRESH_STALE_MS;
+    console.log(
+      JSON.stringify({
+        event: "manual_script_generate_prepare",
+        forceRefresh: newsTooOld,
+        lastNewsFetchAt: beforeFetchAt ? new Date(beforeFetchAt).toISOString() : null,
+        selectedNewsCount: picked.length,
+        newestSelectedPublishedAt: freshness.newestSelectedPublishedAt,
+        newestSelectedFetchedAt: freshness.newestSelectedFetchedAt,
+        oldestSelectedPublishedAt: freshness.oldestSelectedPublishedAt,
+        usedFreshNews,
+      })
+    );
+
     if (picked.length === 0) {
       if (!options?.isDailyAuto) alert("請先選擇新聞");
       return;
@@ -2440,6 +2610,9 @@ ${newsText}
             title: n.title,
             source: n.source,
             topic: n.topic,
+            url: n.link,
+            publishedAt: n.pubDate,
+            fetchedAt: n.fetchedAt,
           })),
         });
         setActiveScriptAudioUrl(null);
@@ -2840,9 +3013,19 @@ ${newsText}
         return;
       }
 
-      if (newsRef.current.length === 0) {
-        console.log("[DailyRadio] manual generate: refetching news");
-        await fetchNewsRef.current();
+      const lastNewsFetchAt = lastNewsFetchAtRef.current;
+      if (
+        newsRef.current.length === 0 ||
+        lastNewsFetchAt == null ||
+        Date.now() - lastNewsFetchAt > NEWS_REFRESH_STALE_MS
+      ) {
+        console.log("[DailyRadio] manual generate: refetching news", {
+          lastNewsFetchAt: lastNewsFetchAt ? new Date(lastNewsFetchAt).toISOString() : null,
+        });
+        await fetchNewsRef.current({
+          forceRefresh: true,
+          reason: "daily_auto_prepare",
+        });
       }
 
       if (newsRef.current.length === 0) {
@@ -3612,6 +3795,7 @@ ${newsText}
               isPro={isPro}
               voiceFeatureEnabled={voiceFeatureEnabled}
               anchorName={selectedAnchor.name}
+              anchorPlaybackRate={anchorPlaybackRate}
               anchorAudioReady={anchorAudioReady}
               scriptAudioLoading={scriptAudioLoading}
               scriptAudioStaleReason={scriptAudioStaleReason}
@@ -3755,7 +3939,7 @@ ${newsText}
                 <AiAnchorBroadcastPanel
                   anchor={getAnchorById(DEFAULT_AI_ANCHOR_SETTINGS.anchorId)}
                   style={getStyleById(DEFAULT_AI_ANCHOR_SETTINGS.style)}
-                  playbackRate={1.0}
+                  playbackRate={anchorPlaybackRate}
                   onPlaybackRateChange={() => {}}
                   volumeGain={1.0}
                   onVolumeGainChange={() => {}}
@@ -5837,6 +6021,7 @@ function HomeStationHero({
   isPro,
   voiceFeatureEnabled,
   anchorName,
+  anchorPlaybackRate,
   anchorAudioReady,
   scriptAudioLoading,
   scriptAudioStaleReason,
@@ -5868,6 +6053,7 @@ function HomeStationHero({
   isPro: boolean;
   voiceFeatureEnabled: boolean;
   anchorName: string;
+  anchorPlaybackRate: AiAnchorPlaybackRate;
   anchorAudioReady: boolean;
   scriptAudioLoading: boolean;
   scriptAudioStaleReason: import("./aiAnchorSettings").ScriptAudioStaleReason;
@@ -5909,6 +6095,7 @@ function HomeStationHero({
 
   const slotLabel = radioSlot === "evening" ? "晚報" : "早報";
   const duration = scriptDuration ?? DAILY_AUTO_DURATION;
+  const anchorSpeedLabel = formatAnchorPlaybackRate(anchorPlaybackRate);
 
   const primaryCtaLabel = generating
     ? voiceFeatureEnabled && hasScript && scriptAudioLoading
@@ -5995,10 +6182,12 @@ function HomeStationHero({
       {ready && voiceFeatureEnabled && anchorAudioReady ? (
         <div style={styles.stationHeroPlaySubtitle}>
           {displayScriptSource === "server" && radioSlot === "evening"
-            ? `🎧 晚報 AI 音訊已就緒 · ${anchorName} · ${duration} 分鐘`
+            ? `🎧 晚報 AI 音訊已就緒 · ${anchorName} · ${duration} 分鐘 · ${anchorSpeedLabel}`
             : displayScriptSource === "server"
-              ? `🎧 早報 AI 音訊已就緒 · ${anchorName} · ${duration} 分鐘`
-              : `🎧 這篇 AI 音訊已就緒 · ${anchorName} · ${duration} 分鐘`}
+              ? `🎧 早報 AI 音訊已就緒 · ${anchorName} · ${duration} 分鐘 · ${anchorSpeedLabel}`
+              : `🎧 這篇 AI 音訊已就緒 · ${anchorName} · ${duration} 分鐘 · ${anchorSpeedLabel}`}
+          <br />
+          語速可到播放頁或設定頁調整
         </div>
       ) : ready && voiceFeatureEnabled && !anchorAudioReady && !scriptAudioLoading && displayScriptSource === "manual" ? (
         <div style={styles.stationHeroPlaySubtitle}>
@@ -6310,6 +6499,7 @@ function AiSummaryPanel({
       : displayScriptSource === "server"
         ? "🎧 早報 AI 音訊已就緒"
         : "🎧 這篇 AI 音訊已就緒";
+  const audioReadyLabelWithRate = `${audioReadyLabel} · ${formatAnchorPlaybackRate(anchorPlaybackRate)}`;
   const audioGenerateLabel = "🎙️ 生成這篇 AI 真人語音";
   const audioLoadingLabel = "AI 真人語音生成中…";
 
@@ -6402,7 +6592,7 @@ function AiSummaryPanel({
                     </button>
                   ) : null}
                   {isHome && voiceFeatureEnabled && anchorAudioReady ? (
-                    <span style={styles.aiAnchorReadyHint}>{audioReadyLabel}</span>
+                    <span style={styles.aiAnchorReadyHint}>{audioReadyLabelWithRate}</span>
                   ) : null}
                   {isHome && voiceFeatureEnabled && scriptAudioLoading && !anchorAudioReady ? (
                     <span style={styles.aiAnchorReadyHint}>{audioLoadingLabel}</span>

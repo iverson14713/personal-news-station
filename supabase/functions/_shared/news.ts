@@ -5,6 +5,7 @@ export type NewsItem = {
   summary: string;
   url: string;
   publishedAt: string;
+  fetchedAt: string;
   topic: string;
 };
 
@@ -12,6 +13,7 @@ export type RadioSlot = "morning" | "evening";
 
 export type CollectNewsOptions = {
   radioSlot?: RadioSlot;
+  userId?: string;
   /** 早報已使用的新聞 key（title normalized），晚報生成時排除 */
   excludeKeys?: Set<string>;
   maxPerTopic?: number;
@@ -61,7 +63,17 @@ export function morningHeadlinesFromSourceNews(sourceNews: unknown): string[] {
 }
 
 function freshnessWindow(radioSlot: RadioSlot): string {
-  return radioSlot === "evening" ? "when:12h" : "when:2d";
+  return radioSlot === "evening" ? "when:12h" : "when:24h";
+}
+
+function parseNewsTime(value: string | null | undefined): number {
+  if (!value?.trim()) return 0;
+  const ts = Date.parse(value.trim());
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function newsSortTime(item: NewsItem): number {
+  return parseNewsTime(item.publishedAt) || parseNewsTime(item.fetchedAt);
 }
 
 export async function fetchGoogleNewsRss(
@@ -97,6 +109,7 @@ export async function fetchGoogleNewsRss(
   const xml = await res.text();
   const items: NewsItem[] = [];
   const itemBlocks = xml.match(/<item[\s\S]*?<\/item>/gi) ?? [];
+  const fetchedAt = new Date(cacheBust).toISOString();
 
   for (const block of itemBlocks.slice(0, 16)) {
     const title = pickTag(block, "title");
@@ -112,10 +125,11 @@ export async function fetchGoogleNewsRss(
       summary: description.slice(0, 800),
       url: link.slice(0, 500),
       publishedAt: pubDate.slice(0, 80),
+      fetchedAt,
       topic: "",
     });
   }
-  return items;
+  return items.sort((a, b) => newsSortTime(b) - newsSortTime(a));
 }
 
 export async function collectNewsForUser(
@@ -147,7 +161,7 @@ export async function collectNewsForUser(
       continue;
     }
     let count = 0;
-    for (const row of rows) {
+    for (const row of rows.sort((a, b) => newsSortTime(b) - newsSortTime(a))) {
       if (count >= perTopic) break;
       const key = normalizeNewsKey(row.title);
       if (seen.has(key) || excludeKeys.has(key)) continue;
@@ -159,7 +173,12 @@ export async function collectNewsForUser(
     if (merged.length >= scanMax) break;
   }
 
-  const result = merged.slice(0, maxTotal);
+  const result = merged
+    .sort((a, b) => newsSortTime(b) - newsSortTime(a))
+    .slice(0, scanMax);
+  const publishedTimes = result.map((n) => parseNewsTime(n.publishedAt)).filter((v) => v > 0);
+  const fetchedTimes = result.map((n) => parseNewsTime(n.fetchedAt)).filter((v) => v > 0);
+  const selectedTimes = result.map(newsSortTime).filter((v) => v > 0);
 
   console.log("[News] collectNewsForUser", {
     radio_slot: radioSlot,
@@ -168,6 +187,32 @@ export async function collectNewsForUser(
     fetched_count: result.length,
     used_fresh_rss: true,
   });
+
+  console.log(
+    JSON.stringify({
+      event: "news_refresh_before_radio",
+      radio_slot: radioSlot,
+      user_id: options?.userId ?? null,
+      topics: feeds.map((f) => f.label),
+      force_refresh: true,
+      last_fetch_at: null,
+      fetched_count: merged.length,
+      upserted_count: 0,
+      selected_count: result.length,
+      newest_published_at: publishedTimes.length
+        ? new Date(Math.max(...publishedTimes)).toISOString()
+        : null,
+      newest_fetched_at: fetchedTimes.length
+        ? new Date(Math.max(...fetchedTimes)).toISOString()
+        : null,
+      oldest_selected_at: selectedTimes.length
+        ? new Date(Math.min(...selectedTimes)).toISOString()
+        : null,
+      freshness_window_hours: radioSlot === "evening" ? 12 : 24,
+      used_cache: false,
+      fallback_reason: result.length === 0 ? "no_fresh_rss_items" : null,
+    })
+  );
 
   return result;
 }
