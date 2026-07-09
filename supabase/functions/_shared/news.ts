@@ -145,6 +145,7 @@ export async function collectNewsForUser(
 
   const merged: NewsItem[] = [];
   const seen = new Set<string>();
+  const seenUrls = new Set<string>();
 
   for (const feed of feeds) {
     let rows: NewsItem[] = [];
@@ -164,8 +165,11 @@ export async function collectNewsForUser(
     for (const row of rows.sort((a, b) => newsSortTime(b) - newsSortTime(a))) {
       if (count >= perTopic) break;
       const key = normalizeNewsKey(row.title);
+      const urlKey = row.url?.trim().toLowerCase();
       if (seen.has(key) || excludeKeys.has(key)) continue;
+      if (urlKey && seenUrls.has(urlKey)) continue;
       seen.add(key);
+      if (urlKey) seenUrls.add(urlKey);
       merged.push({ ...row, topic: feed.label });
       count += 1;
       if (merged.length >= scanMax) break;

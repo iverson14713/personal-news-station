@@ -22,11 +22,14 @@ import {
 } from "./pro";
 import {
   AI_DURATIONS,
+  AUTO_RADIO_DURATIONS,
   DAILY_AUTO_DURATION,
   FREE_DURATION,
+  autoRadioDurationSubtitle,
   durationOptionSubtitle,
   isProDuration,
   normalizeAiDuration,
+  normalizeAutoRadioDuration,
   type AiDuration,
 } from "./aiDuration";
 import {
@@ -1071,6 +1074,14 @@ export default function App() {
   const voiceFeatureEnabled = isPro || isInternalAccessActive();
   const selectedAnchor = useMemo(() => getAnchorById(anchorId), [anchorId]);
   const selectedAnchorStyle = useMemo(() => getStyleById(anchorStyleId), [anchorStyleId]);
+  const morningAutoDuration = normalizeAutoRadioDuration(
+    dailyRadioState.morningDuration,
+    isPro
+  );
+  const eveningAutoDuration = normalizeAutoRadioDuration(
+    dailyRadioState.eveningDuration,
+    isPro
+  );
 
   const currentScriptFingerprint = useMemo(() => {
     if (
@@ -1150,8 +1161,8 @@ export default function App() {
       eveningRadioEnabled: isPro,
       morningRadioTime: dailyRadioState.scheduledTime || MORNING_RADIO_TIME,
       eveningRadioTime: dailyRadioState.eveningTime || EVENING_RADIO_TIME,
-      morningDurationMinutes: 3,
-      eveningDurationMinutes: 3,
+      morningDurationMinutes: morningAutoDuration,
+      eveningDurationMinutes: eveningAutoDuration,
       isPro,
       anchorId,
       anchorVoice: getAnchorById(anchorId).voice,
@@ -1165,7 +1176,9 @@ export default function App() {
     anchorStyleId,
     dailyRadioState.eveningTime,
     dailyRadioState.scheduledTime,
+    eveningAutoDuration,
     isPro,
+    morningAutoDuration,
     savedCustomKeywords,
     selectedTopics,
     voiceFeatureEnabled,
@@ -1221,6 +1234,25 @@ export default function App() {
   const openProUpgrade = useCallback(() => {
     setUpgradeModal("general");
   }, []);
+
+  const handleAutoRadioDurationChange = useCallback(
+    (slot: RadioSlot, duration: AiDuration) => {
+      if (duration === 15) return;
+      if (duration !== 3 && !isPro) {
+        openProUpgrade();
+        return;
+      }
+      const nextDuration = normalizeAutoRadioDuration(duration, isPro);
+      setDailyRadioState(
+        writeDailyRadioState(
+          slot === "evening"
+            ? { eveningDuration: nextDuration }
+            : { morningDuration: nextDuration }
+        )
+      );
+    },
+    [isPro, openProUpgrade]
+  );
 
   const handleHomeBrandTap = useCallback(() => {
     const now = Date.now();
@@ -2692,12 +2724,13 @@ ${newsText}
 
     if (result.kind === "ready") {
       const s = result.script;
+      const scriptDuration = normalizeAiDuration(s.durationMinutes);
       setDisplayScriptSource("server");
       setAiScript(s.scriptText);
       setAiHighlights([]);
       setAiJsonFallback(false);
-      setSelectedScriptDuration(DAILY_AUTO_DURATION);
-      setAiDuration(DAILY_AUTO_DURATION);
+      setSelectedScriptDuration(scriptDuration);
+      setAiDuration(scriptDuration);
       setAiError(null);
       const serverFingerprint = buildServerScriptFingerprint(s.id);
       if (
@@ -2723,7 +2756,7 @@ ${newsText}
       setDailyRadioState(
         markDailyGenerationComplete(
           s.id,
-          DAILY_AUTO_DURATION,
+          scriptDuration,
           s.generationSource ?? "server",
           s.radioSlot
         )
@@ -3484,8 +3517,8 @@ ${newsText}
         eveningRadioEnabled: isPro,
         morningRadioTime: dailyRadioState.scheduledTime || MORNING_RADIO_TIME,
         eveningRadioTime: dailyRadioState.eveningTime || EVENING_RADIO_TIME,
-        morningDurationMinutes: 3,
-        eveningDurationMinutes: 3,
+        morningDurationMinutes: morningAutoDuration,
+        eveningDurationMinutes: eveningAutoDuration,
         isPro,
         anchorId,
         anchorVoice: selectedAnchor.voice,
@@ -3500,6 +3533,8 @@ ${newsText}
     savedCustomKeywords,
     dailyRadioState.scheduledTime,
     dailyRadioState.eveningTime,
+    morningAutoDuration,
+    eveningAutoDuration,
     isPro,
     anchorId,
     anchorStyleId,
@@ -3658,8 +3693,8 @@ ${newsText}
         eveningRadioEnabled: isPro,
         morningRadioTime: dailyRadioState.scheduledTime || MORNING_RADIO_TIME,
         eveningRadioTime: dailyRadioState.eveningTime || EVENING_RADIO_TIME,
-        morningDurationMinutes: 3,
-        eveningDurationMinutes: 3,
+        morningDurationMinutes: morningAutoDuration,
+        eveningDurationMinutes: eveningAutoDuration,
         isPro,
         anchorId,
         anchorVoice: selectedAnchor.voice,
@@ -3674,6 +3709,8 @@ ${newsText}
       isPro,
       dailyRadioState.scheduledTime,
       dailyRadioState.eveningTime,
+      morningAutoDuration,
+      eveningAutoDuration,
       anchorId,
       selectedAnchor.voice,
       anchorStyleId,
@@ -4233,6 +4270,22 @@ ${newsText}
                   <div>• 每日 {MORNING_RADIO_TIME}</div>
                   <div>• 3 分鐘快速掌握重點</div>
                 </div>
+              )}
+              <AutoRadioDurationSelector
+                title="自動早報時長"
+                value={morningAutoDuration}
+                isPro={isPro}
+                onChange={(duration) => handleAutoRadioDurationChange("morning", duration)}
+              />
+              {isPro ? (
+                <AutoRadioDurationSelector
+                  title="自動晚報時長"
+                  value={eveningAutoDuration}
+                  isPro={isPro}
+                  onChange={(duration) => handleAutoRadioDurationChange("evening", duration)}
+                />
+              ) : (
+                <div style={styles.settingHintMuted}>Free 方案僅提供自動早報；晚報為 Pro 專屬。</div>
               )}
             </SettingsCollapsible>
 
@@ -6250,6 +6303,58 @@ function HomeStationHero({
   );
 }
 
+function AutoRadioDurationSelector({
+  title,
+  value,
+  isPro,
+  onChange,
+}: {
+  title: string;
+  value: AiDuration;
+  isPro: boolean;
+  onChange: (duration: AiDuration) => void;
+}) {
+  return (
+    <div style={styles.autoRadioDurationBox}>
+      <div style={styles.autoRadioDurationTitle}>{title}</div>
+      <div style={styles.autoRadioDurationGrid}>
+        {AUTO_RADIO_DURATIONS.map((duration) => {
+          const locked = duration !== 3 && !isPro;
+          const selected = value === duration;
+          return (
+            <button
+              key={duration}
+              type="button"
+              onClick={() => onChange(duration)}
+              style={{
+                ...styles.autoRadioDurationBtn,
+                ...(selected ? styles.autoRadioDurationBtnActive : {}),
+                ...(locked ? styles.autoRadioDurationBtnLocked : {}),
+              }}
+            >
+              <strong>
+                {duration} 分鐘{locked ? " 🔒 Pro" : ""}
+              </strong>
+              <span>{autoRadioDurationSubtitle(duration, isPro)}</span>
+            </button>
+          );
+        })}
+        <button
+          type="button"
+          disabled
+          style={{
+            ...styles.autoRadioDurationBtn,
+            ...styles.autoRadioDurationBtnDisabled,
+          }}
+        >
+          <strong>15 分鐘</strong>
+          <span>僅限手動生成</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function SettingsSummaryGrid({
   isPro,
   aiQuotaRemaining,
@@ -8194,6 +8299,49 @@ const styles: Record<string, CSSProperties> = {
     lineHeight: 1.45,
     marginTop: "4px",
     marginBottom: "8px",
+  },
+  autoRadioDurationBox: {
+    marginTop: "12px",
+    padding: "12px",
+    borderRadius: "16px",
+    background: "rgba(15,23,42,.72)",
+    border: "1px solid rgba(148,163,184,.18)",
+  },
+  autoRadioDurationTitle: {
+    fontSize: "13px",
+    fontWeight: 900,
+    color: "#E2E8F0",
+    marginBottom: "10px",
+  },
+  autoRadioDurationGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+    gap: "8px",
+  },
+  autoRadioDurationBtn: {
+    textAlign: "left",
+    border: "1px solid rgba(148,163,184,.22)",
+    borderRadius: "14px",
+    background: "rgba(255,255,255,.05)",
+    color: "#CBD5E1",
+    padding: "10px",
+    cursor: "pointer",
+    display: "flex",
+    flexDirection: "column",
+    gap: "4px",
+    fontSize: "12px",
+  },
+  autoRadioDurationBtnActive: {
+    border: "1px solid rgba(96,165,250,.72)",
+    background: "rgba(37,99,235,.24)",
+    color: "#FFFFFF",
+  },
+  autoRadioDurationBtnLocked: {
+    opacity: 0.75,
+  },
+  autoRadioDurationBtnDisabled: {
+    opacity: 0.46,
+    cursor: "not-allowed",
   },
   planQuotaRow: {
     display: "flex",

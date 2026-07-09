@@ -4,6 +4,7 @@ export type AiDuration = 3 | 5 | 10 | 15;
 export const AI_DURATIONS: AiDuration[] = [3, 5, 10, 15];
 export const FREE_DURATION: AiDuration = 3;
 export const DAILY_AUTO_DURATION: AiDuration = 3;
+export const AUTO_RADIO_DURATIONS: AiDuration[] = [3, 5, 10];
 export const PRO_DURATIONS: AiDuration[] = [5, 10, 15];
 
 export function normalizeAiDuration(raw: unknown): AiDuration {
@@ -15,6 +16,28 @@ export function normalizeAiDuration(raw: unknown): AiDuration {
 
 export function isProDuration(duration: AiDuration): boolean {
   return duration !== FREE_DURATION;
+}
+
+export function normalizeAutoRadioDuration(raw: unknown, isPro: boolean): AiDuration {
+  const duration = normalizeAiDuration(raw);
+  if (!AUTO_RADIO_DURATIONS.includes(duration)) return DAILY_AUTO_DURATION;
+  if (!isPro && duration !== DAILY_AUTO_DURATION) return DAILY_AUTO_DURATION;
+  return duration;
+}
+
+export function autoRadioDurationSubtitle(duration: AiDuration, isPro: boolean): string {
+  switch (duration) {
+    case 3:
+      return "快速掌握";
+    case 5:
+      return isPro ? "標準整理" : "標準整理 · Pro";
+    case 10:
+      return isPro ? "深入整理 · 會自動挑選更多相關新聞" : "深入整理 · Pro";
+    case 15:
+      return "僅限手動生成";
+    default:
+      return "";
+  }
 }
 
 export function durationOptionSubtitle(duration: AiDuration): string {

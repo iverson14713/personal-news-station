@@ -5,7 +5,11 @@
  * - server：Supabase Cron + Edge Function 於排程時間背景生成
  * - app：使用者打開 App 後本機 fallback 生成
  */
-import { DAILY_AUTO_DURATION, type AiDuration } from "./aiDuration";
+import {
+  DAILY_AUTO_DURATION,
+  normalizeAutoRadioDuration,
+  type AiDuration,
+} from "./aiDuration";
 import { DAILY_SCRIPT_TIMEZONE, todayYmdInTimezone, todayYmdLocal, ymdFromTimestamp } from "./dateLocal";
 import {
   type RadioSlot,
@@ -51,6 +55,8 @@ export type DailyRadioState = {
   /** 早報時間（向後相容 scheduledTime） */
   scheduledTime: string;
   eveningTime: string;
+  morningDuration: AiDuration;
+  eveningDuration: AiDuration;
   lastGeneratedDate: string | null;
   lastGeneratedAt: number | null;
   lastEntryId: string | null;
@@ -65,6 +71,8 @@ export type DailyRadioState = {
 const DEFAULT_STATE: DailyRadioState = {
   scheduledTime: MORNING_RADIO_TIME,
   eveningTime: EVENING_RADIO_TIME,
+  morningDuration: DAILY_AUTO_DURATION,
+  eveningDuration: DAILY_AUTO_DURATION,
   lastGeneratedDate: null,
   lastGeneratedAt: null,
   lastEntryId: null,
@@ -90,6 +98,8 @@ export function readDailyRadioState(): DailyRadioState {
         typeof o.eveningTime === "string" && /^\d{1,2}:\d{2}$/.test(o.eveningTime)
           ? o.eveningTime
           : DEFAULT_STATE.eveningTime,
+      morningDuration: normalizeAutoRadioDuration(o.morningDuration, true),
+      eveningDuration: normalizeAutoRadioDuration(o.eveningDuration, true),
       lastGeneratedDate:
         typeof o.lastGeneratedDate === "string" ? o.lastGeneratedDate : null,
       lastGeneratedAt:
@@ -110,7 +120,7 @@ export function readDailyRadioState(): DailyRadioState {
       lastError: typeof o.lastError === "string" ? o.lastError : null,
       notificationSentDate:
         typeof o.notificationSentDate === "string" ? o.notificationSentDate : null,
-      lastDuration: DAILY_AUTO_DURATION,
+      lastDuration: normalizeAutoRadioDuration(o.lastDuration, true),
       generationSource:
         o.generationSource === "server" || o.generationSource === "app"
           ? o.generationSource

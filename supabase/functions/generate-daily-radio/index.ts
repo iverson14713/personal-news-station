@@ -54,6 +54,8 @@ type SlotConfig = {
   enabled: boolean;
   time: string;
   duration: number;
+  requestedDuration: number;
+  requestedFallbackReason: string | null;
 };
 
 type ProcessResult = {
@@ -156,6 +158,53 @@ const MORNING_PUSH_WINDOW_MINUTES = 30;
 const UPSERT_CONFLICT =
   "user_id,script_date,duration_minutes,generation_source,radio_slot";
 
+type AutoDurationRule = {
+  targetMin: number;
+  targetMax: number;
+  min: number;
+  maxPerTopic: number;
+};
+
+const AUTO_DURATION_RULES: Record<3 | 5 | 10, AutoDurationRule> = {
+  3: { targetMin: 5, targetMax: 8, min: 5, maxPerTopic: 3 },
+  5: { targetMin: 8, targetMax: 12, min: 8, maxPerTopic: 4 },
+  10: { targetMin: 15, targetMax: 20, min: 12, maxPerTopic: 6 },
+};
+
+function normalizeRequestedAutoDuration(duration: number): 3 | 5 | 10 {
+  return duration === 5 || duration === 10 ? duration : 3;
+}
+
+function resolveAllowedAutoDuration(
+  requestedDuration: number,
+  user: UserPrefs
+): { duration: 3 | 5 | 10; fallbackReason: string | null } {
+  const requested = normalizeRequestedAutoDuration(requestedDuration);
+  if (!isVoiceFeatureEnabled(user) && requested !== 3) {
+    return { duration: 3, fallbackReason: "free_plan_auto_duration_limited_to_3" };
+  }
+  if (requestedDuration === 15) {
+    return { duration: 3, fallbackReason: "15_min_auto_not_allowed" };
+  }
+  if (requestedDuration !== requested) {
+    return { duration: requested, fallbackReason: "invalid_auto_duration_normalized" };
+  }
+  return { duration: requested, fallbackReason: null };
+}
+
+function resolveFinalDurationForNews(
+  requestedDuration: 3 | 5 | 10,
+  selectedNewsCount: number
+): { duration: 3 | 5 | 10; fallbackReason: string | null } {
+  if (requestedDuration === 10 && selectedNewsCount < AUTO_DURATION_RULES[10].min) {
+    return { duration: 5, fallbackReason: "insufficient_news_for_10_min_fallback_to_5" };
+  }
+  if (requestedDuration === 5 && selectedNewsCount < AUTO_DURATION_RULES[5].min) {
+    return { duration: 3, fallbackReason: "insufficient_news_for_5_min_fallback_to_3" };
+  }
+  return { duration: requestedDuration, fallbackReason: null };
+}
+
 function sourceNewsCount(sourceNews: unknown): number | undefined {
   if (!Array.isArray(sourceNews)) return undefined;
   return sourceNews.length;
@@ -224,17 +273,29 @@ const FULL_SCRIPT_SELECT =
   "id, status, updated_at, push_sent_at, generation_source, radio_slot, script_date, script_text, audio_url, audio_voice, audio_style, audio_expires_at";
 
 function getUserSlots(user: UserPrefs, options: ProcessOptions): SlotConfig[] {
+  const morningResolved = resolveAllowedAutoDuration(
+    user.morning_duration_minutes ?? 3,
+    user
+  );
+  const eveningResolved = resolveAllowedAutoDuration(
+    user.evening_duration_minutes ?? 3,
+    user
+  );
   const morning: SlotConfig = {
     slot: "morning",
     enabled: user.morning_radio_enabled !== false,
     time: user.morning_radio_time || user.daily_radio_time || "07:00",
-    duration: user.morning_duration_minutes ?? 3,
+    duration: morningResolved.duration,
+    requestedDuration: user.morning_duration_minutes ?? 3,
+    requestedFallbackReason: morningResolved.fallbackReason,
   };
   const evening: SlotConfig = {
     slot: "evening",
     enabled: user.evening_radio_enabled === true,
     time: user.evening_radio_time || "17:00",
-    duration: user.evening_duration_minutes ?? 3,
+    duration: eveningResolved.duration,
+    requestedDuration: user.evening_duration_minutes ?? 3,
+    requestedFallbackReason: eveningResolved.fallbackReason,
   };
 
   let slots = [morning, evening].filter((s) => s.enabled);
@@ -674,7 +735,8 @@ async function processUserSlot(
   }
 
   const scriptDate = todayInTimezone(tz);
-  const duration = slotConfig.duration;
+  const requestedDuration = slotConfig.requestedDuration;
+  let duration = slotConfig.duration;
   const radioSlot = slotConfig.slot;
 
   const serverRow = await fetchScriptBySource(
@@ -763,41 +825,7 @@ async function processUserSlot(
     };
   }
 
-  const claim = await supabase
-    .from("news_daily_radio_scripts")
-    .upsert(
-      {
-        user_id: user.user_id,
-        script_date: scriptDate,
-        duration_minutes: duration,
-        radio_slot: radioSlot,
-        status: "generating",
-        generation_source: SERVER_SOURCE,
-        is_daily_auto: true,
-        error_message: null,
-        source_news: [],
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: UPSERT_CONFLICT }
-    )
-    .select("id")
-    .single();
-
-  if (claim.error) {
-    console.error("slot failed", {
-      user_id: user.user_id,
-      radio_slot: radioSlot,
-      error: claim.error.message,
-    });
-    return {
-      user_id: user.user_id,
-      radio_slot: radioSlot,
-      status: "failed",
-      reason: claim.error.message,
-    };
-  }
-
-  const scriptId = (claim.data as { id: string } | null)?.id ?? serverRow?.id ?? null;
+  let scriptId: string | null = null;
 
   try {
     let excludeKeys = new Set<string>();
@@ -835,22 +863,84 @@ async function processUserSlot(
       no_frontend_source: true,
     });
 
+    const durationRule = AUTO_DURATION_RULES[duration as 3 | 5 | 10];
     const news: NewsItem[] = await collectNewsForUser(feeds, 2, 5, {
       radioSlot,
       userId: user.user_id,
       excludeKeys,
-      maxPerTopic: radioSlot === "evening" ? 4 : 2,
-      maxTotal: radioSlot === "evening" ? 10 : 5,
+      maxPerTopic: durationRule.maxPerTopic,
+      maxTotal: durationRule.targetMax,
     });
 
-    console.log("generating script", {
-      user_id: user.user_id,
-      radio_slot: radioSlot,
-      topics,
-      custom_keywords: customKeywords,
-      fetched_news_count: news.length,
-      fresh_rss: true,
-    });
+    const finalDuration = resolveFinalDurationForNews(duration as 3 | 5 | 10, news.length);
+    const fallbackReason =
+      finalDuration.fallbackReason ?? slotConfig.requestedFallbackReason;
+    duration = finalDuration.duration;
+    const finalRule = AUTO_DURATION_RULES[duration as 3 | 5 | 10];
+
+    if (duration !== slotConfig.duration) {
+      const existingFinalRow = await fetchScriptBySource(
+        supabase,
+        user.user_id,
+        scriptDate,
+        duration,
+        SERVER_SOURCE,
+        radioSlot
+      );
+      if (existingFinalRow?.status === "completed") {
+        console.log("duration fallback: existing final script ready", {
+          user_id: user.user_id,
+          radio_slot: radioSlot,
+          requested_duration: requestedDuration,
+          final_duration: duration,
+          fallback_reason: fallbackReason,
+          script_id: existingFinalRow.id,
+        });
+        return await ensureTodayAudioAndPush(
+          supabase,
+          user,
+          scriptDate,
+          duration,
+          radioSlot,
+          existingFinalRow,
+          openaiKey,
+          options
+        );
+      }
+      if (existingFinalRow?.status === "generating") {
+        console.log("slot skipped", {
+          user_id: user.user_id,
+          radio_slot: radioSlot,
+          reason: "final_duration_in_progress",
+          requested_duration: requestedDuration,
+          final_duration: duration,
+        });
+        return {
+          user_id: user.user_id,
+          radio_slot: radioSlot,
+          status: "skipped",
+          reason: "final_duration_in_progress",
+        };
+      }
+    }
+
+    console.log(
+      JSON.stringify({
+        event: "daily_radio_auto_duration_selection",
+        radio_slot: radioSlot,
+        user_id: user.user_id,
+        user_plan: userPlanLabel(user),
+        requested_duration: requestedDuration,
+        final_duration: duration,
+        target_news_count: `${finalRule.targetMin}-${finalRule.targetMax}`,
+        selected_news_count: news.length,
+        fetched_news_count: news.length,
+        expanded_topics_count: feeds.length,
+        fallback_reason: fallbackReason,
+        selected_news_titles: news.map((n) => n.title),
+        selected_news_sources: news.map((n) => n.source),
+      })
+    );
 
     if (news.length === 0) {
       throw new Error(
@@ -859,6 +949,44 @@ async function processUserSlot(
           : "無法取得新聞"
       );
     }
+
+    const claim = await supabase
+      .from("news_daily_radio_scripts")
+      .upsert(
+        {
+          user_id: user.user_id,
+          script_date: scriptDate,
+          duration_minutes: duration,
+          radio_slot: radioSlot,
+          status: "generating",
+          generation_source: SERVER_SOURCE,
+          is_daily_auto: true,
+          error_message: null,
+          source_news: [],
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: UPSERT_CONFLICT }
+      )
+      .select("id")
+      .single();
+
+    if (claim.error) {
+      throw new Error(claim.error.message);
+    }
+
+    scriptId = (claim.data as { id: string } | null)?.id ?? null;
+
+    console.log("generating script", {
+      user_id: user.user_id,
+      radio_slot: radioSlot,
+      topics,
+      custom_keywords: customKeywords,
+      fetched_news_count: news.length,
+      fresh_rss: true,
+      requested_duration: requestedDuration,
+      final_duration: duration,
+      fallback_reason: fallbackReason,
+    });
 
     logDailyRadioNewsSelection({
       scriptId,
@@ -877,6 +1005,8 @@ async function processUserSlot(
       displayName: user.display_name,
       anchorName: anchorPrefs.anchorName,
       morningHeadlines: radioSlot === "evening" ? morningHeadlines : undefined,
+      durationMinutes: duration,
+      limitedNews: duration === 10 && news.length < AUTO_DURATION_RULES[10].targetMin,
     });
 
     const finalScript = appendRadioClosing(script, radioSlot);

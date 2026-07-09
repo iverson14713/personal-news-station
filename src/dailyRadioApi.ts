@@ -6,6 +6,7 @@ import {
   DEFAULT_AI_ANCHOR_SETTINGS,
   getAnchorById,
 } from "./aiAnchorSettings";
+import { normalizeAutoRadioDuration } from "./aiDuration";
 import {
   ensureSupabaseUser,
   getLocalTimezone,
@@ -22,6 +23,7 @@ export type ServerDailyScript = {
   status: DailyRadioScriptRow["status"];
   generationSource: DailyRadioGenerationSource;
   radioSlot: RadioSlot;
+  durationMinutes: number;
   sourceNews: unknown;
   errorMessage: string | null;
   audioUrl: string | null;
@@ -67,6 +69,7 @@ function mapRow(row: DailyRadioScriptRow): ServerDailyScript {
     status: row.status,
     generationSource: row.generation_source,
     radioSlot: row.radio_slot ?? "morning",
+    durationMinutes: row.duration_minutes ?? 3,
     sourceNews: row.source_news,
     errorMessage: row.error_message,
     audioUrl: row.audio_url ?? null,
@@ -295,6 +298,14 @@ export async function syncUserNewsPreferences(input: {
   const eveningTime = input.eveningRadioTime ?? "17:00";
   const isPro = input.isPro === true;
   const voiceFeatureEnabled = input.voiceFeatureEnabled === true;
+  const morningDuration = normalizeAutoRadioDuration(
+    input.morningDurationMinutes,
+    isPro
+  );
+  const eveningDuration = normalizeAutoRadioDuration(
+    input.eveningDurationMinutes,
+    isPro
+  );
 
   const row: Record<string, unknown> = {
     user_id: userId,
@@ -307,8 +318,8 @@ export async function syncUserNewsPreferences(input: {
     evening_radio_enabled: isPro ? (input.eveningRadioEnabled ?? true) : false,
     morning_radio_time: morningTime,
     evening_radio_time: eveningTime,
-    morning_duration_minutes: input.morningDurationMinutes ?? 3,
-    evening_duration_minutes: input.eveningDurationMinutes ?? 3,
+    morning_duration_minutes: morningDuration,
+    evening_duration_minutes: eveningDuration,
     timezone: getLocalTimezone(),
     ai_anchor_id: input.anchorId ?? DEFAULT_AI_ANCHOR_SETTINGS.anchorId,
     ai_anchor_voice:
