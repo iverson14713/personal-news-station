@@ -870,6 +870,7 @@ async function processUserSlot(
       excludeKeys,
       maxPerTopic: durationRule.maxPerTopic,
       maxTotal: durationRule.targetMax,
+      durationMinutes: duration,
     });
 
     const finalDuration = resolveFinalDurationForNews(duration as 3 | 5 | 10, news.length);

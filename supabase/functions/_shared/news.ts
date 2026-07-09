@@ -1,3 +1,10 @@
+import {
+  calculateNewsQualityScore,
+  pickNewsForScript,
+  selectQualityNews,
+  type NewsArticleInput,
+} from "./newsQuality.ts";
+
 export type NewsItem = {
   id: string;
   title: string;
@@ -7,6 +14,7 @@ export type NewsItem = {
   publishedAt: string;
   fetchedAt: string;
   topic: string;
+  qualityFinalScore?: number;
 };
 
 export type RadioSlot = "morning" | "evening";
@@ -18,6 +26,7 @@ export type CollectNewsOptions = {
   excludeKeys?: Set<string>;
   maxPerTopic?: number;
   maxTotal?: number;
+  durationMinutes?: number;
 };
 
 function decodeXmlEntities(s: string): string {
@@ -111,7 +120,7 @@ export async function fetchGoogleNewsRss(
   const itemBlocks = xml.match(/<item[\s\S]*?<\/item>/gi) ?? [];
   const fetchedAt = new Date(cacheBust).toISOString();
 
-  for (const block of itemBlocks.slice(0, 16)) {
+  for (const block of itemBlocks.slice(0, 50)) {
     const title = pickTag(block, "title");
     if (!title) continue;
     const link = pickTag(block, "link");
@@ -132,6 +141,30 @@ export async function fetchGoogleNewsRss(
   return items.sort((a, b) => newsSortTime(b) - newsSortTime(a));
 }
 
+function toArticleInput(row: NewsItem): NewsArticleInput {
+  return {
+    title: row.title,
+    source: row.source,
+    summary: row.summary,
+    url: row.url,
+    publishedAt: row.publishedAt,
+    fetchedAt: row.fetchedAt,
+  };
+}
+
+function fromScoredArticle(row: NewsItem, scored: NewsArticleInput & { quality: { finalScore: number } }): NewsItem {
+  return {
+    ...row,
+    title: scored.title,
+    source: scored.source,
+    summary: scored.summary ?? scored.description ?? row.summary,
+    url: scored.url ?? scored.link ?? row.url,
+    publishedAt: scored.publishedAt ?? scored.pubDate ?? row.publishedAt,
+    fetchedAt: scored.fetchedAt ?? row.fetchedAt,
+    qualityFinalScore: scored.quality.finalScore,
+  };
+}
+
 export async function collectNewsForUser(
   feeds: { label: string; query: string }[],
   maxPerTopic = 2,
@@ -143,9 +176,8 @@ export async function collectNewsForUser(
   const perTopic = options?.maxPerTopic ?? (radioSlot === "evening" ? 4 : maxPerTopic);
   const scanMax = options?.maxTotal ?? (radioSlot === "evening" ? 10 : maxTotal);
 
-  const merged: NewsItem[] = [];
-  const seen = new Set<string>();
-  const seenUrls = new Set<string>();
+  const perTopicPool = Math.max(perTopic + 4, 12);
+  const topicBuckets: NewsItem[] = [];
 
   for (const feed of feeds) {
     let rows: NewsItem[] = [];
@@ -161,25 +193,82 @@ export async function collectNewsForUser(
       });
       continue;
     }
-    let count = 0;
-    for (const row of rows.sort((a, b) => newsSortTime(b) - newsSortTime(a))) {
-      if (count >= perTopic) break;
-      const key = normalizeNewsKey(row.title);
-      const urlKey = row.url?.trim().toLowerCase();
-      if (seen.has(key) || excludeKeys.has(key)) continue;
-      if (urlKey && seenUrls.has(urlKey)) continue;
-      seen.add(key);
-      if (urlKey) seenUrls.add(urlKey);
-      merged.push({ ...row, topic: feed.label });
-      count += 1;
-      if (merged.length >= scanMax) break;
+
+    const candidates = rows
+      .filter((row) => !excludeKeys.has(normalizeNewsKey(row.title)))
+      .map((row) => ({ ...row, topic: feed.label }));
+
+    const { selected } = selectQualityNews(
+      candidates.map(toArticleInput),
+      feed.label,
+      {
+        targetCount: perTopic,
+        minCount: perTopic,
+        maxPerSource: 3,
+        maxPerEvent: 2,
+        scoreTiers: [8, 6, 4],
+        minTopicRelevance: 2,
+        maxAgeHoursHard: radioSlot === "evening" ? 48 : 72,
+        maxAgeHoursSoft: radioSlot === "evening" ? 12 : 24,
+        enableLog: true,
+      }
+    );
+
+    const rowByTitle = new Map(candidates.map((r) => [normalizeNewsKey(r.title), r]));
+    for (const picked of selected) {
+      const base = rowByTitle.get(normalizeNewsKey(picked.title));
+      if (!base) continue;
+      topicBuckets.push(fromScoredArticle({ ...base, topic: feed.label }, picked as NewsArticleInput & { quality: { finalScore: number } }));
+      if (topicBuckets.filter((n) => n.topic === feed.label).length >= perTopicPool) break;
     }
-    if (merged.length >= scanMax) break;
   }
 
-  const result = merged
-    .sort((a, b) => newsSortTime(b) - newsSortTime(a))
-    .slice(0, scanMax);
+  const seen = new Set<string>();
+  const seenUrls = new Set<string>();
+  const merged: NewsItem[] = [];
+
+  const sortedBuckets = [...topicBuckets].sort(
+    (a, b) => (b.qualityFinalScore ?? 0) - (a.qualityFinalScore ?? 0)
+  );
+
+  for (const row of sortedBuckets) {
+    if (merged.length >= scanMax) break;
+    const key = normalizeNewsKey(row.title);
+    const urlKey = row.url?.trim().toLowerCase();
+    if (seen.has(key) || excludeKeys.has(key)) continue;
+    if (urlKey && seenUrls.has(urlKey)) continue;
+    seen.add(key);
+    if (urlKey) seenUrls.add(urlKey);
+    merged.push(row);
+  }
+
+  const durationMinutes = options?.durationMinutes ?? (scanMax >= 18 ? 10 : scanMax >= 12 ? 5 : 3);
+  const result = pickNewsForScript(
+    merged.map((row) => {
+      const input = toArticleInput(row);
+      const quality = calculateNewsQualityScore(input, row.topic);
+      return {
+        ...input,
+        quality: {
+          ...quality,
+          finalScore: row.qualityFinalScore ?? quality.finalScore,
+        },
+      };
+    }),
+    durationMinutes
+  ).map((picked) => {
+    const match = merged.find((m) => normalizeNewsKey(m.title) === normalizeNewsKey(picked.title));
+    return match ?? ({
+      id: normalizeNewsKey(picked.title).slice(0, 120),
+      title: picked.title,
+      source: picked.source,
+      summary: picked.summary ?? picked.description ?? "",
+      url: picked.url ?? picked.link ?? "",
+      publishedAt: picked.publishedAt ?? picked.pubDate ?? "",
+      fetchedAt: picked.fetchedAt ?? new Date().toISOString(),
+      topic: feeds[0]?.label ?? "",
+    } satisfies NewsItem);
+  });
   const publishedTimes = result.map((n) => parseNewsTime(n.publishedAt)).filter((v) => v > 0);
   const fetchedTimes = result.map((n) => parseNewsTime(n.fetchedAt)).filter((v) => v > 0);
   const selectedTimes = result.map(newsSortTime).filter((v) => v > 0);

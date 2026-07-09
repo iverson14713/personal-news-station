@@ -1,3 +1,9 @@
+import {
+  calculateNewsQualityScore,
+  selectQualityNews,
+  type NewsArticleInput,
+} from "../shared/newsQuality";
+
 export type NewsItem = {
   id: string;
   title: string;
@@ -84,8 +90,9 @@ export const NEWS_PER_TOPIC_MAX = 8;
 export const DEFAULT_SELECTED_PER_TOPIC = 2;
 /** 每個主題先掃描幾則 RSS 再過濾日期 */
 export const NEWS_PER_TOPIC_ITEM_SCAN = 130;
-/** 只顯示此時間內的新聞 */
+/** 只顯示此時間內的新聞（首頁主選池 48h；不足 8 則時品質模組可放寬至 72h） */
 export const NEWS_MAX_AGE_MS = 2 * 24 * 60 * 60 * 1000;
+export const NEWS_EXTENDED_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000;
 
 export function normalizeNewsKey(title: string): string {
   return title.replace(/[，。！？、\s\-｜|:：]/g, "").slice(0, 28);
@@ -115,11 +122,15 @@ export function parseNewsPubDate(raw: string | null | undefined): Date | null {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-export function isNewsFreshEnough(pubDateRaw: string, nowMs: number): boolean {
+export function isNewsFreshEnough(
+  pubDateRaw: string,
+  nowMs: number,
+  maxAgeMs: number = NEWS_MAX_AGE_MS
+): boolean {
   const d = parseNewsPubDate(pubDateRaw);
   if (!d) return false;
   const age = nowMs - d.getTime();
-  return age >= 0 && age <= NEWS_MAX_AGE_MS;
+  return age >= 0 && age <= maxAgeMs;
 }
 
 type ParsedRow = NewsItem & { sortTime: number };
@@ -174,7 +185,7 @@ export function parseNewsRssXml(
         sortTime,
       };
     })
-    .filter((row) => isNewsFreshEnough(row.pubDate, nowMs))
+    .filter((row) => isNewsFreshEnough(row.pubDate, nowMs, NEWS_EXTENDED_MAX_AGE_MS))
     .sort((a, b) => b.sortTime - a.sortTime);
 }
 
@@ -216,11 +227,38 @@ export function mergeTopicNewsFeeds(
     const sectionItemIds: string[] = [];
     const seenInSection = new Set<string>();
 
-    for (const row of rows) {
-      if (sectionItemIds.length >= NEWS_PER_TOPIC_MAX) break;
+    const candidates: NewsArticleInput[] = rows.map((row) => ({
+      title: row.title,
+      source: row.source,
+      description: row.description,
+      link: row.link,
+      pubDate: row.pubDate,
+      fetchedAt: row.fetchedAt,
+    }));
 
+    const { selected: qualityRows } = selectQualityNews(candidates, source.label, {
+      targetCount: NEWS_PER_TOPIC_MAX,
+      minCount: NEWS_PER_TOPIC_MAX,
+      maxPerSource: 3,
+      maxPerEvent: 2,
+      scoreTiers: [8, 6, 4],
+      minTopicRelevance: 2,
+      maxAgeHoursHard: 72,
+      maxAgeHoursSoft: 48,
+      allowExtendedFallback: true,
+      maxAgeHoursPrimary: 48,
+      maxAgeHoursExtended: 72,
+      enableLog: true,
+    });
+
+    const rowByKey = new Map<string, ParsedRow>();
+    for (const row of rows) {
+      rowByKey.set(itemDedupeKey(row.link, row.title), row);
+    }
+
+    const addRowToSection = (row: ParsedRow) => {
       const key = itemDedupeKey(row.link, row.title);
-      if (!key || seenInSection.has(key)) continue;
+      if (!key || seenInSection.has(key)) return;
       seenInSection.add(key);
 
       let item = globalByKey.get(key);
@@ -247,6 +285,14 @@ export function mergeTopicNewsFeeds(
       }
 
       sectionItemIds.push(item.id);
+    };
+
+    for (const picked of qualityRows) {
+      if (sectionItemIds.length >= NEWS_PER_TOPIC_MAX) break;
+      const key = itemDedupeKey(picked.link ?? picked.url ?? "", picked.title);
+      const row = rowByKey.get(key);
+      if (!row) continue;
+      addRowToSection(row);
     }
 
     sections.push({
@@ -267,6 +313,29 @@ export function mergeTopicNewsFeeds(
   }
 
   const news = Array.from(globalByKey.values()).sort((a, b) => {
+    const qa = calculateNewsQualityScore(
+      {
+        title: a.title,
+        source: a.source,
+        description: a.description,
+        link: a.link,
+        pubDate: a.pubDate,
+        fetchedAt: a.fetchedAt,
+      },
+      a.topic
+    ).finalScore;
+    const qb = calculateNewsQualityScore(
+      {
+        title: b.title,
+        source: b.source,
+        description: b.description,
+        link: b.link,
+        pubDate: b.pubDate,
+        fetchedAt: b.fetchedAt,
+      },
+      b.topic
+    ).finalScore;
+    if (qb !== qa) return qb - qa;
     const ta = parseNewsPubDate(a.pubDate)?.getTime() ?? (Date.parse(a.fetchedAt) || 0);
     const tb = parseNewsPubDate(b.pubDate)?.getTime() ?? (Date.parse(b.fetchedAt) || 0);
     return tb - ta;

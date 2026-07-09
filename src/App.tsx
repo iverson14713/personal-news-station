@@ -157,6 +157,10 @@ import {
   type TopicNewsSection,
 } from "./newsFeed";
 import {
+  calculateNewsQualityScore,
+  pickNewsForScript,
+} from "../shared/newsQuality";
+import {
   getTopicSectionDomId,
   TopicQuickNavBar,
 } from "./TopicQuickNavBar";
@@ -2415,7 +2419,6 @@ ${newsText}
     options?: { skipQuota?: boolean; isDailyAuto?: boolean; radioSlot?: RadioSlot }
   ) => {
     const duration = durationOverride ?? aiDuration;
-    const pickLimit = duration >= 10 ? 8 : 5;
 
     const beforeFetchAt = lastNewsFetchAtRef.current;
     const newsTooOld =
@@ -2427,7 +2430,25 @@ ${newsText}
       });
     }
 
-    const picked = selectedNewsRef.current.slice(0, pickLimit);
+    const picked = pickNewsForScript(
+      selectedNewsRef.current.map((n) => {
+        const topic = n.matchedTopics[0] ?? n.topic;
+        const input = {
+          title: n.title,
+          source: n.source,
+          description: n.description,
+          link: n.link,
+          pubDate: n.pubDate,
+          fetchedAt: n.fetchedAt,
+        };
+        return {
+          ...n,
+          ...input,
+          quality: calculateNewsQualityScore(input, topic),
+        };
+      }),
+      duration
+    );
     const freshness = selectedFreshnessStats(picked);
     const afterFetchAt = lastNewsFetchAtRef.current;
     const usedFreshNews =
