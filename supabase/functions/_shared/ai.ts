@@ -29,7 +29,10 @@ export type GenerateRadioScriptOptions = {
   /** 早報已報導標題，晚報時避免重複 */
   morningHeadlines?: string[];
   durationMinutes?: number;
+  /** 新聞少於該時長最低則數：每則簡短精準 */
   limitedNews?: boolean;
+  /** 10 分鐘且新聞達最低但少於理想：深化報導但不編造 */
+  enrichedCoverage?: boolean;
 };
 
 function durationWordTarget(duration: number): string {
@@ -77,6 +80,9 @@ function buildUserMessage(
   const limitedNewsNote = options.limitedNews
     ? "\n新聞量略少，請每則簡短精準，不要硬拉長、不要補不存在的背景或臆測。"
     : "";
+  const enrichedCoverageNote = options.enrichedCoverage
+    ? "\n新聞則數略少於理想目標，但請維持完整時長篇幅。每則新聞在忠於來源的前提下，可適度補充：事件背景、影響分析、各方反應、對台灣或聽眾的可能影響、後續值得觀察的重點。禁止重複內容、硬灌字數、編造資訊、加入來源未提供的事實。"
+    : "";
 
   if (slot === "evening") {
     const morningBlock =
@@ -86,7 +92,7 @@ function buildUserMessage(
 
     return `聽眾稱呼（僅稱呼聽眾，不可當主播自稱）：${listenerName}
 主播名稱（主播自稱用）：${anchorName}
-請為以下 ${n} 則「新抓取」的新聞撰寫 ${duration} 分鐘今日晚報口播稿。${limitedNewsNote}
+請為以下 ${n} 則「新抓取」的新聞撰寫 ${duration} 分鐘今日晚報口播稿。${limitedNewsNote}${enrichedCoverageNote}
 開場可參考：「${listenerName}，歡迎收聽今天的 AI 晚報，我是 ${anchorName}。」
 結尾自稱請使用主播名稱 ${anchorName}，不可使用 ${listenerName}。
 ${morningBlock}
@@ -96,7 +102,7 @@ ${listText}`;
 
   return `聽眾稱呼（僅稱呼聽眾，不可當主播自稱）：${listenerName}
 主播名稱（主播自稱用）：${anchorName}
-請為以下 ${n} 則「新抓取」的新聞撰寫 ${duration} 分鐘今日早報口播稿。${limitedNewsNote}
+請為以下 ${n} 則「新抓取」的新聞撰寫 ${duration} 分鐘今日早報口播稿。${limitedNewsNote}${enrichedCoverageNote}
 開場可參考：「${listenerName}，早安，我是 ${anchorName}。」
 結尾自稱請使用主播名稱 ${anchorName}，不可使用 ${listenerName}。
 

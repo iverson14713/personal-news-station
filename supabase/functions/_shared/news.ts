@@ -1,7 +1,7 @@
 import {
   calculateNewsQualityScore,
   pickNewsForScript,
-  selectQualityNews,
+  selectQualityNewsForRadio,
   type NewsArticleInput,
 } from "./newsQuality.ts";
 
@@ -27,6 +27,26 @@ export type CollectNewsOptions = {
   maxPerTopic?: number;
   maxTotal?: number;
   durationMinutes?: number;
+};
+
+export type CollectNewsResult = {
+  items: NewsItem[];
+  rawCandidateCount: number;
+  qualitySelectedCount: number;
+  hardRejectedCount: number;
+  usedRelaxedFallback: boolean;
+  usedEmergencyFallback: boolean;
+  qualityThresholdUsed: number;
+  fallbackLevel: number;
+  perTopicStats: Array<{
+    topic: string;
+    rawCount: number;
+    selectedCount: number;
+    hardRejectedCount: number;
+    usedEmergencyFallback: boolean;
+    qualityThresholdUsed: number;
+    fallbackLevel: number;
+  }>;
 };
 
 function decodeXmlEntities(s: string): string {
@@ -72,7 +92,22 @@ export function morningHeadlinesFromSourceNews(sourceNews: unknown): string[] {
 }
 
 function freshnessWindow(radioSlot: RadioSlot): string {
-  return radioSlot === "evening" ? "when:12h" : "when:24h";
+  // 與首頁 api/news.ts 一致（when:2d）；晚報維持較短視窗
+  return radioSlot === "evening" ? "when:12h" : "when:2d";
+}
+
+const RADIO_RSS_SCAN_MAX = 130;
+const RADIO_MORNING_MAX_AGE_MS = 72 * 60 * 60 * 1000;
+const RADIO_EVENING_MAX_AGE_MS = 48 * 60 * 60 * 1000;
+
+function cleanNewsTitle(title: string): string {
+  return title.replace(/\s-\s.*$/, "").trim();
+}
+
+function newsDedupeKey(url: string, title: string): string {
+  const urlKey = url.trim().toLowerCase();
+  if (urlKey) return urlKey;
+  return normalizeNewsKey(title);
 }
 
 function parseNewsTime(value: string | null | undefined): number {
@@ -119,17 +154,25 @@ export async function fetchGoogleNewsRss(
   const items: NewsItem[] = [];
   const itemBlocks = xml.match(/<item[\s\S]*?<\/item>/gi) ?? [];
   const fetchedAt = new Date(cacheBust).toISOString();
+  const maxAgeMs = slot === "evening" ? RADIO_EVENING_MAX_AGE_MS : RADIO_MORNING_MAX_AGE_MS;
 
-  for (const block of itemBlocks.slice(0, 50)) {
-    const title = pickTag(block, "title");
-    if (!title) continue;
+  for (const block of itemBlocks.slice(0, RADIO_RSS_SCAN_MAX)) {
+    const rawTitle = pickTag(block, "title");
+    if (!rawTitle) continue;
+    const title = cleanNewsTitle(rawTitle).slice(0, 500);
     const link = pickTag(block, "link");
     const pubDate = pickTag(block, "pubDate");
+    const pubTs = parseNewsTime(pubDate);
+    if (pubTs > 0) {
+      const ageMs = cacheBust - pubTs;
+      if (ageMs < 0 || ageMs > maxAgeMs) continue;
+    }
     const description = pickTag(block, "description").replace(/<[^>]+>/g, " ").trim();
-    const source = pickTag(block, "source") || "Google News";
+    const source =
+      pickTag(block, "source") || rawTitle.split(" - ").pop() || "Google News";
     items.push({
-      id: normalizeNewsKey(title).slice(0, 120),
-      title: title.slice(0, 500),
+      id: newsDedupeKey(link, title).slice(0, 120),
+      title,
       source: source.slice(0, 200),
       summary: description.slice(0, 800),
       url: link.slice(0, 500),
@@ -146,13 +189,20 @@ function toArticleInput(row: NewsItem): NewsArticleInput {
     title: row.title,
     source: row.source,
     summary: row.summary,
+    description: row.summary,
     url: row.url,
+    link: row.url,
     publishedAt: row.publishedAt,
+    pubDate: row.publishedAt,
     fetchedAt: row.fetchedAt,
+    topic: row.topic,
   };
 }
 
-function fromScoredArticle(row: NewsItem, scored: NewsArticleInput & { quality: { finalScore: number } }): NewsItem {
+function fromScoredArticle(
+  row: NewsItem,
+  scored: NewsArticleInput & { quality: { finalScore: number } }
+): NewsItem {
   return {
     ...row,
     title: scored.title,
@@ -161,6 +211,7 @@ function fromScoredArticle(row: NewsItem, scored: NewsArticleInput & { quality: 
     url: scored.url ?? scored.link ?? row.url,
     publishedAt: scored.publishedAt ?? scored.pubDate ?? row.publishedAt,
     fetchedAt: scored.fetchedAt ?? row.fetchedAt,
+    topic: scored.topic ?? row.topic,
     qualityFinalScore: scored.quality.finalScore,
   };
 }
@@ -170,14 +221,29 @@ export async function collectNewsForUser(
   maxPerTopic = 2,
   maxTotal = 5,
   options?: CollectNewsOptions
-): Promise<NewsItem[]> {
+): Promise<CollectNewsResult> {
   const radioSlot = options?.radioSlot ?? "morning";
   const excludeKeys = options?.excludeKeys ?? new Set<string>();
   const perTopic = options?.maxPerTopic ?? (radioSlot === "evening" ? 4 : maxPerTopic);
   const scanMax = options?.maxTotal ?? (radioSlot === "evening" ? 10 : maxTotal);
+  const durationMinutes = options?.durationMinutes ?? (scanMax >= 18 ? 10 : scanMax >= 12 ? 5 : 3);
+  const durationMins: Record<number, number> = { 3: 3, 5: 5, 10: 8 };
+  const totalMinNeeded = durationMins[durationMinutes] ?? 3;
+  const perTopicMin = Math.max(1, Math.ceil(totalMinNeeded / Math.max(feeds.length, 1)));
+  const perTopicTarget = Math.max(perTopic, perTopicMin);
 
-  const perTopicPool = Math.max(perTopic + 4, 12);
+  const perTopicPool = Math.max(perTopicTarget + 4, 12);
   const topicBuckets: NewsItem[] = [];
+  const perTopicStats: CollectNewsResult["perTopicStats"] = [];
+  let rawCandidateCount = 0;
+  let qualitySelectedCount = 0;
+  let hardRejectedCount = 0;
+  let usedRelaxedFallback = false;
+  let usedEmergencyFallback = false;
+  let qualityThresholdUsed = 8;
+  let fallbackLevel = 0;
+  const pendingByTopic: Array<{ label: string; candidates: NewsItem[]; articles: NewsArticleInput[] }> =
+    [];
 
   for (const feed of feeds) {
     let rows: NewsItem[] = [];
@@ -198,30 +264,177 @@ export async function collectNewsForUser(
       .filter((row) => !excludeKeys.has(normalizeNewsKey(row.title)))
       .map((row) => ({ ...row, topic: feed.label }));
 
-    const { selected } = selectQualityNews(
-      candidates.map(toArticleInput),
-      feed.label,
-      {
-        targetCount: perTopic,
-        minCount: perTopic,
+    rawCandidateCount += candidates.length;
+
+    const articles = candidates.map(toArticleInput);
+    const selection = selectQualityNewsForRadio(articles, feed.label, {
+      targetCount: perTopicTarget,
+      minCount: perTopicMin,
+      maxPerSource: 3,
+      maxPerEvent: 2,
+      scoreTiers: [8, 6, 4],
+      minTopicRelevance: 2,
+      maxAgeHoursHard: radioSlot === "evening" ? 48 : 72,
+      maxAgeHoursSoft: radioSlot === "evening" ? 12 : 48,
+      allowRadioFallback: true,
+      enableLog: true,
+    });
+
+    hardRejectedCount += selection.hardRejectedCount;
+    if (selection.usedRelaxedFallback) usedRelaxedFallback = true;
+    if (selection.usedEmergencyFallback) usedEmergencyFallback = true;
+    if (selection.fallbackLevel > fallbackLevel) fallbackLevel = selection.fallbackLevel;
+    if (selection.qualityThresholdUsed < qualityThresholdUsed) {
+      qualityThresholdUsed = selection.qualityThresholdUsed;
+    }
+
+    if (selection.selected.length === 0 && selection.rawCandidateCount > 0) {
+      console.log(
+        JSON.stringify({
+          event: "news_quality_zero_result",
+          radio_slot: radioSlot,
+          user_id: options?.userId ?? null,
+          topic: feed.label,
+          topics: feeds.map((f) => f.label),
+          raw_candidate_count: selection.rawCandidateCount,
+          quality_candidate_count: selection.log.candidateCount,
+          selected_news_count: 0,
+          rejected_reason_count: selection.log.topRejections.length,
+          sample_rejected_titles: selection.log.topRejections.slice(0, 5).map((r) => r.title),
+          sample_relevance_scores: articles.slice(0, 5).map((a) => {
+            const q = calculateNewsQualityScore(a, feed.label);
+            return {
+              title: a.title.slice(0, 60),
+              topicRelevanceScore: q.topicRelevanceScore,
+              finalScore: q.finalScore,
+            };
+          }),
+          zero_reason: selection.zeroResultReason ?? null,
+        })
+      );
+    }
+
+    if (selection.usedEmergencyFallback) {
+      console.log(
+        JSON.stringify({
+          event: "news_quality_emergency_fallback",
+          radio_slot: radioSlot,
+          user_id: options?.userId ?? null,
+          topic: feed.label,
+          raw_candidate_count: selection.rawCandidateCount,
+          fallback_selected_count: selection.selected.length,
+          fallback_titles: selection.selected.map((s) => s.title),
+          fallback_topics: [feed.label],
+          original_zero_reason: selection.zeroResultReason ?? null,
+        })
+      );
+    }
+
+    perTopicStats.push({
+      topic: feed.label,
+      rawCount: selection.rawCandidateCount,
+      selectedCount: selection.selected.length,
+      hardRejectedCount: selection.hardRejectedCount,
+      usedEmergencyFallback: selection.usedEmergencyFallback,
+      qualityThresholdUsed: selection.qualityThresholdUsed,
+      fallbackLevel: selection.fallbackLevel,
+    });
+
+    pendingByTopic.push({ label: feed.label, candidates, articles });
+
+    const rowByKey = new Map(
+      candidates.map((r) => [newsDedupeKey(r.url, r.title), r])
+    );
+    let topicMergeMiss = 0;
+    for (const picked of selection.selected) {
+      const key = newsDedupeKey(picked.url ?? picked.link ?? "", picked.title);
+      const base = rowByKey.get(key) ?? rowByKey.get(normalizeNewsKey(picked.title));
+      if (!base) {
+        topicMergeMiss += 1;
+        continue;
+      }
+      topicBuckets.push(
+        fromScoredArticle(
+          { ...base, topic: feed.label },
+          picked as NewsArticleInput & { quality: { finalScore: number } }
+        )
+      );
+      if (topicBuckets.filter((n) => n.topic === feed.label).length >= perTopicTarget) break;
+    }
+
+    if (topicMergeMiss > 0) {
+      console.log(
+        JSON.stringify({
+          event: "radio_topic_merge_miss",
+          radio_slot: radioSlot,
+          topic: feed.label,
+          merge_miss_count: topicMergeMiss,
+          selected_count: selection.selected.length,
+        })
+      );
+    }
+
+    console.log(
+      JSON.stringify({
+        event: "radio_pipeline_topic_compare",
+        radio_slot: radioSlot,
+        user_id: options?.userId ?? null,
+        topic: feed.label,
+        rss_window: freshnessWindow(radioSlot),
+        raw_count: candidates.length,
+        quality_selected_count: selection.selected.length,
+        topic_merge_miss_count: topicMergeMiss,
+        topic_bucket_count: topicBuckets.filter((n) => n.topic === feed.label).length,
+        sample_titles: selection.selected.slice(0, 3).map((s) => s.title.slice(0, 80)),
+        sample_topics: selection.selected.slice(0, 3).map(() => feed.label),
+        articles_missing_topic_in_input: articles.filter((a) => !a.topic?.trim()).length,
+      })
+    );
+  }
+
+  if (topicBuckets.length === 0 && rawCandidateCount > 0) {
+    usedEmergencyFallback = true;
+    fallbackLevel = 5;
+    qualityThresholdUsed = 0;
+    for (const pending of pendingByTopic) {
+      const rescue = selectQualityNewsForRadio(pending.articles, pending.label, {
+        targetCount: 1,
+        minCount: 1,
         maxPerSource: 3,
         maxPerEvent: 2,
-        scoreTiers: [8, 6, 4],
-        minTopicRelevance: 2,
-        maxAgeHoursHard: radioSlot === "evening" ? 48 : 72,
-        maxAgeHoursSoft: radioSlot === "evening" ? 12 : 24,
-        enableLog: true,
+        allowRadioFallback: true,
+        enableLog: false,
+      });
+      hardRejectedCount += rescue.hardRejectedCount;
+      const rowByKey = new Map(
+        pending.candidates.map((r) => [newsDedupeKey(r.url, r.title), r])
+      );
+      for (const picked of rescue.selected) {
+        const key = newsDedupeKey(picked.url ?? picked.link ?? "", picked.title);
+        const base = rowByKey.get(key) ?? rowByKey.get(normalizeNewsKey(picked.title));
+        if (!base) continue;
+        topicBuckets.push(
+          fromScoredArticle(
+            { ...base, topic: pending.label },
+            picked as NewsArticleInput & { quality: { finalScore: number } }
+          )
+        );
+        if (topicBuckets.filter((n) => n.topic === pending.label).length >= 1) break;
       }
-    );
-
-    const rowByTitle = new Map(candidates.map((r) => [normalizeNewsKey(r.title), r]));
-    for (const picked of selected) {
-      const base = rowByTitle.get(normalizeNewsKey(picked.title));
-      if (!base) continue;
-      topicBuckets.push(fromScoredArticle({ ...base, topic: feed.label }, picked as NewsArticleInput & { quality: { finalScore: number } }));
-      if (topicBuckets.filter((n) => n.topic === feed.label).length >= perTopicPool) break;
     }
+    console.log(
+      JSON.stringify({
+        event: "news_quality_emergency_fallback",
+        radio_slot: radioSlot,
+        user_id: options?.userId ?? null,
+        scope: "global_per_topic_minimum",
+        raw_candidate_count: rawCandidateCount,
+        fallback_selected_count: topicBuckets.length,
+      })
+    );
   }
+
+  qualitySelectedCount = topicBuckets.length;
 
   const seen = new Set<string>();
   const seenUrls = new Set<string>();
@@ -242,13 +455,19 @@ export async function collectNewsForUser(
     merged.push(row);
   }
 
-  const durationMinutes = options?.durationMinutes ?? (scanMax >= 18 ? 10 : scanMax >= 12 ? 5 : 3);
   const result = pickNewsForScript(
     merged.map((row) => {
-      const input = toArticleInput(row);
-      const quality = calculateNewsQualityScore(input, row.topic);
+      if (!row.topic?.trim()) {
+        console.warn("[News] pickNewsForScript missing topic", {
+          title: row.title.slice(0, 80),
+          url: row.url?.slice(0, 80),
+        });
+      }
+      const input = toArticleInput({ ...row, topic: row.topic || feeds[0]?.label || "" });
+      const quality = calculateNewsQualityScore(input, row.topic || feeds[0]?.label || "");
       return {
         ...input,
+        topic: row.topic,
         quality: {
           ...quality,
           finalScore: row.qualityFinalScore ?? quality.finalScore,
@@ -258,17 +477,21 @@ export async function collectNewsForUser(
     durationMinutes
   ).map((picked) => {
     const match = merged.find((m) => normalizeNewsKey(m.title) === normalizeNewsKey(picked.title));
-    return match ?? ({
-      id: normalizeNewsKey(picked.title).slice(0, 120),
-      title: picked.title,
-      source: picked.source,
-      summary: picked.summary ?? picked.description ?? "",
-      url: picked.url ?? picked.link ?? "",
-      publishedAt: picked.publishedAt ?? picked.pubDate ?? "",
-      fetchedAt: picked.fetchedAt ?? new Date().toISOString(),
-      topic: feeds[0]?.label ?? "",
-    } satisfies NewsItem);
+    return (
+      match ??
+      ({
+        id: normalizeNewsKey(picked.title).slice(0, 120),
+        title: picked.title,
+        source: picked.source,
+        summary: picked.summary ?? picked.description ?? "",
+        url: picked.url ?? picked.link ?? "",
+        publishedAt: picked.publishedAt ?? picked.pubDate ?? "",
+        fetchedAt: picked.fetchedAt ?? new Date().toISOString(),
+        topic: picked.topic ?? feeds[0]?.label ?? "",
+      } satisfies NewsItem)
+    );
   });
+
   const publishedTimes = result.map((n) => parseNewsTime(n.publishedAt)).filter((v) => v > 0);
   const fetchedTimes = result.map((n) => parseNewsTime(n.fetchedAt)).filter((v) => v > 0);
   const selectedTimes = result.map(newsSortTime).filter((v) => v > 0);
@@ -278,6 +501,7 @@ export async function collectNewsForUser(
     feeds: feeds.length,
     exclude_count: excludeKeys.size,
     fetched_count: result.length,
+    raw_candidate_count: rawCandidateCount,
     used_fresh_rss: true,
   });
 
@@ -290,8 +514,12 @@ export async function collectNewsForUser(
       force_refresh: true,
       last_fetch_at: null,
       fetched_count: merged.length,
+      raw_candidate_count: rawCandidateCount,
       upserted_count: 0,
       selected_count: result.length,
+      used_relaxed_fallback: usedRelaxedFallback,
+      used_emergency_fallback: usedEmergencyFallback,
+      per_topic_stats: perTopicStats,
       newest_published_at: publishedTimes.length
         ? new Date(Math.max(...publishedTimes)).toISOString()
         : null,
@@ -301,11 +529,24 @@ export async function collectNewsForUser(
       oldest_selected_at: selectedTimes.length
         ? new Date(Math.min(...selectedTimes)).toISOString()
         : null,
-      freshness_window_hours: radioSlot === "evening" ? 12 : 24,
+      freshness_window_hours: radioSlot === "evening" ? 12 : 48,
+      rss_window: freshnessWindow(radioSlot),
+      quality_selected_count: qualitySelectedCount,
+      script_selected_count: result.length,
       used_cache: false,
       fallback_reason: result.length === 0 ? "no_fresh_rss_items" : null,
     })
   );
 
-  return result;
+  return {
+    items: result,
+    rawCandidateCount,
+    qualitySelectedCount,
+    hardRejectedCount,
+    usedRelaxedFallback,
+    usedEmergencyFallback,
+    qualityThresholdUsed,
+    fallbackLevel,
+    perTopicStats,
+  };
 }

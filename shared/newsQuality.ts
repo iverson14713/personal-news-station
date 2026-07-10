@@ -77,7 +77,21 @@ export type SelectNewsOptions = {
   allowExtendedFallback?: boolean;
   maxAgeHoursPrimary?: number;
   maxAgeHoursExtended?: number;
+  /** 早報 / 晚報：品質不足或 0 則時啟用降級與 emergency fallback（不影響首頁） */
+  allowRadioFallback?: boolean;
   enableLog?: boolean;
+};
+
+export type RadioQualitySelectionResult = {
+  selected: ScoredNewsArticle[];
+  log: QualitySelectionLog;
+  rawCandidateCount: number;
+  hardRejectedCount: number;
+  usedRelaxedFallback: boolean;
+  usedEmergencyFallback: boolean;
+  qualityThresholdUsed: number;
+  fallbackLevel: number;
+  zeroResultReason?: string;
 };
 
 type TopicProfile = {
@@ -313,6 +327,7 @@ const TOPIC_PROFILES: Record<string, TopicProfile> = {
     ],
     lowKeywords: ["散文", "健康", "養生", "減肥", "癌症", "里長", "社區", "鄰里"],
     excludeKeywords: ["健康飲食", "養生秘訣", "抒情"],
+    relatedKeywords: ["全球", "全球新聞", "國際局勢", "國際新聞"],
   },
   戰爭: {
     highKeywords: [
@@ -420,6 +435,7 @@ const TOPIC_PROFILES: Record<string, TopicProfile> = {
 const WORLD_CUP_PROFILE: TopicProfile = {
   highKeywords: [
     "世界盃",
+    "世界杯",
     "世足",
     "world cup",
     "fifa",
@@ -433,9 +449,14 @@ const WORLD_CUP_PROFILE: TopicProfile = {
   lowKeywords: ["非足球", "籃球", "廣告", "優惠"],
 };
 
+/** 簡繁／異體字統一，避免「世界杯」主題無法匹配「世界盃」新聞標題 */
+function normalizeMatchText(text: string): string {
+  return text.toLowerCase().replace(/世界杯/g, "世界盃");
+}
+
 function getTopicProfile(topic: string): TopicProfile {
   if (TOPIC_PROFILES[topic]) return TOPIC_PROFILES[topic];
-  if (/世界盃|世足|world cup/i.test(topic)) return WORLD_CUP_PROFILE;
+  if (/世界[盃杯]|世足|world cup/i.test(topic)) return WORLD_CUP_PROFILE;
 
   const parts = topic
     .split(/\s+|OR|或|、/i)
@@ -463,19 +484,19 @@ function publishedMs(article: NewsArticleInput): number {
 }
 
 function countKeywordHits(text: string, keywords: string[]): number {
-  const lower = text.toLowerCase();
+  const lower = normalizeMatchText(text);
   let hits = 0;
   for (const kw of keywords) {
     if (!kw) continue;
-    if (lower.includes(kw.toLowerCase())) hits += 1;
+    if (lower.includes(normalizeMatchText(kw))) hits += 1;
   }
   return hits;
 }
 
 function scoreTopicRelevance(article: NewsArticleInput, topic: string): number {
   const profile = getTopicProfile(topic);
-  const title = article.title.toLowerCase();
-  const body = articleText(article).toLowerCase();
+  const title = normalizeMatchText(article.title);
+  const body = normalizeMatchText(articleText(article));
 
   if (profile.excludeKeywords?.some((kw) => title.includes(kw.toLowerCase()) || body.includes(kw.toLowerCase()))) {
     return -3;
@@ -492,7 +513,7 @@ function scoreTopicRelevance(article: NewsArticleInput, topic: string): number {
   score += Math.min(relatedHits, 2);
   score -= Math.min(lowHits * 2, 6);
 
-  const topicLower = topic.toLowerCase();
+  const topicLower = normalizeMatchText(topic);
   const titleHasTopic = title.includes(topicLower);
   const bodyHasTopic = body.includes(topicLower);
   if (titleHasTopic && bodyHasTopic) score += 2;
@@ -685,6 +706,151 @@ function isHardRejected(
   }
 
   return null;
+}
+
+/** 早報 / 晚報：僅排除完全無關、廣告、內容農場、純導購等 */
+function isRadioHardRejected(
+  article: NewsArticleInput,
+  topic: string,
+  quality: NewsQualityBreakdown
+): string | null {
+  if (quality.topicRelevanceScore < 0) return "low_topic_relevance";
+  if (quality.lowQualityPenalty >= 8) return "low_quality_content";
+  if (quality.clickbaitPenalty >= 6 && quality.informationDensityScore <= 0) {
+    return "clickbait_low_density";
+  }
+  if (!article.title?.trim() || article.title.trim().length < 4) return "empty_title";
+
+  const profile = getTopicProfile(topic);
+  const text = articleText(article).toLowerCase();
+  if (profile.excludeKeywords?.some((kw) => text.includes(kw.toLowerCase()))) {
+    return "topic_excluded_keyword";
+  }
+
+  return null;
+}
+
+function articlePublishedMs(article: NewsArticleInput): number {
+  const ts = publishedMs(article);
+  return ts > 0 ? ts : 0;
+}
+
+function buildRadioScoredPool(
+  articles: NewsArticleInput[],
+  topic: string,
+  nowMs: number
+): {
+  pool: ScoredNewsArticle[];
+  hardRejections: Array<{ title: string; reason: string; finalScore: number }>;
+} {
+  const pool: ScoredNewsArticle[] = [];
+  const hardRejections: Array<{ title: string; reason: string; finalScore: number }> = [];
+  const seenUrls = new Set<string>();
+
+  for (const article of articles) {
+    const url = articleUrl(article);
+    if (url && seenUrls.has(url)) continue;
+    if (url) seenUrls.add(url);
+
+    const quality = calculateNewsQualityScore(article, topic, nowMs);
+    const hardReason = isRadioHardRejected(article, topic, quality);
+    if (hardReason) {
+      hardRejections.push({ title: article.title, reason: hardReason, finalScore: quality.finalScore });
+      continue;
+    }
+
+    pool.push({ ...article, quality });
+  }
+
+  pool.sort((a, b) => b.quality.finalScore - a.quality.finalScore);
+  return { pool, hardRejections };
+}
+
+function pickRadioTierFromPool(
+  pool: ScoredNewsArticle[],
+  selected: ScoredNewsArticle[],
+  tier: number,
+  minRelevance: number,
+  limit: number,
+  maxPerSource: number,
+  maxPerEvent: number,
+  fallbackRank: number
+): number {
+  const sourceCount = new Map<string, number>();
+  const eventKeys: string[] = [];
+  for (const item of selected) {
+    sourceCount.set(item.source.toLowerCase(), (sourceCount.get(item.source.toLowerCase()) ?? 0) + 1);
+    eventKeys.push(normalizeTitleKey(item.title));
+  }
+
+  let added = 0;
+  for (const item of pool) {
+    if (selected.length >= limit) break;
+    if (isAlreadySelected(item, selected)) continue;
+    if (item.quality.topicRelevanceScore < minRelevance) continue;
+    if (item.quality.finalScore < tier && !(tier <= 2 && item.quality.finalScore >= tier - 1)) {
+      continue;
+    }
+    if (item.quality.lowQualityPenalty >= 6) continue;
+    if (item.quality.clickbaitPenalty >= 6) continue;
+
+    const sourceKey = item.source.toLowerCase();
+    if ((sourceCount.get(sourceKey) ?? 0) >= maxPerSource) continue;
+
+    const eventKey = normalizeTitleKey(item.title);
+    let sameEvent = 0;
+    for (const ek of eventKeys) {
+      if (titleSimilarity(ek, eventKey) >= 0.72) sameEvent += 1;
+    }
+    if (sameEvent >= maxPerEvent) continue;
+
+    selected.push({ ...item, fallbackRank });
+    sourceCount.set(sourceKey, (sourceCount.get(sourceKey) ?? 0) + 1);
+    eventKeys.push(eventKey);
+    added += 1;
+  }
+  return added;
+}
+
+function finalRadioEmergencySelect(
+  articles: NewsArticleInput[],
+  topic: string,
+  targetCount: number,
+  maxPerSource: number,
+  alreadySelected: ScoredNewsArticle[]
+): ScoredNewsArticle[] {
+  const nowMs = Date.now();
+  const pool: ScoredNewsArticle[] = [];
+
+  for (const article of articles) {
+    const quality = calculateNewsQualityScore(article, topic, nowMs);
+    if (isRadioHardRejected(article, topic, quality)) continue;
+    pool.push({ ...article, quality, fallbackRank: 5 });
+  }
+
+  pool.sort((a, b) => {
+    const ta = articlePublishedMs(a);
+    const tb = articlePublishedMs(b);
+    if (tb !== ta) return tb - ta;
+    return b.quality.finalScore - a.quality.finalScore;
+  });
+
+  const selected: ScoredNewsArticle[] = [];
+  const sourceCount = new Map<string, number>();
+  for (const item of alreadySelected) {
+    sourceCount.set(item.source.toLowerCase(), (sourceCount.get(item.source.toLowerCase()) ?? 0) + 1);
+  }
+
+  for (const item of pool) {
+    if (selected.length + alreadySelected.length >= targetCount) break;
+    if (isAlreadySelected(item, alreadySelected) || isAlreadySelected(item, selected)) continue;
+    const sourceKey = item.source.toLowerCase();
+    if ((sourceCount.get(sourceKey) ?? 0) >= maxPerSource) continue;
+    selected.push(item);
+    sourceCount.set(sourceKey, (sourceCount.get(sourceKey) ?? 0) + 1);
+  }
+
+  return selected;
 }
 
 function articleAgeHours(article: NewsArticleInput, nowMs: number): number | null {
@@ -948,28 +1114,256 @@ export function selectQualityNews(
   return { selected, log };
 }
 
+function mergeSelectedArticles(
+  primary: ScoredNewsArticle[],
+  extra: ScoredNewsArticle[],
+  limit: number
+): ScoredNewsArticle[] {
+  const merged = [...primary];
+  for (const item of extra) {
+    if (merged.length >= limit) break;
+    if (isAlreadySelected(item, merged)) continue;
+    merged.push(item);
+  }
+  return merged;
+}
+
+function emergencySelectRelevantNews(
+  articles: NewsArticleInput[],
+  topic: string,
+  targetCount: number,
+  options: Pick<SelectNewsOptions, "maxPerSource" | "maxAgeHoursHard" | "maxAgeHoursSoft">
+): ScoredNewsArticle[] {
+  const nowMs = Date.now();
+  const maxPerSource = options.maxPerSource ?? 3;
+  const maxAgeHoursHard = options.maxAgeHoursHard ?? 72;
+  const maxAgeHoursSoft = options.maxAgeHoursSoft ?? 24;
+
+  const pool: ScoredNewsArticle[] = [];
+  for (const article of articles) {
+    const quality = calculateNewsQualityScore(article, topic, nowMs);
+    if (quality.topicRelevanceScore < 0) continue;
+    if (quality.lowQualityPenalty >= 6) continue;
+    if (quality.clickbaitPenalty >= 6) continue;
+
+    const hardReason = isHardRejected(article, topic, quality, nowMs, maxAgeHoursHard);
+    if (
+      hardReason === "low_topic_relevance" ||
+      hardReason === "low_quality_content" ||
+      hardReason === "clickbait_low_density" ||
+      hardReason === "topic_excluded_keyword"
+    ) {
+      continue;
+    }
+
+    const ageHours = articleAgeHours(article, nowMs);
+    if (
+      ageHours != null &&
+      ageHours > maxAgeHoursSoft &&
+      quality.freshnessScore === 0 &&
+      quality.importanceScore < 2 &&
+      quality.topicRelevanceScore < 2
+    ) {
+      continue;
+    }
+
+    pool.push({ ...article, quality, fallbackRank: 4 });
+  }
+
+  pool.sort((a, b) => {
+    if (b.quality.topicRelevanceScore !== a.quality.topicRelevanceScore) {
+      return b.quality.topicRelevanceScore - a.quality.topicRelevanceScore;
+    }
+    if (b.quality.freshnessScore !== a.quality.freshnessScore) {
+      return b.quality.freshnessScore - a.quality.freshnessScore;
+    }
+    return b.quality.finalScore - a.quality.finalScore;
+  });
+
+  const selected: ScoredNewsArticle[] = [];
+  const sourceCount = new Map<string, number>();
+  for (const item of pool) {
+    if (selected.length >= targetCount) break;
+    const sourceKey = item.source.toLowerCase();
+    if ((sourceCount.get(sourceKey) ?? 0) >= maxPerSource) continue;
+    selected.push(item);
+    sourceCount.set(sourceKey, (sourceCount.get(sourceKey) ?? 0) + 1);
+  }
+
+  return selected;
+}
+
+/** 早報 / 晚報專用：持續降門檻直到達標；僅在完全無可用候選時才 0 則 */
+export function selectQualityNewsForRadio(
+  articles: NewsArticleInput[],
+  topic: string,
+  options: SelectNewsOptions
+): RadioQualitySelectionResult {
+  const nowMs = Date.now();
+  const rawCandidateCount = articles.length;
+  const targetCount = options.targetCount;
+  const minCount = options.minCount ?? targetCount;
+  const maxPerSource = options.maxPerSource ?? 3;
+  const maxPerEvent = options.maxPerEvent ?? 2;
+
+  const { pool, hardRejections } = buildRadioScoredPool(articles, topic, nowMs);
+  const selected: ScoredNewsArticle[] = [];
+  let qualityThresholdUsed = 8;
+  let fallbackLevel = 0;
+  let usedRelaxedFallback = false;
+  let usedEmergencyFallback = false;
+  let zeroResultReason: string | undefined;
+
+  const stages: Array<{ tier: number; minRelevance: number; fallbackRank: number; level: number }> = [
+    { tier: 8, minRelevance: 2, fallbackRank: 0, level: 1 },
+    { tier: 6, minRelevance: 2, fallbackRank: 1, level: 2 },
+    { tier: 4, minRelevance: 1, fallbackRank: 2, level: 3 },
+    { tier: 2, minRelevance: 0, fallbackRank: 3, level: 4 },
+  ];
+
+  for (const stage of stages) {
+    if (selected.length >= minCount) break;
+    const before = selected.length;
+    pickRadioTierFromPool(
+      pool,
+      selected,
+      stage.tier,
+      stage.minRelevance,
+      minCount,
+      maxPerSource,
+      maxPerEvent,
+      stage.fallbackRank
+    );
+    if (selected.length > before) {
+      qualityThresholdUsed = stage.tier;
+      fallbackLevel = stage.level;
+      if (stage.tier < 8) usedRelaxedFallback = true;
+    }
+  }
+
+  if (selected.length < minCount && pool.length > 0) {
+    usedRelaxedFallback = true;
+    fallbackLevel = 4;
+    qualityThresholdUsed = 1;
+    for (const item of pool) {
+      if (selected.length >= minCount) break;
+      if (isAlreadySelected(item, selected)) continue;
+      if (item.quality.topicRelevanceScore < 0) continue;
+      if (item.quality.lowQualityPenalty >= 8) continue;
+      selected.push({ ...item, fallbackRank: 4 });
+    }
+  }
+
+  if (selected.length < minCount && rawCandidateCount > 0) {
+    usedEmergencyFallback = true;
+    fallbackLevel = 5;
+    qualityThresholdUsed = 0;
+    zeroResultReason = hardRejections[0]?.reason ?? "quality_tiers_empty";
+    const extra = finalRadioEmergencySelect(articles, topic, minCount, maxPerSource, selected);
+    for (const item of extra) {
+      if (selected.length >= minCount) break;
+      if (!isAlreadySelected(item, selected)) selected.push(item);
+    }
+  }
+
+  if (selected.length === 0 && pool.length > 0) {
+    usedEmergencyFallback = true;
+    fallbackLevel = 5;
+    qualityThresholdUsed = 0;
+    const byFreshness = [...pool].sort((a, b) => articlePublishedMs(b) - articlePublishedMs(a));
+    for (const item of byFreshness) {
+      if (selected.length >= minCount) break;
+      selected.push({ ...item, fallbackRank: 5 });
+    }
+  }
+
+  if (selected.length === 0 && rawCandidateCount > 0) {
+    zeroResultReason = hardRejections[0]?.reason ?? "all_hard_rejected";
+  }
+
+  selected.sort((a, b) => {
+    const rankA = a.fallbackRank ?? 0;
+    const rankB = b.fallbackRank ?? 0;
+    if (rankA !== rankB) return rankA - rankB;
+    if (b.quality.finalScore !== a.quality.finalScore) {
+      return b.quality.finalScore - a.quality.finalScore;
+    }
+    return b.quality.freshnessScore - a.quality.freshnessScore;
+  });
+
+  const log: QualitySelectionLog = {
+    topic,
+    candidateCount: rawCandidateCount,
+    selectedCount: selected.length,
+    tierUsed: qualityThresholdUsed,
+    selected: selected.map((s) => ({
+      title: s.title,
+      source: s.source,
+      finalScore: s.quality.finalScore,
+      topicRelevanceScore: s.quality.topicRelevanceScore,
+    })),
+    lowestSelected:
+      selected.length > 0
+        ? {
+            title: selected[selected.length - 1]!.title,
+            finalScore: selected[selected.length - 1]!.quality.finalScore,
+          }
+        : undefined,
+    topRejections: hardRejections.slice(0, 5),
+  };
+
+  if (options.enableLog) {
+    console.log(
+      JSON.stringify({
+        event: "news_quality_selection_radio",
+        ...log,
+        quality_threshold_used: qualityThresholdUsed,
+        fallback_level: fallbackLevel,
+        hard_rejected_count: hardRejections.length,
+        used_emergency_fallback: usedEmergencyFallback,
+      })
+    );
+  }
+
+  return {
+    selected,
+    log,
+    rawCandidateCount,
+    hardRejectedCount: hardRejections.length,
+    usedRelaxedFallback,
+    usedEmergencyFallback,
+    qualityThresholdUsed,
+    fallbackLevel,
+    zeroResultReason,
+  };
+}
+
 export function pickNewsForScript<T extends NewsArticleInput & { quality?: NewsQualityBreakdown }>(
   articles: T[],
   durationMinutes: number
 ): T[] {
   const targets: Record<number, { min: number; max: number }> = {
-    3: { min: 5, max: 8 },
-    5: { min: 8, max: 12 },
-    10: { min: 12, max: 20 },
-    15: { min: 15, max: 25 },
+    3: { min: 3, max: 8 },
+    5: { min: 5, max: 10 },
+    10: { min: 8, max: 15 },
+    15: { min: 8, max: 20 },
   };
   const target = targets[durationMinutes] ?? targets[3]!;
+
+  if (articles.length === 0) return [];
 
   const scored = articles.map((a) => ({
     article: a,
     score:
       a.quality?.finalScore ??
-      calculateNewsQualityScore(a, a.topic ?? a.title).finalScore,
+      (a.topic
+        ? calculateNewsQualityScore(a, a.topic).finalScore
+        : 0),
   }));
   scored.sort((a, b) => b.score - a.score);
 
   const picked = scored.slice(0, target.max).map((s) => s.article);
   if (picked.length >= target.min) return picked;
 
-  return scored.slice(0, Math.min(target.min, scored.length)).map((s) => s.article);
+  return scored.slice(0, Math.max(picked.length, Math.min(target.min, scored.length))).map((s) => s.article);
 }

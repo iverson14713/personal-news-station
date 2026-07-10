@@ -13,8 +13,14 @@ import {
 } from "./audioRetention.ts";
 
 const OPENAI_SPEECH_URL = "https://api.openai.com/v1/audio/speech";
-const OPENAI_TIMEOUT_MS = 55_000;
+const SHORT_TTS_TIMEOUT_MS = 60_000;
+const MEDIUM_TTS_TIMEOUT_MS = 120_000;
+const LONG_TTS_TIMEOUT_MS = 150_000;
+const TTS_RETRY_DELAY_MS = 2500;
+const MAX_TTS_ATTEMPTS = 2;
 const MAX_SCRIPT_CHARS = 3000;
+
+const RETRYABLE_HTTP_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 
 type ScriptRow = {
   id: string;
@@ -39,6 +45,8 @@ export type GenerateAudioForScriptInput = {
   isPro: boolean;
   isFavorited?: boolean;
   skipQuotaCheck?: boolean;
+  radioSlot?: string;
+  durationMinutes?: number;
 };
 
 export type GenerateAudioForScriptResult =
@@ -79,14 +87,65 @@ export function isScriptAudioReady(
   return isAudioCacheHit(row as ScriptRow, requestedVoice, requestedStyle);
 }
 
-async function synthesizeMp3(
+export function resolveTtsTimeoutMs(scriptChars: number): number {
+  if (scriptChars <= 800) return SHORT_TTS_TIMEOUT_MS;
+  if (scriptChars <= 1800) return MEDIUM_TTS_TIMEOUT_MS;
+  return LONG_TTS_TIMEOUT_MS;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseTtsHttpStatus(message: string): number | null {
+  const match = message.match(/OpenAI TTS (\d{3})/i);
+  if (!match) return null;
+  const status = Number(match[1]);
+  return Number.isFinite(status) ? status : null;
+}
+
+function isNonRetryableTtsError(error: unknown, httpStatus: number | null): boolean {
+  if (httpStatus === 400) return true;
+  const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  if (
+    msg.includes("authentication") ||
+    msg.includes("invalid api key") ||
+    msg.includes("invalid request") ||
+    msg.includes("input format")
+  ) {
+    return true;
+  }
+  if (httpStatus != null && httpStatus >= 400 && httpStatus < 500) {
+    return !RETRYABLE_HTTP_STATUSES.has(httpStatus);
+  }
+  return false;
+}
+
+function isRetryableTtsError(error: unknown, httpStatus: number | null): boolean {
+  if (isNonRetryableTtsError(error, httpStatus)) return false;
+  if (error instanceof Error && error.name === "AbortError") return true;
+  if (httpStatus != null && RETRYABLE_HTTP_STATUSES.has(httpStatus)) return true;
+  const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  return msg.includes("timeout") || msg.includes("abort") || msg.includes("aborted");
+}
+
+type TtsLogContext = {
+  scriptId: string;
+  radioSlot: string | null;
+  durationMinutes: number | null;
+  scriptChars: number;
+  voice: string;
+};
+
+async function synthesizeMp3Once(
   apiKey: string,
   text: string,
   voice: string,
-  instructions: string
-): Promise<Uint8Array> {
+  instructions: string,
+  timeoutMs: number
+): Promise<{ mp3: Uint8Array; httpStatus: number }> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const res = await fetch(OPENAI_SPEECH_URL, {
@@ -110,10 +169,96 @@ async function synthesizeMp3(
       throw new Error(`OpenAI TTS ${res.status}: ${raw.slice(0, 200)}`);
     }
 
-    return new Uint8Array(await res.arrayBuffer());
+    return {
+      mp3: new Uint8Array(await res.arrayBuffer()),
+      httpStatus: res.status,
+    };
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function synthesizeMp3WithRetry(
+  apiKey: string,
+  text: string,
+  voice: string,
+  instructions: string,
+  logCtx: TtsLogContext
+): Promise<Uint8Array> {
+  const timeoutMs = resolveTtsTimeoutMs(text.length);
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= MAX_TTS_ATTEMPTS; attempt++) {
+    const startedAt = Date.now();
+    console.log(
+      JSON.stringify({
+        event: "tts_generation_start",
+        script_id: logCtx.scriptId,
+        radio_slot: logCtx.radioSlot,
+        duration_minutes: logCtx.durationMinutes,
+        script_chars: logCtx.scriptChars,
+        voice: logCtx.voice,
+        timeout_ms: timeoutMs,
+        attempt,
+      })
+    );
+
+    try {
+      const { mp3, httpStatus } = await synthesizeMp3Once(
+        apiKey,
+        text,
+        voice,
+        instructions,
+        timeoutMs
+      );
+      const elapsedMs = Date.now() - startedAt;
+      console.log(
+        JSON.stringify({
+          event: "tts_generation_success",
+          script_id: logCtx.scriptId,
+          attempt,
+          elapsed_ms: elapsedMs,
+          audio_bytes: mp3.byteLength,
+          storage_path: audioStoragePath(logCtx.scriptId),
+          http_status: httpStatus,
+        })
+      );
+      return mp3;
+    } catch (error) {
+      lastError = error;
+      const elapsedMs = Date.now() - startedAt;
+      const errorName = error instanceof Error ? error.name : "Error";
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const httpStatus = parseTtsHttpStatus(errorMessage);
+      const aborted = error instanceof Error && error.name === "AbortError";
+
+      console.log(
+        JSON.stringify({
+          event: "tts_generation_failed",
+          script_id: logCtx.scriptId,
+          attempt,
+          elapsed_ms: elapsedMs,
+          error_name: errorName,
+          error_message: errorMessage.slice(0, 300),
+          http_status: httpStatus,
+          response_body_summary: errorMessage.includes(":")
+            ? errorMessage.split(":").slice(1).join(":").trim().slice(0, 200)
+            : null,
+          aborted,
+          timeout_ms: timeoutMs,
+          will_retry: attempt < MAX_TTS_ATTEMPTS && isRetryableTtsError(error, httpStatus),
+        })
+      );
+
+      if (attempt < MAX_TTS_ATTEMPTS && isRetryableTtsError(error, httpStatus)) {
+        await sleep(TTS_RETRY_DELAY_MS);
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("OpenAI TTS failed");
 }
 
 export async function generateAudioForScript(
@@ -173,9 +318,23 @@ export async function generateAudioForScript(
     return { ok: false, code: "TOO_LONG", error: "script too long" };
   }
 
+  const logCtx: TtsLogContext = {
+    scriptId: input.scriptId,
+    radioSlot: input.radioSlot ?? null,
+    durationMinutes: input.durationMinutes ?? null,
+    scriptChars: textForTts.length,
+    voice,
+  };
+
   let mp3: Uint8Array;
   try {
-    mp3 = await synthesizeMp3(input.openaiKey, textForTts, voice, instructions);
+    mp3 = await synthesizeMp3WithRetry(
+      input.openaiKey,
+      textForTts,
+      voice,
+      instructions,
+      logCtx
+    );
   } catch (e) {
     const msg = e instanceof Error ? e.message : "OpenAI TTS failed";
     return { ok: false, code: "TTS_FAILED", error: msg };

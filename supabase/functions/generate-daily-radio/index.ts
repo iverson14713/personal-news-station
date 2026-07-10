@@ -166,10 +166,16 @@ type AutoDurationRule = {
 };
 
 const AUTO_DURATION_RULES: Record<3 | 5 | 10, AutoDurationRule> = {
-  3: { targetMin: 5, targetMax: 8, min: 5, maxPerTopic: 3 },
-  5: { targetMin: 8, targetMax: 12, min: 8, maxPerTopic: 4 },
-  10: { targetMin: 15, targetMax: 20, min: 12, maxPerTopic: 6 },
+  3: { targetMin: 5, targetMax: 8, min: 3, maxPerTopic: 3 },
+  5: { targetMin: 7, targetMax: 10, min: 5, maxPerTopic: 4 },
+  10: { targetMin: 10, targetMax: 15, min: 8, maxPerTopic: 5 },
 };
+
+function durationFallbackChain(requested: 3 | 5 | 10): Array<3 | 5 | 10> {
+  if (requested === 10) return [10, 5, 3];
+  if (requested === 5) return [5, 3];
+  return [3];
+}
 
 function normalizeRequestedAutoDuration(duration: number): 3 | 5 | 10 {
   return duration === 5 || duration === 10 ? duration : 3;
@@ -626,6 +632,8 @@ async function ensureAnchorAudioBeforePush(
     isPro: true,
     isFavorited: false,
     skipQuotaCheck: true,
+    radioSlot,
+    durationMinutes: duration,
   });
 
   if (!audioResult.ok) {
@@ -863,21 +871,66 @@ async function processUserSlot(
       no_frontend_source: true,
     });
 
-    const durationRule = AUTO_DURATION_RULES[duration as 3 | 5 | 10];
-    const news: NewsItem[] = await collectNewsForUser(feeds, 2, 5, {
-      radioSlot,
-      userId: user.user_id,
-      excludeKeys,
-      maxPerTopic: durationRule.maxPerTopic,
-      maxTotal: durationRule.targetMax,
-      durationMinutes: duration,
-    });
+    const collectForDuration = async (dur: 3 | 5 | 10) => {
+      const rule = AUTO_DURATION_RULES[dur];
+      return collectNewsForUser(feeds, 2, 5, {
+        radioSlot,
+        userId: user.user_id,
+        excludeKeys,
+        maxPerTopic: rule.maxPerTopic,
+        maxTotal: rule.targetMax,
+        durationMinutes: dur,
+      });
+    };
 
-    const finalDuration = resolveFinalDurationForNews(duration as 3 | 5 | 10, news.length);
-    const fallbackReason =
-      finalDuration.fallbackReason ?? slotConfig.requestedFallbackReason;
+    const requestedRadioDuration = duration as 3 | 5 | 10;
+    const durationChain = durationFallbackChain(requestedRadioDuration);
+    let collection = await collectForDuration(durationChain[0]!);
+    let news: NewsItem[] = collection.items;
+    let collectedAtDuration = durationChain[0]!;
+    let durationDowngradeReason: string | null = null;
+
+    for (let i = 0; i < durationChain.length; i++) {
+      const tryDuration = durationChain[i]!;
+      if (i > 0) {
+        collection = await collectForDuration(tryDuration);
+        news = collection.items;
+        collectedAtDuration = tryDuration;
+      }
+      const rule = AUTO_DURATION_RULES[tryDuration];
+      if (news.length >= rule.min) break;
+      if (i < durationChain.length - 1) {
+        const next = durationChain[i + 1]!;
+        durationDowngradeReason = `insufficient_news_for_${tryDuration}_min_fallback_to_${next}`;
+      }
+    }
+
+    const finalDuration = resolveFinalDurationForNews(collectedAtDuration, news.length);
+    let fallbackReason =
+      finalDuration.fallbackReason ??
+      durationDowngradeReason ??
+      slotConfig.requestedFallbackReason;
     duration = finalDuration.duration;
     const finalRule = AUTO_DURATION_RULES[duration as 3 | 5 | 10];
+
+    console.log(
+      JSON.stringify({
+        event: "daily_radio_final_selection",
+        radio_slot: radioSlot,
+        user_id: user.user_id,
+        raw_candidate_count: collection.rawCandidateCount,
+        selected_news_count: news.length,
+        requested_duration: requestedDuration,
+        final_duration: duration,
+        quality_threshold_used: collection.qualityThresholdUsed,
+        fallback_level: collection.fallbackLevel,
+        used_emergency_fallback: collection.usedEmergencyFallback,
+        selected_titles: news.map((n) => n.title),
+        used_quality_fallback: collection.usedRelaxedFallback,
+        hard_rejected_count: collection.hardRejectedCount,
+        per_topic_stats: collection.perTopicStats,
+      })
+    );
 
     if (duration !== slotConfig.duration) {
       const existingFinalRow = await fetchScriptBySource(
@@ -944,10 +997,36 @@ async function processUserSlot(
     );
 
     if (news.length === 0) {
+      const rejectionSamples = collection.perTopicStats.flatMap((s) =>
+        s.selectedCount === 0 && s.rawCount > 0 ? [{ topic: s.topic, raw_count: s.rawCount }] : []
+      );
+      console.log(
+        JSON.stringify({
+          event: "daily_radio_no_usable_news",
+          radio_slot: radioSlot,
+          user_id: user.user_id,
+          raw_candidate_count: collection.rawCandidateCount,
+          hard_rejected_count: collection.hardRejectedCount,
+          requested_duration: requestedDuration,
+          final_duration: duration,
+          rejection_reasons: collection.perTopicStats.map((s) => ({
+            topic: s.topic,
+            raw_count: s.rawCount,
+            hard_rejected_count: s.hardRejectedCount,
+            fallback_level: s.fallbackLevel,
+          })),
+          sample_titles: [],
+          topics_with_zero_selection: rejectionSamples,
+        })
+      );
       throw new Error(
         radioSlot === "evening"
-          ? "無法取得晚報新新聞（可能與早報重複或來源暫無更新）"
-          : "無法取得新聞"
+          ? collection.rawCandidateCount === 0
+            ? "無法取得晚報新新聞（RSS 來源暫無資料）"
+            : "無法取得晚報新新聞（所有候選均為無關或垃圾內容）"
+          : collection.rawCandidateCount === 0
+            ? "無法取得新聞（RSS 來源暫無資料）"
+            : "無法取得新聞（所有候選均為無關或垃圾內容）"
       );
     }
 
@@ -1007,7 +1086,16 @@ async function processUserSlot(
       anchorName: anchorPrefs.anchorName,
       morningHeadlines: radioSlot === "evening" ? morningHeadlines : undefined,
       durationMinutes: duration,
-      limitedNews: duration === 10 && news.length < AUTO_DURATION_RULES[10].targetMin,
+      limitedNews:
+        duration === 10
+          ? news.length < finalRule.min
+          : duration === 5
+            ? news.length < AUTO_DURATION_RULES[5].min
+            : news.length < AUTO_DURATION_RULES[3].min,
+      enrichedCoverage:
+        duration === 10 &&
+        news.length >= finalRule.min &&
+        news.length < finalRule.targetMin,
     });
 
     const finalScript = appendRadioClosing(script, radioSlot);
