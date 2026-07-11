@@ -7,6 +7,9 @@
     "screenshot:apple": "node scripts/screenshot-apple.mjs",
     "resize:apple-screenshots": "node scripts/resize-apple-screenshots.mjs",
     "test:supabase-daily-radio": "node scripts/test-supabase-daily-radio.mjs",
+    "test:push-delivery-claim": "node scripts/test-push-delivery-claim.mjs",
+    "test:daily-radio-eligibility": "node scripts/test-daily-radio-eligibility.mjs",
+    "test:daily-radio-queue": "node scripts/test-daily-radio-queue.mjs",
     "setup:petcare-supabase": "bash scripts/setup-petcare-supabase.sh"
   },
   "dependencies": {

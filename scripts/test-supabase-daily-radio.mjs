@@ -119,7 +119,11 @@ async function main() {
         "Content-Type": "application/json",
         "x-cron-secret": cronSecret,
       },
-      body: JSON.stringify({ test: true }),
+      body: JSON.stringify({
+        triggerSource: "manual",
+        force: false,
+        test: true,
+      }),
     });
     const fnBody = await fnRes.json().catch(() => ({}));
     results.push([

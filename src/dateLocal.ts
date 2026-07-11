@@ -6,11 +6,16 @@ export function todayYmdLocal(d = new Date()): string {
 }
 
 /** 指定時區的今日 YYYY-MM-DD（早報 script_date 與後端 Cron 對齊） */
-export function todayYmdInTimezone(timezone = "Asia/Taipei", d = new Date()): string {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: timezone }).format(d);
+export const DAILY_SCRIPT_TIMEZONE = "Asia/Taipei";
+
+/** 台灣今日 YYYY-MM-DD（與後端 Cron / Edge Function 對齊） */
+export function getTaipeiDateKey(d = new Date()): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: DAILY_SCRIPT_TIMEZONE }).format(d);
 }
 
-export const DAILY_SCRIPT_TIMEZONE = "Asia/Taipei";
+export function todayYmdInTimezone(timezone = DAILY_SCRIPT_TIMEZONE, d = new Date()): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: timezone }).format(d);
+}
 
 export function hourInTimezone(timezone = DAILY_SCRIPT_TIMEZONE, d = new Date()): number {
   const parts = new Intl.DateTimeFormat("en-US", {

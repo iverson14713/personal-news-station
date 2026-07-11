@@ -64,6 +64,7 @@ import {
   fetchServerDailyScript,
   saveAppGeneratedDailyScript,
   syncUserNewsPreferences,
+  bootstrapServerPreferencesFromLocal,
   triggerServerDailyRadioGeneration,
   type DailyScriptQueryDebug,
   type FetchScriptOptions,
@@ -1128,6 +1129,7 @@ export default function App() {
     activeScriptAudioUrl,
     scriptAudioStaleReason
   );
+  const hasPlayableAnchorAudio = anchorAudioReady && Boolean(activeScriptAudioUrl?.trim());
 
   const clearScriptAudioBinding = useCallback(() => {
     setActiveScriptAudioUrl(null);
@@ -2740,6 +2742,7 @@ ${newsText}
     if (result.kind === "no_user") {
       setServerSyncState("no_user");
       serverScriptReadyRef.current = false;
+      clearScriptAudioBinding();
       return null;
     }
 
@@ -2787,6 +2790,15 @@ ${newsText}
       return s;
     }
 
+    if (result.kind === "pending") {
+      setServerSyncState("loading");
+      console.log("[DailyRadio] server generation in progress", {
+        status: result.status,
+        script_id: result.debug.scriptId,
+      });
+      return null;
+    }
+
     serverScriptReadyRef.current = false;
 
     const today = todayDailyScriptYmd();
@@ -2804,12 +2816,14 @@ ${newsText}
       setAiScript("");
       setAiHighlights([]);
       setSelectedScriptDuration(null);
+      clearScriptAudioBinding();
     }
 
     if (result.kind === "not_found") {
       clearAutoplayDailyFlag();
       clearAutoplayAnchorAudioFlag();
       setServerSyncState("not_found");
+      clearScriptAudioBinding();
     } else {
       setServerSyncState("idle");
     }
@@ -2835,13 +2849,13 @@ ${newsText}
   }, [anchorActions, anchorPlaybackRate]);
 
   useEffect(() => {
-    if (!voiceFeatureEnabled) return;
-    if (anchorAudioReady && activeScriptAudioUrl) {
+    if (hasPlayableAnchorAudio && activeScriptAudioUrl) {
       anchorActions.setAudioUrl(activeScriptAudioUrl);
-    } else {
-      anchorActions.setAudioUrl(null);
+      return;
     }
-  }, [voiceFeatureEnabled, anchorAudioReady, activeScriptAudioUrl, anchorActions]);
+    anchorActions.stop();
+    anchorActions.setAudioUrl(null);
+  }, [hasPlayableAnchorAudio, activeScriptAudioUrl, anchorActions]);
 
   const currentAiIsFavorited = useMemo(() => {
     if (!currentAiFavoriteId) return false;
@@ -3025,32 +3039,36 @@ ${newsText}
     async (serverScript?: ServerDailyScript | null) => {
       if (!voiceFeatureEnabled) return;
       if (displayScriptSource !== "server") return;
-      if (serverScript) {
-        if (
-          isTodayScriptAudioReady(
-            serverScript.scriptDate,
-            todayDailyScriptYmd(),
-            serverScript.audioUrl,
-            serverScript.audioExpiresAt,
-            serverScript.audioVoice,
-            serverScript.audioStyle,
-            selectedAnchor.voice,
-            anchorStyleId
-          )
-        ) {
-          return;
-        }
-      } else if (anchorAudioReady) {
+
+      const fresh = serverScript ?? (await refreshServerDailyScript());
+      if (!fresh) return;
+
+      if (
+        isTodayScriptAudioReady(
+          fresh.scriptDate,
+          todayDailyScriptYmd(),
+          fresh.audioUrl,
+          fresh.audioExpiresAt,
+          fresh.audioVoice,
+          fresh.audioStyle,
+          selectedAnchor.voice,
+          anchorStyleId
+        )
+      ) {
         return;
       }
-      await handleGenerateScriptAudio();
+
+      await handleGenerateScriptAudio({
+        scriptId: fresh.id,
+        scriptText: fresh.scriptText,
+      });
     },
     [
       voiceFeatureEnabled,
       displayScriptSource,
       selectedAnchor.voice,
       anchorStyleId,
-      anchorAudioReady,
+      refreshServerDailyScript,
       handleGenerateScriptAudio,
     ]
   );
@@ -3067,6 +3085,16 @@ ${newsText}
         logDailyRadioScheduler(trigger, "server script already ready");
         console.log("[DailyRadio] manual generate succeeded", { source: "server" });
         await ensureDailyAnchorAudio(serverScript);
+        return;
+      }
+
+      const pendingCheck = await fetchServerDailyScript();
+      if (pendingCheck.kind === "pending") {
+        logDailyRadioScheduler(trigger, "server generation in progress — skip app fallback");
+        console.log("[DailyRadio] skip app fallback: server script generating", {
+          status: pendingCheck.status,
+          script_id: pendingCheck.debug.scriptId,
+        });
         return;
       }
 
@@ -3495,6 +3523,10 @@ ${newsText}
     void (async () => {
       if (!isSupabaseConfigured()) return;
       await initSupabaseAuth();
+      const userId = await ensureSupabaseUser();
+      if (userId) {
+        await bootstrapServerPreferencesFromLocal();
+      }
       await initRemotePush((info) => {
         handleOpenFromDailyNotificationRef.current(info);
       });
@@ -3995,13 +4027,13 @@ ${newsText}
                   ) : null}
                 </div>
               ) : null
-            ) : anchorAudioReady && activeScriptAudioUrl ? (
+            ) : hasPlayableAnchorAudio ? (
               <div style={styles.playerVoicePrimary}>
                 <AiAnchorBroadcastPanel
                   anchor={getAnchorById(DEFAULT_AI_ANCHOR_SETTINGS.anchorId)}
                   style={getStyleById(DEFAULT_AI_ANCHOR_SETTINGS.style)}
                   playbackRate={anchorPlaybackRate}
-                  onPlaybackRateChange={() => {}}
+                  onPlaybackRateChange={handleAnchorPlaybackRateChange}
                   volumeGain={1.0}
                   onVolumeGainChange={() => {}}
                   audioUrl={activeScriptAudioUrl}

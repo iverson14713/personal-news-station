@@ -7,6 +7,7 @@ import {
   getAnchorById,
 } from "./aiAnchorSettings";
 import { normalizeAutoRadioDuration } from "./aiDuration";
+import { readStoredSelectedTopics } from "./TopicOnboardingScreen";
 import {
   ensureSupabaseUser,
   getLocalTimezone,
@@ -14,6 +15,43 @@ import {
   isSupabaseConfigured,
   type DailyRadioScriptRow,
 } from "./supabaseClient";
+
+const CUSTOM_KEYWORDS_STORAGE_KEY = "pns_custom_keywords_v1";
+
+function readStoredCustomKeywords(): string[] {
+  try {
+    const raw = localStorage.getItem(CUSTOM_KEYWORDS_STORAGE_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw) as unknown;
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+      .map((s) => s.trim());
+  } catch {
+    return [];
+  }
+}
+
+/** 登入後立即將本機主題／關鍵字 upsert 到 server（不依賴 onboarding 完成） */
+export async function bootstrapServerPreferencesFromLocal(): Promise<boolean> {
+  if (!isSupabaseConfigured()) return true;
+
+  const userId = await ensureSupabaseUser();
+  if (!userId) return false;
+
+  const topics = readStoredSelectedTopics();
+  const customKeywords = readStoredCustomKeywords();
+
+  return syncUserNewsPreferences({
+    topics,
+    customKeywords,
+    dailyRadioEnabled: true,
+    morningRadioEnabled: true,
+    eveningRadioEnabled: false,
+    morningDurationMinutes: 3,
+    eveningDurationMinutes: 3,
+  });
+}
 
 export type ServerDailyScript = {
   id: string;
@@ -380,60 +418,31 @@ export async function syncPushTokenToSupabase(
     updated_at: new Date().toISOString(),
   };
 
-  const { data: existing, error: readError } = await supabase
-    .from("news_user_preferences")
-    .select("user_id")
-    .eq("user_id", userId)
-    .maybeSingle();
+  const topics = readStoredSelectedTopics();
+  const customKeywords = readStoredCustomKeywords();
 
-  if (readError) {
-    console.warn("[Push] token save failed", readError.message);
-    return false;
-  }
+  const { error } = await supabase.from("news_user_preferences").upsert(
+    {
+      user_id: userId,
+      topics,
+      custom_keywords: customKeywords,
+      daily_radio_enabled: true,
+      daily_radio_time: "07:00",
+      morning_radio_enabled: true,
+      evening_radio_enabled: false,
+      morning_radio_time: "07:00",
+      evening_radio_time: "17:00",
+      morning_duration_minutes: 3,
+      evening_duration_minutes: 3,
+      timezone: getLocalTimezone(),
+      display_name: null,
+      ...patch,
+    },
+    { onConflict: "user_id" }
+  );
 
-  if (existing) {
-    const { error } = await supabase
-      .from("news_user_preferences")
-      .update(patch)
-      .eq("user_id", userId);
-    if (error) {
-      console.warn("[Push] token save failed", error.message);
-      return false;
-    }
-    return true;
-  }
-
-  console.log("[Push] inserting minimal preferences row", userPrefix(userId));
-  const { error: insertError } = await supabase.from("news_user_preferences").insert({
-    user_id: userId,
-    topics: [],
-    custom_keywords: [],
-    daily_radio_enabled: true,
-    daily_radio_time: "07:00",
-    morning_radio_enabled: true,
-    evening_radio_enabled: false,
-    morning_radio_time: "07:00",
-    evening_radio_time: "17:00",
-    morning_duration_minutes: 3,
-    evening_duration_minutes: 3,
-    timezone: getLocalTimezone(),
-    display_name: null,
-    ...patch,
-  });
-
-  if (insertError) {
-    if (insertError.code === "23505") {
-      const { error: updateError } = await supabase
-        .from("news_user_preferences")
-        .update(patch)
-        .eq("user_id", userId);
-      if (updateError) {
-        console.warn("[Push] token save failed", updateError.message);
-        return false;
-      }
-      return true;
-    }
-    console.warn("[Push] token save failed", insertError.message);
+  if (error) {
+    console.warn("[Push] token save failed", error.message);
     return false;
   }
 
@@ -534,6 +543,7 @@ export async function triggerServerDailyRadioGeneration(options?: {
       target_user_id: userId,
       radio_slot: radioSlot,
       send_test_push: options?.sendTestPush === true,
+      triggerSource: "manual",
       app: "ai-news-station-debug",
     },
   });

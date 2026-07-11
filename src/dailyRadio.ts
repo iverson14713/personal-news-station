@@ -10,7 +10,13 @@ import {
   normalizeAutoRadioDuration,
   type AiDuration,
 } from "./aiDuration";
-import { DAILY_SCRIPT_TIMEZONE, todayYmdInTimezone, todayYmdLocal, ymdFromTimestamp } from "./dateLocal";
+import {
+  DAILY_SCRIPT_TIMEZONE,
+  getTaipeiDateKey,
+  todayYmdInTimezone,
+  todayYmdLocal,
+  ymdFromTimestamp,
+} from "./dateLocal";
 import {
   type RadioSlot,
   radioSlotCompletedTitle,
@@ -41,7 +47,7 @@ export const NEWS_FETCH_TIMEOUT_MS = 10_000;
 
 /** 早報「今日」以 Asia/Taipei 對齊後端 Cron */
 export function todayDailyScriptYmd(): string {
-  return todayYmdInTimezone(DAILY_SCRIPT_TIMEZONE);
+  return getTaipeiDateKey();
 }
 
 export const DAILY_RADIO_STORAGE_KEY = "pns_daily_radio_v1";

@@ -83,14 +83,18 @@ export function resolveAnchorSettings(
   };
 }
 
-/** Pro / 內部測試才預生成真人語音；舊版 Pro 可能只有 evening_radio_enabled */
+/** Pro 唯一判斷來源：news_user_preferences.voice_feature_enabled */
+export function isProUser(user: {
+  voice_feature_enabled?: boolean | null;
+}): boolean {
+  return user.voice_feature_enabled === true;
+}
+
+/** Pro 才預生成真人語音（與 isProUser 同義，保留既有呼叫點） */
 export function isVoiceFeatureEnabled(user: {
   voice_feature_enabled?: boolean | null;
-  evening_radio_enabled?: boolean | null;
 }): boolean {
-  if (user.voice_feature_enabled === true) return true;
-  if (user.evening_radio_enabled === true) return true;
-  return false;
+  return isProUser(user);
 }
 
 const VOICE_TO_ANCHOR_ID: Record<string, string> = {
