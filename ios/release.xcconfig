@@ -1,0 +1,2 @@
+PUSH_ENVIRONMENT = production
+APP_DISTRIBUTION = production

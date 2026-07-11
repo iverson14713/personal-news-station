@@ -12,6 +12,12 @@ export type PushOpenDebugFields = {
   audio_url_exists?: boolean;
   audio_url_prefix?: string | null;
   navigate_to_play_page?: boolean;
+  authReady?: boolean;
+  navigationReady?: boolean;
+  appState?: string;
+  parsedScriptId?: string | null;
+  parsedRadioSlot?: string | null;
+  parsedOpenTarget?: string | null;
   anchorPlayer_play_called?: boolean;
   play_promise_resolved?: boolean;
   play_promise_rejected?: boolean;

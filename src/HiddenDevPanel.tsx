@@ -1,13 +1,30 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import type { CSSProperties } from "react";
+import { App as CapApp } from "@capacitor/app";
+import { Capacitor } from "@capacitor/core";
 
+import { fetchPushDiagnosticsFromSupabase } from "./dailyRadioApi";
 import {
   clearInternalAccess,
   isInternalAccessActive,
   readInternalAccess,
   verifyAndEnableInternalCode,
 } from "./hiddenDevUnlock";
-import { getProStatus, isProActive, type ProStatus } from "./pro";
+import {
+  formatAppDistributionLabel,
+  getPushEnvironment,
+  type PushEnvironmentDiagnostics,
+} from "./plugins/pushEnvironment";
+import { getProStatus, isProActive } from "./pro";
+import {
+  PUSH_NAV_BUILD_MARKER,
+  PUSH_NAV_IMPL_VERSION,
+} from "./pushNavTrace";
+import {
+  getCachedPushEnvironmentDiagnostics,
+  getCachedPushToken,
+  reregisterAndSyncPushToken,
+} from "./remotePush";
 
 type HiddenDevPanelProps = {
   open: boolean;
@@ -18,6 +35,33 @@ type HiddenDevPanelProps = {
   onTriggerServerDailyRadio?: () => Promise<void>;
   onSimulateAiAnchorPushClick?: () => Promise<void>;
 };
+
+type DevPanelSectionProps = {
+  title: string;
+  defaultOpen?: boolean;
+  children: ReactNode;
+};
+
+function DevPanelSection({ title, defaultOpen = false, children }: DevPanelSectionProps) {
+  const [expanded, setExpanded] = useState(defaultOpen);
+
+  return (
+    <div style={styles.section}>
+      <button
+        type="button"
+        style={styles.sectionToggle}
+        onClick={() => setExpanded((prev) => !prev)}
+        aria-expanded={expanded}
+      >
+        <span style={styles.sectionTitle}>{title}</span>
+        <span style={styles.sectionChevron} aria-hidden>
+          {expanded ? "▾" : "▸"}
+        </span>
+      </button>
+      {expanded ? <div style={styles.sectionBody}>{children}</div> : null}
+    </div>
+  );
+}
 
 export function HiddenDevPanel({
   open,
@@ -33,6 +77,77 @@ export function HiddenDevPanel({
   const [busy, setBusy] = useState(false);
   const [triggerBusy, setTriggerBusy] = useState(false);
   const [simulatePushBusy, setSimulatePushBusy] = useState(false);
+  const [pushBusy, setPushBusy] = useState(false);
+  const [nativeEnv, setNativeEnv] = useState<PushEnvironmentDiagnostics | null>(null);
+  const [dbPushTokenPrefix, setDbPushTokenPrefix] = useState<string | null>(null);
+  const [dbPushEnvironment, setDbPushEnvironment] = useState<string | null>(null);
+  const [dbPushUpdatedAt, setDbPushUpdatedAt] = useState<string | null>(null);
+  const [pushSyncMessage, setPushSyncMessage] = useState<string | null>(null);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+  const [appBuild, setAppBuild] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    void (async () => {
+      try {
+        const info = await CapApp.getInfo();
+        setAppVersion(info.version ?? null);
+        setAppBuild(info.build ?? null);
+      } catch {
+        setAppVersion(null);
+        setAppBuild(null);
+      }
+    })();
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const scrollY = window.scrollY;
+    const prevBodyOverflow = document.body.style.overflow;
+    const prevBodyPosition = document.body.style.position;
+    const prevBodyTop = document.body.style.top;
+    const prevBodyWidth = document.body.style.width;
+    const prevBodyTouchAction = document.body.style.touchAction;
+
+    document.body.style.overflow = "hidden";
+    document.body.style.position = "fixed";
+    document.body.style.top = `-${scrollY}px`;
+    document.body.style.width = "100%";
+    document.body.style.touchAction = "none";
+
+    return () => {
+      document.body.style.overflow = prevBodyOverflow;
+      document.body.style.position = prevBodyPosition;
+      document.body.style.top = prevBodyTop;
+      document.body.style.width = prevBodyWidth;
+      document.body.style.touchAction = prevBodyTouchAction;
+      window.scrollTo(0, scrollY);
+    };
+  }, [open]);
+
+  const refreshPushDiagnostics = useCallback(async () => {
+    const cachedNative = getCachedPushEnvironmentDiagnostics();
+    if (cachedNative) {
+      setNativeEnv(cachedNative);
+    } else if (Capacitor.getPlatform() === "ios") {
+      const resolved = await getPushEnvironment();
+      setNativeEnv(resolved);
+    }
+
+    const row = await fetchPushDiagnosticsFromSupabase();
+    if (row) {
+      const token = row.push_token?.trim() ?? "";
+      setDbPushTokenPrefix(token ? token.slice(0, 12) : null);
+      setDbPushEnvironment(row.push_environment ?? "null");
+      setDbPushUpdatedAt(row.updated_at ?? null);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    void refreshPushDiagnostics();
+  }, [open, refreshPushDiagnostics, supabaseUserId]);
 
   if (!open) return null;
 
@@ -40,6 +155,7 @@ export function HiddenDevPanel({
   const internalActive = isInternalAccessActive();
   const internalRecord = readInternalAccess();
   const iapActive = proStatus.isPro && proStatus.proSource === "purchase";
+  const cachedTokenPrefix = getCachedPushToken()?.slice(0, 12) ?? null;
 
   const handleSubmit = () => {
     setBusy(true);
@@ -85,6 +201,28 @@ export function HiddenDevPanel({
       });
   };
 
+  const handleReregisterPush = () => {
+    setPushBusy(true);
+    setPushSyncMessage(null);
+    void reregisterAndSyncPushToken()
+      .then(async (result) => {
+        await refreshPushDiagnostics();
+        if (result.ok) {
+          setPushSyncMessage("同步成功");
+        } else {
+          setPushSyncMessage(`同步錯誤：${result.error ?? "unknown"}`);
+        }
+      })
+      .catch((e) => {
+        setPushSyncMessage(
+          `同步錯誤：${e instanceof Error ? e.message : "unknown"}`
+        );
+      })
+      .finally(() => {
+        setPushBusy(false);
+      });
+  };
+
   return (
     <div style={styles.backdrop} onClick={onClose} role="presentation">
       <div
@@ -94,87 +232,166 @@ export function HiddenDevPanel({
         aria-modal="true"
         aria-label="內部管理"
       >
-        <div style={styles.title}>內部管理</div>
-        <p style={styles.desc}>此面板僅供內部測試，不影響 App Store 訂閱。</p>
-
-        <div style={styles.statusBox}>
-          <div style={styles.statusRow}>
-            <span>正式訂閱</span>
-            <strong>{iapActive ? "已啟用" : "未啟用"}</strong>
+        <header style={styles.header}>
+          <div>
+            <div style={styles.title}>內部管理</div>
+            <p style={styles.desc}>此面板僅供內部測試，不影響 App Store 訂閱。</p>
           </div>
-          <div style={styles.statusRow}>
-            <span>本機狀態</span>
-            <strong>{internalActive ? "已啟用" : "未啟用"}</strong>
-          </div>
-          {internalRecord?.expiresAt ? (
-            <div style={styles.statusHint}>
-              本機有效至 {new Date(internalRecord.expiresAt).toLocaleDateString("zh-TW")}
-            </div>
-          ) : null}
-          <div style={styles.statusHint}>
-            目前方案：{isProActive(proStatus) ? "Pro" : "Free"}
-          </div>
-        </div>
-
-        <label style={styles.label} htmlFor="hidden-dev-code">
-          內部代碼
-        </label>
-        <input
-          id="hidden-dev-code"
-          value={code}
-          onChange={(e) => setCode(e.target.value)}
-          placeholder="輸入內部代碼"
-          style={styles.input}
-          autoCapitalize="off"
-          autoComplete="off"
-          autoCorrect="off"
-        />
-
-        {message ? <p style={styles.message}>{message}</p> : null}
-
-        {onTriggerServerDailyRadio || onSimulateAiAnchorPushClick ? (
-          <div style={styles.devActionBox}>
-            <div style={styles.statusHint}>
-              user_id: {supabaseUserId ? `${supabaseUserId.slice(0, 8)}…` : "未登入"}
-            </div>
-            {todayServerScriptId ? (
-              <div style={styles.statusHint}>
-                server script: {todayServerScriptId.slice(0, 8)}…
-              </div>
-            ) : null}
-            {onTriggerServerDailyRadio ? (
-              <button
-                type="button"
-                disabled={triggerBusy || !supabaseUserId}
-                onClick={handleTriggerServer}
-                style={styles.secondary}
-              >
-                {triggerBusy ? "生成中…" : "立即生成今日 Server 稿 + MP3"}
-              </button>
-            ) : null}
-            {onSimulateAiAnchorPushClick ? (
-              <button
-                type="button"
-                disabled={simulatePushBusy || !supabaseUserId}
-                onClick={handleSimulatePush}
-                style={styles.secondary}
-              >
-                {simulatePushBusy ? "模擬中…" : "模擬點擊 AI 主播推播"}
-              </button>
-            ) : null}
-          </div>
-        ) : null}
-
-        <div style={styles.actions}>
-          <button type="button" disabled={busy || !code.trim()} onClick={handleSubmit} style={styles.primary}>
-            {busy ? "處理中…" : "套用"}
-          </button>
-          <button type="button" onClick={handleClearInternal} style={styles.secondary}>
-            關閉本機 Pro
-          </button>
-          <button type="button" onClick={onClose} style={styles.secondary}>
+          <button type="button" onClick={onClose} style={styles.closeButton} aria-label="關閉">
             關閉
           </button>
+        </header>
+
+        <div style={styles.content}>
+          <DevPanelSection title="Push Nav 診斷" defaultOpen>
+            <div style={styles.statusBox}>
+              <div style={styles.statusHint}>
+                Web build marker：{PUSH_NAV_BUILD_MARKER}
+              </div>
+              <div style={styles.statusHint}>
+                Push nav impl：{PUSH_NAV_IMPL_VERSION}
+              </div>
+              <div style={styles.statusHint}>
+                App version：{appVersion ?? "—"}
+              </div>
+              <div style={styles.statusHint}>
+                App build：{appBuild ?? "—"}
+              </div>
+            </div>
+          </DevPanelSection>
+
+          <DevPanelSection title="Push 診斷" defaultOpen>
+            <div style={styles.statusBox}>
+              <div style={styles.statusHint}>
+                目前 user_id: {supabaseUserId ?? "未登入"}
+              </div>
+              <div style={styles.statusHint}>
+                方案：{isProActive(proStatus) ? "Pro" : "Free"}
+              </div>
+              <div style={styles.statusHint}>
+                push_token（本機快取前 12 碼）：{cachedTokenPrefix ?? "—"}
+              </div>
+              <div style={styles.statusHint}>
+                push_token（DB 前 12 碼）：{dbPushTokenPrefix ?? "—"}
+              </div>
+              <div style={styles.statusHint}>
+                DB push_environment：{dbPushEnvironment ?? "—"}
+              </div>
+              <div style={styles.statusHint}>
+                iOS entitlement：{nativeEnv?.entitlement ?? "—"}
+              </div>
+              <div style={styles.statusHint}>
+                實際判斷 Push Environment：{nativeEnv?.environment ?? "—"}
+                {nativeEnv?.usedFallback ? " (fallback)" : ""}
+              </div>
+              <div style={styles.statusHint}>
+                目前 App：{nativeEnv ? formatAppDistributionLabel(nativeEnv.appDistribution) : "—"}
+              </div>
+              <div style={styles.statusHint}>
+                Token 最後同步時間：
+                {dbPushUpdatedAt
+                  ? new Date(dbPushUpdatedAt).toLocaleString("zh-TW")
+                  : "—"}
+              </div>
+              {pushSyncMessage ? (
+                <div style={styles.statusHint}>{pushSyncMessage}</div>
+              ) : null}
+              <button
+                type="button"
+                disabled={pushBusy || !supabaseUserId}
+                onClick={handleReregisterPush}
+                style={styles.secondary}
+              >
+                {pushBusy ? "同步中…" : "重新註冊並同步 Push Token"}
+              </button>
+            </div>
+          </DevPanelSection>
+
+          <DevPanelSection title="訂閱狀態">
+            <div style={styles.statusBox}>
+              <div style={styles.statusRow}>
+                <span>正式訂閱</span>
+                <strong>{iapActive ? "已啟用" : "未啟用"}</strong>
+              </div>
+              <div style={styles.statusRow}>
+                <span>本機狀態</span>
+                <strong>{internalActive ? "已啟用" : "未啟用"}</strong>
+              </div>
+              {internalRecord?.expiresAt ? (
+                <div style={styles.statusHint}>
+                  本機有效至 {new Date(internalRecord.expiresAt).toLocaleDateString("zh-TW")}
+                </div>
+              ) : null}
+              <div style={styles.statusHint}>
+                目前方案：{isProActive(proStatus) ? "Pro" : "Free"}
+              </div>
+            </div>
+          </DevPanelSection>
+
+          <DevPanelSection title="內部代碼">
+            <label style={styles.label} htmlFor="hidden-dev-code">
+              內部代碼
+            </label>
+            <input
+              id="hidden-dev-code"
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              placeholder="輸入內部代碼"
+              style={styles.input}
+              autoCapitalize="off"
+              autoComplete="off"
+              autoCorrect="off"
+            />
+            {message ? <p style={styles.message}>{message}</p> : null}
+            <div style={styles.actions}>
+              <button
+                type="button"
+                disabled={busy || !code.trim()}
+                onClick={handleSubmit}
+                style={styles.primary}
+              >
+                {busy ? "處理中…" : "套用"}
+              </button>
+              <button type="button" onClick={handleClearInternal} style={styles.secondary}>
+                關閉本機 Pro
+              </button>
+            </div>
+          </DevPanelSection>
+
+          {onTriggerServerDailyRadio || onSimulateAiAnchorPushClick ? (
+            <DevPanelSection title="Server 稿件測試">
+              <div style={styles.devActionBox}>
+                <div style={styles.statusHint}>
+                  user_id: {supabaseUserId ? `${supabaseUserId.slice(0, 8)}…` : "未登入"}
+                </div>
+                {todayServerScriptId ? (
+                  <div style={styles.statusHint}>
+                    server script: {todayServerScriptId.slice(0, 8)}…
+                  </div>
+                ) : null}
+                {onTriggerServerDailyRadio ? (
+                  <button
+                    type="button"
+                    disabled={triggerBusy || !supabaseUserId}
+                    onClick={handleTriggerServer}
+                    style={styles.secondary}
+                  >
+                    {triggerBusy ? "生成中…" : "立即生成今日 Server 稿 + MP3"}
+                  </button>
+                ) : null}
+                {onSimulateAiAnchorPushClick ? (
+                  <button
+                    type="button"
+                    disabled={simulatePushBusy || !supabaseUserId}
+                    onClick={handleSimulatePush}
+                    style={styles.secondary}
+                  >
+                    {simulatePushBusy ? "模擬中…" : "模擬點擊 AI 主播推播"}
+                  </button>
+                ) : null}
+              </div>
+            </DevPanelSection>
+          ) : null}
         </div>
       </div>
     </div>
@@ -190,34 +407,108 @@ const styles: Record<string, CSSProperties> = {
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    padding: 20,
+    paddingTop: "calc(env(safe-area-inset-top, 0px) + 12px)",
+    paddingRight: 12,
+    paddingBottom: "calc(env(safe-area-inset-bottom, 0px) + 12px)",
+    paddingLeft: 12,
+    overflow: "hidden",
+    touchAction: "none",
   },
   panel: {
-    width: "min(420px, 100%)",
-    borderRadius: 18,
-    padding: "22px 20px",
+    width: "min(680px, 100%)",
+    maxHeight: "calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 24px)",
+    display: "flex",
+    flexDirection: "column",
+    overflow: "hidden",
+    borderRadius: 24,
     background: "linear-gradient(180deg, #0F172A 0%, #111827 100%)",
     border: "1px solid rgba(148,163,184,.22)",
     boxShadow: "0 24px 64px rgba(0,0,0,.45)",
     color: "#F8FAFC",
   },
+  header: {
+    flex: "0 0 auto",
+    position: "sticky",
+    top: 0,
+    zIndex: 2,
+    display: "flex",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+    padding: "18px 20px 14px",
+    borderBottom: "1px solid rgba(148,163,184,.16)",
+    background: "linear-gradient(180deg, #0F172A 0%, #111827 100%)",
+  },
   title: {
     fontSize: 20,
     fontWeight: 800,
-    marginBottom: 6,
+    marginBottom: 4,
   },
   desc: {
     fontSize: 13,
     lineHeight: 1.5,
     color: "#94A3B8",
-    margin: "0 0 16px",
+    margin: 0,
+  },
+  closeButton: {
+    flex: "0 0 auto",
+    borderRadius: 10,
+    padding: "8px 12px",
+    fontSize: 14,
+    fontWeight: 700,
+    color: "#F8FAFC",
+    background: "rgba(255,255,255,.08)",
+    border: "1px solid rgba(148,163,184,.28)",
+    cursor: "pointer",
+  },
+  content: {
+    flex: "1 1 auto",
+    minHeight: 0,
+    overflowY: "auto",
+    overflowX: "hidden",
+    overscrollBehavior: "contain",
+    WebkitOverflowScrolling: "touch",
+    touchAction: "pan-y",
+    padding: "12px 20px",
+    paddingBottom: "calc(env(safe-area-inset-bottom, 0px) + 24px)",
+  },
+  section: {
+    marginBottom: 10,
+    borderRadius: 12,
+    border: "1px solid rgba(148,163,184,.14)",
+    background: "rgba(255,255,255,.02)",
+    overflow: "hidden",
+  },
+  sectionToggle: {
+    width: "100%",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    padding: "12px 14px",
+    border: "none",
+    background: "transparent",
+    color: "#E2E8F0",
+    cursor: "pointer",
+    textAlign: "left",
+  },
+  sectionTitle: {
+    fontSize: 14,
+    fontWeight: 700,
+  },
+  sectionChevron: {
+    fontSize: 14,
+    color: "#94A3B8",
+    flexShrink: 0,
+  },
+  sectionBody: {
+    padding: "0 14px 14px",
   },
   statusBox: {
     borderRadius: 12,
     padding: "12px 14px",
     background: "rgba(255,255,255,.04)",
     border: "1px solid rgba(148,163,184,.16)",
-    marginBottom: 16,
   },
   statusRow: {
     display: "flex",
@@ -256,7 +547,6 @@ const styles: Record<string, CSSProperties> = {
     margin: "0 0 12px",
   },
   devActionBox: {
-    marginBottom: 14,
     display: "flex",
     flexDirection: "column",
     gap: 8,
@@ -285,5 +575,6 @@ const styles: Record<string, CSSProperties> = {
     background: "rgba(255,255,255,.06)",
     border: "1px solid rgba(148,163,184,.22)",
     cursor: "pointer",
+    marginTop: 8,
   },
 };

@@ -8,8 +8,12 @@
     "resize:apple-screenshots": "node scripts/resize-apple-screenshots.mjs",
     "test:supabase-daily-radio": "node scripts/test-supabase-daily-radio.mjs",
     "test:push-delivery-claim": "node scripts/test-push-delivery-claim.mjs",
+    "test:push-environment-routing": "node scripts/test-push-environment-routing.mjs",
+    "test:push-retry-copy": "node scripts/test-push-retry-copy.mjs",
+    "test:push-navigation-parser": "node scripts/test-push-navigation-parser.mjs",
     "test:daily-radio-eligibility": "node scripts/test-daily-radio-eligibility.mjs",
     "test:daily-radio-queue": "node scripts/test-daily-radio-queue.mjs",
+    "test:active-daily-radio-display": "node scripts/test-active-daily-radio-display.mjs",
     "setup:petcare-supabase": "bash scripts/setup-petcare-supabase.sh"
   },
   "dependencies": {

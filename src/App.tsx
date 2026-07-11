@@ -59,7 +59,30 @@ import {
 import { initDailyNotificationsOnce, maybeRescheduleDailyRadioReminder } from "./dailyNotifications";
 import { initRemotePush, dailyRadioPushPayloadToOpenInfo, type DailyRadioPushOpenInfo } from "./remotePush";
 import { audioUrlPrefix, logPushOpenReceived, playErrorFields } from "./pushOpenDebug";
-import { ensureSupabaseUser, getSupabaseAuthUserId, initSupabaseAuth, isSupabaseConfigured } from "./supabaseClient";
+import {
+  clearPendingPushNavigation,
+  getPendingPushNavigation,
+  hasPendingPushNavigation,
+  onPendingPushNavigationReady,
+  setPendingPushNavigation,
+} from "./pushNavigation";
+import {
+  getActiveScriptTrace,
+  getCurrentPushNavTraceId,
+  logPushNavTrace,
+  setActiveScriptTrace,
+} from "./pushNavTrace";
+import {
+  activeDisplayFromLocalState,
+  activeDisplayFromServerScript,
+  createEmptyActiveDailyRadioDisplay,
+  isActiveDisplayReady,
+  logDailyRadioUi,
+  resolveDisplayRadioSlot,
+  shouldPreserveActiveOnGenericNotFound,
+  type ActiveDailyRadioDisplay,
+} from "./activeDailyRadioDisplay";
+import { ensureSupabaseUser, getSupabaseAuthUserId, initSupabaseAuth, isSupabaseConfigured, onAuthUserIdChange } from "./supabaseClient";
 import {
   fetchServerDailyScript,
   saveAppGeneratedDailyScript,
@@ -918,7 +941,19 @@ export default function App() {
   const initialStoredKeywords = readSavedCustomKeywords();
   const initialTopicOnboardingOpen = shouldShowTopicOnboarding(initialStoredTopics);
 
-  const [tab, setTab] = useState<Tab>("home");
+  const [tab, _setTab] = useState<Tab>("home");
+  const setTab = useCallback((next: Tab) => {
+    const active = getActiveScriptTrace();
+    logPushNavTrace({
+      phase: next === "player" ? "tab_player_set" : "tab_set",
+      currentTab: tab,
+      activeScriptId: active.scriptId,
+      activeRadioSlot: active.radioSlot,
+      extra: { nextTab: next },
+      caller: "setTab",
+    });
+    _setTab(next);
+  }, [tab]);
   const [selectedTopics, setSelectedTopics] = useState<string[]>(() => initialStoredTopics);
   const [customKeyword, setCustomKeyword] = useState(readCustomKeyword);
   const [news, setNews] = useState<NewsItem[]>([]);
@@ -979,8 +1014,26 @@ export default function App() {
     return q;
   });
 
-  const [dailyRadioState, setDailyRadioState] = useState<DailyRadioState>(() =>
+  const [dailyRadioState, _setDailyRadioState] = useState<DailyRadioState>(() =>
     readDailyRadioState()
+  );
+  const setDailyRadioState = useCallback(
+    (value: DailyRadioState | ((prev: DailyRadioState) => DailyRadioState)) => {
+      _setDailyRadioState((prev) => {
+        const next = typeof value === "function" ? value(prev) : value;
+        logPushNavTrace({
+          phase: "daily_radio_state_set",
+          previousScriptId: prev.lastEntryId,
+          nextScriptId: next.lastEntryId,
+          previousSlot: prev.lastRadioSlot,
+          nextSlot: next.lastRadioSlot,
+          caller: "setDailyRadioState",
+        });
+        setActiveScriptTrace(next.lastEntryId, next.lastRadioSlot);
+        return next;
+      });
+    },
+    []
   );
   const [serverSyncState, setServerSyncState] = useState<ServerSyncStatus>(() =>
     isSupabaseConfigured() ? "idle" : "unconfigured"
@@ -996,6 +1049,15 @@ export default function App() {
   const [scriptAudioLoading, setScriptAudioLoading] = useState(false);
   const [scriptAudioError, setScriptAudioError] = useState<string | null>(null);
   const [displayScriptSource, setDisplayScriptSource] = useState<DisplayScriptSource>("server");
+  const [activeDailyRadioDisplay, setActiveDailyRadioDisplay] = useState<ActiveDailyRadioDisplay>(
+    () => {
+      const local = readDailyRadioState();
+      return activeDisplayFromLocalState(local);
+    }
+  );
+  const activeDailyRadioDisplayRef = useRef<ActiveDailyRadioDisplay>(
+    activeDisplayFromLocalState(readDailyRadioState())
+  );
   const [audioBoundFingerprint, setAudioBoundFingerprint] = useState<string | null>(null);
   const [anchorId, setAnchorId] = useState(readAnchorId);
   const [anchorStyleId, setAnchorStyleId] = useState(readAnchorStyleId);
@@ -1029,6 +1091,9 @@ export default function App() {
   const handleOpenFromDailyNotificationRef = useRef<
     (source: "local_reminder" | "server_completed" | DailyRadioPushOpenInfo) => void
   >(() => {});
+  const flushPendingPushNavigationRef = useRef<() => Promise<void>>(async () => {});
+  const appBootstrapReadyRef = useRef(false);
+  const pushNavFlushRunningRef = useRef(false);
   const pendingAnchorAutoplayRef = useRef(false);
   const pendingHomeAnchorPlayRef = useRef(false);
   const autoAudioEnsuredRef = useRef<string | null>(null);
@@ -1130,6 +1195,83 @@ export default function App() {
     scriptAudioStaleReason
   );
   const hasPlayableAnchorAudio = anchorAudioReady && Boolean(activeScriptAudioUrl?.trim());
+
+  const uiDisplayRadioSlot = useMemo(
+    () =>
+      resolveDisplayRadioSlot(activeDailyRadioDisplay, dailyRadioState.lastRadioSlot, {
+        allowMorningDefault: !isActiveDisplayReady(activeDailyRadioDisplay),
+      }),
+    [activeDailyRadioDisplay, dailyRadioState.lastRadioSlot]
+  );
+
+  useEffect(() => {
+    if (tab === "home") {
+      logDailyRadioUi("hero_render", activeDailyRadioDisplay, "tab:home", {
+        uiDisplayRadioSlot,
+      });
+    } else if (tab === "player") {
+      logDailyRadioUi("player_render", activeDailyRadioDisplay, "tab:player", {
+        uiDisplayRadioSlot,
+      });
+    }
+  }, [tab, activeDailyRadioDisplay, uiDisplayRadioSlot]);
+
+  const syncActiveDailyRadioDisplay = useCallback((display: ActiveDailyRadioDisplay) => {
+    activeDailyRadioDisplayRef.current = display;
+    setActiveDailyRadioDisplay(display);
+  }, []);
+
+  const clearActiveDailyRadioDisplay = useCallback(
+    (caller: string) => {
+      const empty = createEmptyActiveDailyRadioDisplay();
+      syncActiveDailyRadioDisplay(empty);
+      logDailyRadioUi("active_display_cleared", empty, caller);
+    },
+    [syncActiveDailyRadioDisplay]
+  );
+
+  useEffect(() => {
+    return onAuthUserIdChange((userId) => {
+      if (!userId) {
+        clearActiveDailyRadioDisplay("logout");
+      }
+    });
+  }, [clearActiveDailyRadioDisplay]);
+
+  const applyServerScriptToUi = useCallback(
+    (s: ServerDailyScript, boundAudioUrl: string | null, caller: string) => {
+      const scriptDuration = normalizeAiDuration(s.durationMinutes);
+      const display = activeDisplayFromServerScript({
+        id: s.id,
+        radioSlot: s.radioSlot,
+        scriptText: s.scriptText,
+        scriptDate: s.scriptDate,
+        audioUrl: boundAudioUrl,
+      });
+      syncActiveDailyRadioDisplay(display);
+      logDailyRadioUi("active_display_set", display, caller);
+
+      setDisplayScriptSource("server");
+      setAiScript(s.scriptText);
+      setAiHighlights([]);
+      setAiJsonFallback(false);
+      setSelectedScriptDuration(scriptDuration);
+      setAiDuration(scriptDuration);
+      setAiError(null);
+      setDailyRadioState(
+        markDailyGenerationComplete(
+          s.id,
+          scriptDuration,
+          s.generationSource ?? "server",
+          s.radioSlot
+        )
+      );
+      setServerSyncState("ready");
+      serverScriptReadyRef.current = true;
+      setActiveScriptTrace(s.id, s.radioSlot);
+    },
+    [syncActiveDailyRadioDisplay, setDailyRadioState]
+  );
 
   const clearScriptAudioBinding = useCallback(() => {
     setActiveScriptAudioUrl(null);
@@ -1895,6 +2037,10 @@ export default function App() {
       return;
     }
     void (async () => {
+      if (hasPendingPushNavigation()) {
+        console.log("[DailyRadio] skip initial refresh: pending push navigation");
+        return;
+      }
       await refreshServerDailyScript();
       await fetchNews({ forceRefresh: true, reason: "initial" });
     })();
@@ -2718,6 +2864,35 @@ ${newsText}
   };
 
   const refreshServerDailyScript = useCallback(async (options: FetchScriptOptions = {}): Promise<ServerDailyScript | null> => {
+    const pending = getPendingPushNavigation();
+    const hasExplicitTarget = Boolean(options.scriptId?.trim() || options.radioSlot);
+    if (!hasExplicitTarget && pending) {
+      logPushNavTrace({
+        phase: "generic_refresh_skipped",
+        pendingExists: true,
+        pendingScriptId: pending.scriptId,
+        pendingRadioSlot: pending.radioSlot,
+        caller: "refreshServerDailyScript",
+      });
+      if (pending.scriptId || pending.radioSlot) {
+        console.log("[DailyRadio] skip generic script refresh: pending push navigation", {
+          script_id: pending.scriptId?.slice(0, 8) ?? null,
+          radio_slot: pending.radioSlot,
+        });
+        return null;
+      }
+    }
+
+    logPushNavTrace({
+      phase: "generic_refresh_started",
+      scriptId: options.scriptId ?? null,
+      requestedRadioSlot: options.radioSlot ?? null,
+      pendingExists: Boolean(pending),
+      pendingScriptId: pending?.scriptId ?? null,
+      caller: "refreshServerDailyScript",
+      extra: { hasExplicitTarget },
+    });
+
     if (!isSupabaseConfigured()) {
       setServerSyncState("unconfigured");
       serverScriptReadyRef.current = false;
@@ -2748,15 +2923,20 @@ ${newsText}
 
     if (result.kind === "ready") {
       const s = result.script;
-      const scriptDuration = normalizeAiDuration(s.durationMinutes);
-      setDisplayScriptSource("server");
-      setAiScript(s.scriptText);
-      setAiHighlights([]);
-      setAiJsonFallback(false);
-      setSelectedScriptDuration(scriptDuration);
-      setAiDuration(scriptDuration);
-      setAiError(null);
+      const prevActive = getActiveScriptTrace();
+      logPushNavTrace({
+        phase: "active_script_set",
+        previousScriptId: prevActive.scriptId,
+        nextScriptId: s.id,
+        previousSlot: prevActive.radioSlot,
+        nextSlot: s.radioSlot,
+        requestedRadioSlot: options.radioSlot ?? s.radioSlot,
+        scriptId: s.id,
+        caller: "refreshServerDailyScript:ready",
+      });
+
       const serverFingerprint = buildServerScriptFingerprint(s.id);
+      let boundAudioUrl: string | null = null;
       if (
         s.audioUrl &&
         isTodayScriptAudioReady(
@@ -2774,19 +2954,12 @@ ${newsText}
           voice: s.audioVoice ?? undefined,
           style: s.audioStyle ?? undefined,
         });
+        boundAudioUrl = s.audioUrl;
       } else {
         clearScriptAudioBinding();
       }
-      setDailyRadioState(
-        markDailyGenerationComplete(
-          s.id,
-          scriptDuration,
-          s.generationSource ?? "server",
-          s.radioSlot
-        )
-      );
-      setServerSyncState("ready");
-      serverScriptReadyRef.current = true;
+
+      applyServerScriptToUi(s, boundAudioUrl, "refreshServerDailyScript:ready");
       return s;
     }
 
@@ -2801,10 +2974,20 @@ ${newsText}
 
     serverScriptReadyRef.current = false;
 
+    if (shouldPreserveActiveOnGenericNotFound(activeDailyRadioDisplayRef.current, hasExplicitTarget)) {
+      const preserved = activeDailyRadioDisplayRef.current;
+      logDailyRadioUi("generic_refresh_not_found", preserved, "refreshServerDailyScript");
+      logDailyRadioUi("generic_refresh_ignored", preserved, "refreshServerDailyScript:not_found");
+      logDailyRadioUi("active_display_preserved", preserved, "generic_not_found_preserved_active_script");
+      setServerSyncState("ready");
+      return null;
+    }
+
     const today = todayDailyScriptYmd();
     const state = readDailyRadioState();
     if (state.lastGeneratedDate === today && state.status === "ready") {
       console.warn("[DailyRadio] clearing stale local ready state (server has no script for this user)");
+      clearActiveDailyRadioDisplay("refreshServerDailyScript:stale_clear");
       setDailyRadioState(
         writeDailyRadioState({
           status: "idle",
@@ -2823,12 +3006,22 @@ ${newsText}
       clearAutoplayDailyFlag();
       clearAutoplayAnchorAudioFlag();
       setServerSyncState("not_found");
-      clearScriptAudioBinding();
+      if (!isActiveDisplayReady(activeDailyRadioDisplayRef.current)) {
+        clearScriptAudioBinding();
+      }
     } else {
       setServerSyncState("idle");
     }
     return null;
-  }, [bindScriptAudio, clearScriptAudioBinding, selectedAnchor.voice, anchorStyleId]);
+  }, [
+    applyServerScriptToUi,
+    bindScriptAudio,
+    clearActiveDailyRadioDisplay,
+    clearScriptAudioBinding,
+    selectedAnchor.voice,
+    anchorStyleId,
+    setDailyRadioState,
+  ]);
 
   const currentAiFavoriteId = useMemo(() => {
     if (!aiLastFp) return null;
@@ -3353,71 +3546,221 @@ ${newsText}
     void maybeRunDailyRadioGeneration("manual");
   }, [maybeRunDailyRadioGeneration]);
 
+  const flushPendingPushNavigation = useCallback(async () => {
+    if (pushNavFlushRunningRef.current) return;
+
+    const pending = getPendingPushNavigation();
+    if (!pending) return;
+
+    const traceId = getCurrentPushNavTraceId();
+    pushNavFlushRunningRef.current = true;
+    try {
+      const userId = await initSupabaseAuth();
+      const authReady = Boolean(userId);
+      const navigationReady = appBootstrapReadyRef.current;
+
+      logPushNavTrace({
+        phase: "flush_attempt",
+        traceId,
+        scriptId: pending.scriptId,
+        requestedRadioSlot: pending.radioSlot,
+        pendingExists: true,
+        pendingScriptId: pending.scriptId,
+        pendingRadioSlot: pending.radioSlot,
+        authUserId: userId,
+        bootstrapReady: navigationReady,
+        currentTab: tab,
+        caller: "flushPendingPushNavigation",
+      });
+
+      logPushNavTrace({
+        phase: "auth_state",
+        traceId,
+        authUserId: userId,
+        bootstrapReady: navigationReady,
+        caller: "flushPendingPushNavigation",
+      });
+
+      logPushNavTrace({
+        phase: "bootstrap_state",
+        traceId,
+        bootstrapReady: navigationReady,
+        caller: "flushPendingPushNavigation",
+      });
+
+      logPushOpenReceived({
+        phase: "pending_nav_flush",
+        parsedScriptId: pending.scriptId,
+        parsedRadioSlot: pending.radioSlot,
+        parsedOpenTarget: pending.openTarget,
+        authReady,
+        navigationReady,
+        appState: document.visibilityState,
+      });
+
+      if (!authReady || !navigationReady) return;
+
+      const preferAnchorAudio =
+        pending.openTarget === "ai_anchor_audio" ||
+        pending.autoPlay === true ||
+        pending.audioReady === true;
+
+      cancelScheduledAutoplay();
+      stopPlayback();
+      setPushManualPlayVisible(false);
+
+      if (preferAnchorAudio) {
+        pushAnchorAutoplayPendingRef.current = true;
+        setAutoplayAnchorAudioFlag();
+        clearAutoplayDailyFlag();
+      } else {
+        pushAnchorAutoplayPendingRef.current = false;
+        clearAutoplayDailyFlag();
+        clearAutoplayAnchorAudioFlag();
+      }
+
+      const fetchOptions: FetchScriptOptions = pending.scriptId
+        ? { scriptId: pending.scriptId }
+        : pending.radioSlot
+          ? { radioSlot: pending.radioSlot }
+          : {};
+
+      if (!fetchOptions.scriptId && !fetchOptions.radioSlot) {
+        clearPendingPushNavigation();
+        return;
+      }
+
+      let ready = await refreshServerDailyScript(fetchOptions);
+
+      if (!ready && pending.scriptId) {
+        logPushNavTrace({
+          phase: "script_id_query_failed",
+          traceId,
+          scriptId: pending.scriptId,
+          requestedRadioSlot: pending.radioSlot,
+          pendingExists: true,
+          caller: "flushPendingPushNavigation",
+          extra: {
+            blocked_slot_fallback: true,
+            message: "diagnostic: no fallback when script_id present",
+          },
+        });
+        return;
+      }
+
+      if (!ready && pending.radioSlot) {
+        logPushNavTrace({
+          phase: "fallback_by_slot_start",
+          traceId,
+          requestedRadioSlot: pending.radioSlot,
+          caller: "flushPendingPushNavigation",
+        });
+        ready = await refreshServerDailyScript({ radioSlot: pending.radioSlot });
+        logPushNavTrace({
+          phase: "fallback_by_slot_result",
+          traceId,
+          requestedRadioSlot: pending.radioSlot,
+          activeScriptId: ready?.id ?? null,
+          activeRadioSlot: ready?.radioSlot ?? null,
+          caller: "flushPendingPushNavigation",
+          extra: { found: Boolean(ready) },
+        });
+      }
+
+      if (!ready) {
+        logPushOpenReceived({
+          phase: "pending_nav_script_load_failed",
+          parsedScriptId: pending.scriptId,
+          parsedRadioSlot: pending.radioSlot,
+          authReady,
+          navigationReady,
+        });
+        logPushNavTrace({
+          phase: "script_id_query_failed",
+          traceId,
+          scriptId: pending.scriptId,
+          requestedRadioSlot: pending.radioSlot,
+          pendingExists: true,
+          caller: "flushPendingPushNavigation",
+        });
+        return;
+      }
+
+      clearPendingPushNavigation();
+      setTab("player");
+      logPushNavTrace({
+        phase: "tab_player_set",
+        traceId,
+        scriptId: ready.id,
+        activeScriptId: ready.id,
+        activeRadioSlot: ready.radioSlot,
+        currentTab: tab,
+        caller: "flushPendingPushNavigation",
+      });
+      logPushOpenReceived({
+        phase: "handler_navigate_player",
+        scriptId: ready.id,
+        parsedRadioSlot: ready.radioSlot,
+        parsedOpenTarget: pending.openTarget,
+        autoPlay: pending.autoPlay,
+        audioReady: pending.audioReady,
+        navigate_to_play_page: true,
+      });
+
+      if (preferAnchorAudio) {
+        await handlePushOpenAnchorPlay(ready, pending.audioReady);
+      }
+    } finally {
+      pushNavFlushRunningRef.current = false;
+    }
+  }, [
+    cancelScheduledAutoplay,
+    stopPlayback,
+    refreshServerDailyScript,
+    handlePushOpenAnchorPlay,
+    tab,
+  ]);
+
+  flushPendingPushNavigationRef.current = flushPendingPushNavigation;
+
   const handleOpenFromDailyNotification = useCallback(
     (source: "local_reminder" | "server_completed" | DailyRadioPushOpenInfo) => {
       void (async () => {
         if (typeof source === "object") {
-          const preferAnchorAudio =
-            source.openTarget === "ai_anchor_audio" ||
-            source.autoPlay === true ||
-            source.audioReady === true;
-
+          const userId = await getSupabaseAuthUserId();
           logPushOpenReceived({
-            phase: "handler_start",
+            phase: "handler_pending_set",
             normalized_openInfo: source,
-            openTarget: source.openTarget ?? null,
-            radio_slot: source.radioSlot ?? null,
+            parsedScriptId: source.scriptId ?? null,
+            parsedRadioSlot: source.radioSlot ?? null,
+            parsedOpenTarget: source.openTarget ?? null,
+            authReady: Boolean(userId),
+            navigationReady: appBootstrapReadyRef.current,
+            appState: document.visibilityState,
+          });
+
+          logPushNavTrace({
+            phase: "pending_saved",
+            traceId: getCurrentPushNavTraceId(),
             scriptId: source.scriptId ?? null,
-            autoPlay: source.autoPlay ?? false,
-            audioReady: source.audioReady ?? false,
-            navigate_to_play_page: false,
+            requestedRadioSlot: source.radioSlot ?? null,
+            pendingExists: true,
+            authUserId: userId,
+            bootstrapReady: appBootstrapReadyRef.current,
+            currentTab: tab,
+            caller: "handleOpenFromDailyNotification",
           });
 
-          cancelScheduledAutoplay();
-          stopPlayback();
-          setPushManualPlayVisible(false);
-
-          if (preferAnchorAudio) {
-            pushAnchorAutoplayPendingRef.current = true;
-            setAutoplayAnchorAudioFlag();
-            clearAutoplayDailyFlag();
-          } else {
-            pushAnchorAutoplayPendingRef.current = false;
-            clearAutoplayDailyFlag();
-            clearAutoplayAnchorAudioFlag();
-          }
-
-          const ready = await refreshServerDailyScript({
-            scriptId: source.scriptId,
-            radioSlot: source.radioSlot,
-          });
-
-          if (!ready) {
-            pushAnchorAutoplayPendingRef.current = false;
-            clearAutoplayAnchorAudioFlag();
-            logPushOpenReceived({
-              phase: "handler_script_load_failed",
-              normalized_openInfo: source,
-              scriptId: source.scriptId ?? null,
-              navigate_to_play_page: false,
-            });
-            return;
-          }
-
-          setTab("player");
-          logPushOpenReceived({
-            phase: "handler_navigate_player",
-            normalized_openInfo: source,
+          setPendingPushNavigation({
+            type: "daily_radio",
+            scriptId: source.scriptId ?? null,
+            radioSlot: source.radioSlot ?? null,
             openTarget: source.openTarget ?? null,
-            scriptId: ready.id,
             autoPlay: source.autoPlay ?? false,
             audioReady: source.audioReady ?? false,
-            navigate_to_play_page: true,
           });
 
-          if (preferAnchorAudio) {
-            await handlePushOpenAnchorPlay(ready, source.audioReady);
-          }
+          await flushPendingPushNavigation();
           return;
         }
         if (source === "server_completed") {
@@ -3447,7 +3790,20 @@ ${newsText}
           phase: "handler_local_reminder",
           navigate_to_play_page: false,
         });
-        void refreshServerDailyScript();
+        if (!hasPendingPushNavigation()) {
+          logPushNavTrace({
+            phase: "generic_refresh_started",
+            caller: "handleOpenFromDailyNotification:local_reminder",
+            currentTab: tab,
+          });
+          void refreshServerDailyScript();
+        } else {
+          logPushNavTrace({
+            phase: "generic_refresh_skipped",
+            pendingExists: true,
+            caller: "handleOpenFromDailyNotification:local_reminder",
+          });
+        }
       })();
     },
     [
@@ -3455,6 +3811,8 @@ ${newsText}
       stopPlayback,
       refreshServerDailyScript,
       handlePushOpenAnchorPlay,
+      flushPendingPushNavigation,
+      tab,
     ]
   );
 
@@ -3521,16 +3879,44 @@ ${newsText}
 
   useEffect(() => {
     void (async () => {
-      if (!isSupabaseConfigured()) return;
-      await initSupabaseAuth();
-      const userId = await ensureSupabaseUser();
+      logPushNavTrace({ phase: "app_boot", caller: "bootstrap_effect_start" });
+      if (!isSupabaseConfigured()) {
+        appBootstrapReadyRef.current = true;
+        logPushNavTrace({
+          phase: "bootstrap_state",
+          bootstrapReady: true,
+          caller: "bootstrap_effect:unconfigured",
+        });
+        return;
+      }
+      const userId = await initSupabaseAuth();
+      logPushNavTrace({
+        phase: "auth_state",
+        authUserId: userId,
+        caller: "bootstrap_effect:after_initSupabaseAuth",
+      });
       if (userId) {
         await bootstrapServerPreferencesFromLocal();
       }
       await initRemotePush((info) => {
         handleOpenFromDailyNotificationRef.current(info);
       });
+      appBootstrapReadyRef.current = true;
+      logPushNavTrace({
+        phase: "bootstrap_state",
+        bootstrapReady: true,
+        authUserId: userId,
+        pendingExists: Boolean(getPendingPushNavigation()),
+        caller: "bootstrap_effect:ready",
+      });
+      await flushPendingPushNavigationRef.current();
     })();
+  }, []);
+
+  useEffect(() => {
+    return onPendingPushNavigationReady(() => {
+      void flushPendingPushNavigationRef.current();
+    });
   }, []);
 
   useEffect(() => {
@@ -3549,8 +3935,25 @@ ${newsText}
     if (topicOnboardingOpen) return;
     if (!isSupabaseConfigured()) return;
     void (async () => {
+      if (hasPendingPushNavigation()) {
+        const pending = getPendingPushNavigation();
+        logPushNavTrace({
+          phase: "generic_refresh_skipped",
+          pendingExists: true,
+          pendingScriptId: pending?.scriptId ?? null,
+          pendingRadioSlot: pending?.radioSlot ?? null,
+          caller: "mount_refresh_effect",
+        });
+        console.log("[DailyRadio] skip mount refresh: pending push navigation");
+        return;
+      }
       const userId = await ensureSupabaseUser();
       if (!userId) return;
+      logPushNavTrace({
+        phase: "generic_refresh_started",
+        authUserId: userId,
+        caller: "mount_refresh_effect",
+      });
       await refreshServerDailyScript();
     })();
   }, [topicOnboardingOpen, refreshServerDailyScript]);
@@ -3870,14 +4273,19 @@ ${newsText}
               selectedCount={selectedNews.length}
               scriptDuration={selectedScriptDuration}
               radioStatus={dailyRadioHeroStatus({
-                hasScript: aiScript.trim().length > 0,
+                activeDisplay: activeDailyRadioDisplay,
+                hasScript:
+                  aiScript.trim().length > 0 ||
+                  activeDailyRadioDisplay.scriptText.trim().length > 0 ||
+                  Boolean(activeDailyRadioDisplay.audioUrl?.trim()),
                 aiLoading,
                 localState: dailyRadioState,
                 serverSyncState,
                 generationSource: dailyRadioState.generationSource,
               })}
+              activeDailyRadioDisplay={activeDailyRadioDisplay}
               generationSource={dailyRadioState.generationSource}
-              radioSlot={dailyRadioState.lastRadioSlot}
+              radioSlot={uiDisplayRadioSlot}
               serverConfigured={isSupabaseConfigured()}
               serverSyncState={serverSyncState}
               newsFetchStatus={newsFetchStatus}
@@ -3942,7 +4350,7 @@ ${newsText}
               onGenerateScriptAudio={() => void handleGenerateScriptAudio()}
               anchorAudioReady={anchorAudioReady}
               displayScriptSource={displayScriptSource}
-              radioSlot={dailyRadioState.lastRadioSlot}
+              radioSlot={uiDisplayRadioSlot}
               onRegenerateAnchor={() => void handleGenerateScriptAudio()}
             />
 
@@ -4018,7 +4426,8 @@ ${newsText}
                     onGenerate={() => void handleGenerateScriptAudio()}
                     forceManualPlayPrompt={pushManualPlayVisible}
                     displayScriptSource={displayScriptSource}
-                    radioSlot={dailyRadioState.lastRadioSlot}
+                    radioSlot={uiDisplayRadioSlot}
+                    scriptId={activeDailyRadioDisplay.scriptId}
                   />
                   {scriptAudioError && !scriptAudioLoading ? (
                     <div style={styles.anchorFallbackHint}>
@@ -4043,7 +4452,8 @@ ${newsText}
                   onGenerate={() => {}}
                   forceManualPlayPrompt={pushManualPlayVisible}
                   displayScriptSource="server"
-                  radioSlot={dailyRadioState.lastRadioSlot}
+                  radioSlot={uiDisplayRadioSlot}
+                  scriptId={activeDailyRadioDisplay.scriptId}
                 />
               </div>
             ) : (
@@ -4055,8 +4465,12 @@ ${newsText}
             {!voiceFeatureEnabled ? (
               <PlayerDeck
                 playbackState={playbackState}
-                radioSlot={dailyRadioState.lastRadioSlot}
-                dailyRadioReady={dailyRadioState.status === "ready"}
+                radioSlot={uiDisplayRadioSlot}
+                scriptId={activeDailyRadioDisplay.scriptId}
+                dailyRadioReady={
+                  isActiveDisplayReady(activeDailyRadioDisplay) ||
+                  dailyRadioState.status === "ready"
+                }
                 playbackProgress={playbackProgress}
                 remainingMs={remainingMs}
                 speed={speed}
@@ -4133,7 +4547,8 @@ ${newsText}
               onGenerateScriptAudio={() => void handleGenerateScriptAudio()}
               anchorAudioReady={anchorAudioReady}
               displayScriptSource={displayScriptSource}
-              radioSlot={dailyRadioState.lastRadioSlot}
+              radioSlot={uiDisplayRadioSlot}
+              scriptId={activeDailyRadioDisplay.scriptId}
             />
 
             <NewsList
@@ -4919,6 +5334,7 @@ function BackupTextToSpeechSection({
 function PlayerDeck({
   playbackState,
   radioSlot,
+  scriptId: _scriptId,
   dailyRadioReady,
   playbackProgress,
   remainingMs,
@@ -4940,6 +5356,7 @@ function PlayerDeck({
 }: {
   playbackState: PlaybackState;
   radioSlot: RadioSlot | null;
+  scriptId?: string | null;
   dailyRadioReady: boolean;
   playbackProgress: number;
   remainingMs: number;
@@ -4962,7 +5379,6 @@ function PlayerDeck({
   const [voiceOpen, setVoiceOpen] = useState(false);
   const active = isPlaybackActiveState(playbackState);
   const canPlay = aiScript.trim().length > 0 || selectedNewsCount > 0;
-  const slot = radioSlot ?? "morning";
   const readyIdle =
     dailyRadioReady &&
     canPlay &&
@@ -4971,7 +5387,9 @@ function PlayerDeck({
       playbackState === "completed" ||
       playbackState === "error");
   const statusLabel = readyIdle
-    ? radioSlotCompletedTitle(slot)
+    ? radioSlot
+      ? radioSlotCompletedTitle(radioSlot)
+      : "今日播報已就緒"
     : playbackState === "idle"
       ? "待播放"
       : playbackPageTitle(playbackState);
@@ -6147,6 +6565,7 @@ function HomeStationHero({
   hasScript,
   aiLoading,
   radioSlot,
+  activeDailyRadioDisplay,
   onPlayNow,
   onStartDaily,
   onRegenerate,
@@ -6179,6 +6598,7 @@ function HomeStationHero({
   hasScript: boolean;
   aiLoading: boolean;
   radioSlot: import("./radioSlot").RadioSlot | null;
+  activeDailyRadioDisplay: ActiveDailyRadioDisplay;
   onPlayNow: () => void;
   onStartDaily: () => void;
   onRegenerate: () => void;
@@ -6204,13 +6624,15 @@ function HomeStationHero({
     newsCount,
     selectedCount,
     radioSlot,
+    activeDisplay: activeDailyRadioDisplay,
     voiceFeatureEnabled,
     anchorName,
     anchorAudioReady,
     anchorAudioLoading: scriptAudioLoading,
   });
 
-  const slotLabel = radioSlot === "evening" ? "晚報" : "早報";
+  const slotLabel =
+    radioSlot === "evening" ? "晚報" : radioSlot === "morning" ? "早報" : "播報";
   const duration = scriptDuration ?? DAILY_AUTO_DURATION;
   const anchorSpeedLabel = formatAnchorPlaybackRate(anchorPlaybackRate);
 
@@ -6616,6 +7038,7 @@ function AiSummaryPanel({
   onRegenerateAnchor,
   displayScriptSource = "manual",
   radioSlot = null,
+  scriptId: _scriptId = null,
 }: {
   variant?: "home" | "player" | "full";
   aiLoading: boolean;
@@ -6655,6 +7078,7 @@ function AiSummaryPanel({
   onRegenerateAnchor?: () => void;
   displayScriptSource?: import("./scriptAudioBinding").DisplayScriptSource;
   radioSlot?: import("./radioSlot").RadioSlot | null;
+  scriptId?: string | null;
 }) {
   const scriptFontPx = SCRIPT_FONT_PX[scriptFontSize];
   const playbackActive = isSpeaking || isPaused;

@@ -21,7 +21,7 @@ import {
 export { isProUser } from "./aiAnchor.ts";
 
 const USER_PREFS_SELECT =
-  "user_id, topics, custom_keywords, daily_radio_enabled, daily_radio_time, morning_radio_enabled, evening_radio_enabled, morning_radio_time, evening_radio_time, morning_duration_minutes, evening_duration_minutes, timezone, push_token, push_platform, display_name, ai_anchor_id, ai_anchor_voice, ai_anchor_style, ai_playback_rate, voice_feature_enabled";
+  "user_id, topics, custom_keywords, daily_radio_enabled, daily_radio_time, morning_radio_enabled, evening_radio_enabled, morning_radio_time, evening_radio_time, morning_duration_minutes, evening_duration_minutes, timezone, push_token, push_platform, push_environment, display_name, ai_anchor_id, ai_anchor_voice, ai_anchor_style, ai_playback_rate, voice_feature_enabled";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function reloadUserPrefsForJob(
@@ -54,6 +54,7 @@ export type UserPrefs = {
   timezone: string;
   push_token: string | null;
   push_platform: string | null;
+  push_environment: "sandbox" | "production" | null;
   display_name: string | null;
   ai_anchor_id: string | null;
   ai_anchor_voice: string | null;
@@ -1793,6 +1794,7 @@ async function sendDailyRadioPush(
       audioReady: pushMeta?.audioReady === true,
       durationMinutes: pushMeta?.durationMinutes ?? duration,
       newsCount: pushMeta?.newsCount,
+      pushEnvironment: user.push_environment,
     }
   );
 

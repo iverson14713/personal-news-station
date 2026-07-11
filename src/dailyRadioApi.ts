@@ -8,6 +8,7 @@ import {
 } from "./aiAnchorSettings";
 import { normalizeAutoRadioDuration } from "./aiDuration";
 import { readStoredSelectedTopics } from "./TopicOnboardingScreen";
+import type { PushEnvironment } from "./plugins/pushEnvironment";
 import {
   ensureSupabaseUser,
   getLocalTimezone,
@@ -15,6 +16,7 @@ import {
   isSupabaseConfigured,
   type DailyRadioScriptRow,
 } from "./supabaseClient";
+import { logPushNavTrace, userIdPrefix } from "./pushNavTrace";
 
 const CUSTOM_KEYWORDS_STORAGE_KEY = "pns_custom_keywords_v1";
 
@@ -136,6 +138,13 @@ function pickDisplayScript(rows: DailyRadioScriptRow[]): DailyRadioScriptRow | n
   return morningServer ?? morningApp ?? eveningServer ?? eveningApp ?? completed[0];
 }
 
+/** 依 primary key 載入 completed script；驗證 user_id 與 status。 */
+export async function getDailyRadioScriptById(
+  scriptId: string
+): Promise<FetchTodayScriptResult> {
+  return fetchServerDailyScript({ scriptId });
+}
+
 export async function fetchServerDailyScript(
   options: FetchScriptOptions = {}
 ): Promise<FetchTodayScriptResult> {
@@ -165,6 +174,18 @@ export async function fetchServerDailyScript(
   if (!supabase) return { kind: "unconfigured" };
 
   if (options.scriptId) {
+    logPushNavTrace({
+      phase: "fetch_by_script_id_start",
+      scriptId: options.scriptId,
+      requestedRadioSlot: options.radioSlot ?? null,
+      authUserId: userId,
+      caller: "fetchServerDailyScript",
+      extra: {
+        query: "news_daily_radio_scripts",
+        filters: { user_id: userIdPrefix(userId), id: options.scriptId.slice(0, 8) },
+      },
+    });
+
     const { data, error } = await supabase
       .from("news_daily_radio_scripts")
       .select("*")
@@ -174,6 +195,26 @@ export async function fetchServerDailyScript(
 
     const row = data as DailyRadioScriptRow | null;
     if (error || !row || row.status !== "completed" || !row.script_text.trim()) {
+      logPushNavTrace({
+        phase: "fetch_by_script_id_result",
+        scriptId: options.scriptId,
+        queryKind: "not_found",
+        rowCount: row ? 1 : 0,
+        errorCode: error?.code ?? null,
+        errorMessage: error?.message ?? (row ? `status=${row.status}` : "no_row"),
+        status: row?.status ?? null,
+        requestedRadioSlot: row?.radio_slot ?? options.radioSlot ?? null,
+        hasAudioUrl: Boolean(row?.audio_url?.trim()),
+        caller: "fetchServerDailyScript",
+      });
+      if (options.scriptId) {
+        logPushNavTrace({
+          phase: "script_id_query_failed",
+          scriptId: options.scriptId,
+          errorMessage: error?.message ?? "script_not_ready_or_missing",
+          caller: "fetchServerDailyScript",
+        });
+      }
       return {
         kind: "not_found",
         debug: {
@@ -188,6 +229,17 @@ export async function fetchServerDailyScript(
         },
       };
     }
+
+    logPushNavTrace({
+      phase: "fetch_by_script_id_result",
+      scriptId: row.id,
+      queryKind: "ready",
+      rowCount: 1,
+      status: row.status,
+      requestedRadioSlot: row.radio_slot,
+      hasAudioUrl: Boolean(row.audio_url?.trim()),
+      caller: "fetchServerDailyScript",
+    });
 
     return {
       kind: "ready",
@@ -213,6 +265,13 @@ export async function fetchServerDailyScript(
     .eq("status", "completed");
 
   if (options.radioSlot) {
+    logPushNavTrace({
+      phase: "fallback_by_slot_start",
+      requestedRadioSlot: options.radioSlot,
+      authUserId: userId,
+      caller: "fetchServerDailyScript",
+      extra: { script_date: scriptDate },
+    });
     query = query.eq("radio_slot", options.radioSlot);
   }
 
@@ -251,6 +310,18 @@ export async function fetchServerDailyScript(
   }
 
   if (selected) {
+    if (options.radioSlot) {
+      logPushNavTrace({
+        phase: "fallback_by_slot_result",
+        scriptId: selected.id,
+        requestedRadioSlot: options.radioSlot,
+        rowCount,
+        status: selected.status,
+        hasAudioUrl: Boolean(selected.audio_url?.trim()),
+        caller: "fetchServerDailyScript",
+        extra: { queryKind: "ready" },
+      });
+    }
     console.log("[DailyRadio] daily radio script loaded", {
       id: selected.id,
       generation_source: selected.generation_source,
@@ -293,6 +364,16 @@ export async function fetchServerDailyScript(
         rowCount: 1,
       },
     };
+  }
+
+  if (options.radioSlot) {
+    logPushNavTrace({
+      phase: "fallback_by_slot_result",
+      requestedRadioSlot: options.radioSlot,
+      rowCount,
+      queryKind: "not_found",
+      caller: "fetchServerDailyScript",
+    });
   }
 
   console.log("[DailyRadio] daily radio server script not found for this user/device");
@@ -383,40 +464,71 @@ export async function syncUserNewsPreferences(input: {
   return true;
 }
 
+export type PushTokenSyncResult = {
+  ok: boolean;
+  error?: string;
+};
+
 export async function syncPushTokenToSupabase(
   pushToken: string,
-  pushPlatform: "ios" | "android"
+  pushPlatform: "ios" | "android",
+  pushEnvironment?: PushEnvironment | null
 ): Promise<boolean> {
+  const result = await syncPushTokenToSupabaseDetailed(
+    pushToken,
+    pushPlatform,
+    pushEnvironment
+  );
+  return result.ok;
+}
+
+export async function syncPushTokenToSupabaseDetailed(
+  pushToken: string,
+  pushPlatform: "ios" | "android",
+  pushEnvironment?: PushEnvironment | null
+): Promise<PushTokenSyncResult> {
   if (!isSupabaseConfigured()) {
-    console.warn("[Push] token save failed", "supabase not configured");
-    return false;
+    const error = "supabase not configured";
+    console.warn("[Push] token save failed", error);
+    return { ok: false, error };
   }
 
   const userId = await ensureSupabaseUser();
   if (!userId) {
-    console.warn("[Push] token save failed", "no auth user");
-    return false;
+    const error = "no auth user";
+    console.warn("[Push] token save failed", error);
+    return { ok: false, error };
   }
 
   const supabase = getSupabase();
   if (!supabase) {
-    console.warn("[Push] token save failed", "no supabase client");
-    return false;
+    const error = "no supabase client";
+    console.warn("[Push] token save failed", error);
+    return { ok: false, error };
   }
 
   const trimmed = pushToken.trim();
   if (!trimmed) {
-    console.warn("[Push] token save failed", "empty token");
-    return false;
+    const error = "empty token";
+    console.warn("[Push] token save failed", error);
+    return { ok: false, error };
   }
 
-  console.log("[Push] token save started", userPrefix(userId));
+  console.log("[Push] token save started", {
+    user_prefix: userPrefix(userId),
+    token_prefix: trimmed.slice(0, 12),
+    push_platform: pushPlatform,
+    push_environment: pushEnvironment ?? null,
+  });
 
-  const patch = {
+  const patch: Record<string, unknown> = {
     push_token: trimmed,
     push_platform: pushPlatform,
     updated_at: new Date().toISOString(),
   };
+  if (pushEnvironment === "sandbox" || pushEnvironment === "production") {
+    patch.push_environment = pushEnvironment;
+  }
 
   const topics = readStoredSelectedTopics();
   const customKeywords = readStoredCustomKeywords();
@@ -443,10 +555,75 @@ export async function syncPushTokenToSupabase(
 
   if (error) {
     console.warn("[Push] token save failed", error.message);
-    return false;
+    return { ok: false, error: error.message };
   }
 
-  return true;
+  console.log("[Push] token save succeeded", {
+    user_prefix: userPrefix(userId),
+    token_prefix: trimmed.slice(0, 12),
+    push_environment: pushEnvironment ?? null,
+  });
+  return { ok: true };
+}
+
+export type PushDiagnosticsRow = {
+  push_token: string | null;
+  push_platform: string | null;
+  push_environment: PushEnvironment | null;
+  updated_at: string | null;
+  voice_feature_enabled: boolean | null;
+};
+
+export async function fetchPushDiagnosticsFromSupabase(): Promise<PushDiagnosticsRow | null> {
+  if (!isSupabaseConfigured()) return null;
+  const userId = await ensureSupabaseUser();
+  if (!userId) return null;
+  const supabase = getSupabase();
+  if (!supabase) return null;
+
+  const { data, error } = await supabase
+    .from("news_user_preferences")
+    .select("push_token, push_platform, push_environment, updated_at, voice_feature_enabled")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (error) {
+    console.warn("[Push] diagnostics fetch failed", error.message);
+    return null;
+  }
+  return (data as PushDiagnosticsRow | null) ?? null;
+}
+
+export type RetryDailyRadioPushResult =
+  | { ok: true; data: unknown }
+  | { ok: false; error: string };
+
+export async function retryDailyRadioPush(scriptId: string): Promise<RetryDailyRadioPushResult> {
+  if (!isSupabaseConfigured()) {
+    return { ok: false, error: "supabase not configured" };
+  }
+
+  const userId = await ensureSupabaseUser();
+  if (!userId) {
+    return { ok: false, error: "no auth user" };
+  }
+
+  const supabase = getSupabase();
+  if (!supabase) {
+    return { ok: false, error: "supabase client unavailable" };
+  }
+
+  const { data, error } = await supabase.functions.invoke("retry-daily-radio-push", {
+    body: {
+      script_id: scriptId,
+      target_user_id: userId,
+    },
+  });
+
+  if (error) {
+    return { ok: false, error: error.message };
+  }
+  return { ok: true, data };
 }
 
 function userPrefix(userId: string): string {

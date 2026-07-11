@@ -18,6 +18,11 @@ import {
   ymdFromTimestamp,
 } from "./dateLocal";
 import {
+  isActiveDisplayReady,
+  resolveDisplayRadioSlot,
+  type ActiveDailyRadioDisplay,
+} from "./activeDailyRadioDisplay";
+import {
   type RadioSlot,
   radioSlotCompletedTitle,
   radioSlotLabel,
@@ -240,8 +245,15 @@ export function dailyRadioHeroStatus(params: {
   localState: DailyRadioState;
   serverSyncState: ServerSyncStatus;
   generationSource: DailyRadioGenerationSource;
+  activeDisplay?: ActiveDailyRadioDisplay | null;
 }): DailyRadioStatus {
-  const { hasScript, aiLoading, localState, serverSyncState, generationSource } = params;
+  const { hasScript, aiLoading, localState, serverSyncState, generationSource, activeDisplay } =
+    params;
+
+  if (isActiveDisplayReady(activeDisplay)) {
+    return "ready";
+  }
+
   const today = todayDailyScriptYmd();
 
   if (aiLoading || localState.status === "generating") return "generating";
@@ -276,6 +288,7 @@ export function dailyRadioHeroDisplay(params: {
   newsCount: number;
   selectedCount: number;
   radioSlot?: RadioSlot | null;
+  activeDisplay?: ActiveDailyRadioDisplay | null;
   voiceFeatureEnabled?: boolean;
   anchorName?: string;
   anchorAudioReady?: boolean;
@@ -293,13 +306,17 @@ export function dailyRadioHeroDisplay(params: {
     newsCount,
     selectedCount,
     radioSlot,
+    activeDisplay,
     voiceFeatureEnabled = false,
     anchorName = "Emily",
     anchorAudioReady = false,
     anchorAudioLoading = false,
   } = params;
 
-  const slot = radioSlot ?? "morning";
+  const slot =
+    resolveDisplayRadioSlot(activeDisplay, radioSlot, {
+      allowMorningDefault: !ready && !isActiveDisplayReady(activeDisplay),
+    }) ?? "morning";
   const slotName = radioSlotLabel(slot);
 
   if (ready) {

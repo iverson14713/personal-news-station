@@ -4,7 +4,7 @@
  * iOS：Apple APNs HTTP/2（Supabase secrets）
  *   APNS_TEAM_ID, APNS_KEY_ID, APNS_PRIVATE_KEY (.p8 PEM，可含 \\n)
  *   APNS_BUNDLE_ID（預設 com.wayne.personalnews）
- *   APNS_ENV = development | production
+ *   APNS_ENV = development | production（legacy fallback when push_environment is null）
  */
 
 export type PushStatus = "sent" | "failed" | "no_token";
@@ -14,22 +14,65 @@ export type PushSendResult = {
   push_error?: string;
 };
 
+export type PushEnvironment = "sandbox" | "production";
+
+export type ApnsHostResolution = {
+  host: string;
+  apnsEnvLabel: "sandbox" | "production";
+  routingSource: "token" | "legacy_fallback";
+};
+
 type ApnsConfig = {
   teamId: string;
   keyId: string;
   privateKeyPem: string;
   bundleId: string;
   host: string;
+  apnsEnvLabel: "sandbox" | "production";
+  routingSource: "token" | "legacy_fallback";
 };
 
 let cachedJwt: { token: string; expiresAt: number } | null = null;
 
 function tokenPrefix(token: string): string {
-  return token.slice(0, 8);
+  return token.slice(0, 12);
 }
 
 function normalizePrivateKey(raw: string): string {
   return raw.replace(/\\n/g, "\n").trim();
+}
+
+function readLegacyApnsEnv(): string {
+  return (Deno.env.get("APNS_ENV")?.trim() || "development").toLowerCase();
+}
+
+/** Resolve APNs host from per-token push_environment, else legacy APNS_ENV. */
+export function resolveApnsHost(
+  pushEnvironment?: PushEnvironment | null,
+  legacyApnsEnv?: string | null
+): ApnsHostResolution {
+  if (pushEnvironment === "sandbox") {
+    return {
+      host: "api.sandbox.push.apple.com",
+      apnsEnvLabel: "sandbox",
+      routingSource: "token",
+    };
+  }
+  if (pushEnvironment === "production") {
+    return {
+      host: "api.push.apple.com",
+      apnsEnvLabel: "production",
+      routingSource: "token",
+    };
+  }
+
+  const env = (legacyApnsEnv?.trim() || readLegacyApnsEnv()).toLowerCase();
+  const production = env === "production";
+  return {
+    host: production ? "api.push.apple.com" : "api.sandbox.push.apple.com",
+    apnsEnvLabel: production ? "production" : "sandbox",
+    routingSource: "legacy_fallback",
+  };
 }
 
 async function importApnsPrivateKey(pem: string): Promise<CryptoKey> {
@@ -62,8 +105,6 @@ async function createApnsJwt(config: ApnsConfig): Promise<string> {
   const key = await importApnsPrivateKey(config.privateKeyPem);
   const headerObj = { alg: "ES256", kid: config.keyId };
   const payloadObj = { iss: config.teamId, iat: now };
-  console.log("JWT header", headerObj);
-  console.log("JWT payload", payloadObj);
 
   const header = encodeBase64Url(
     new TextEncoder().encode(JSON.stringify(headerObj))
@@ -80,34 +121,31 @@ async function createApnsJwt(config: ApnsConfig): Promise<string> {
     )
   );
   const signature = encodeBase64Url(signatureDer);
-  console.log("DER signature length", signatureDer.length);
-  console.log("signature starts with 0x30", signatureDer[0] === 0x30);
-  console.log("final JWT signature base64url length", signature.length);
 
   const token = `${signingInput}.${signature}`;
   cachedJwt = { token, expiresAt: now + 3300 };
   return token;
 }
 
-function readApnsConfig(): ApnsConfig | null {
+function readApnsConfig(pushEnvironment?: PushEnvironment | null): ApnsConfig | null {
   const teamId = Deno.env.get("APNS_TEAM_ID")?.trim();
   const keyId = Deno.env.get("APNS_KEY_ID")?.trim();
   const privateKeyRaw = Deno.env.get("APNS_PRIVATE_KEY")?.trim();
   const bundleId =
     Deno.env.get("APNS_BUNDLE_ID")?.trim() || "com.wayne.personalnews";
-  const env = (Deno.env.get("APNS_ENV")?.trim() || "development").toLowerCase();
 
   if (!teamId || !keyId || !privateKeyRaw) return null;
 
-  const host =
-    env === "production" ? "api.push.apple.com" : "api.sandbox.push.apple.com";
+  const hostResolution = resolveApnsHost(pushEnvironment);
 
   return {
     teamId,
     keyId,
     privateKeyPem: normalizePrivateKey(privateKeyRaw),
     bundleId,
-    host,
+    host: hostResolution.host,
+    apnsEnvLabel: hostResolution.apnsEnvLabel,
+    routingSource: hostResolution.routingSource,
   };
 }
 
@@ -122,6 +160,7 @@ export type DailyRadioPushOptions = {
   audioReady?: boolean;
   durationMinutes?: number;
   newsCount?: number;
+  pushEnvironment?: PushEnvironment | null;
 };
 
 function resolveDisplayName(displayName?: string | null): string {
@@ -186,12 +225,21 @@ async function apnsFetch(url: string, init: RequestInit): Promise<Response> {
   return fetch(url, init);
 }
 
+function parseApnsReason(responseBody: string): string | null {
+  try {
+    const parsed = JSON.parse(responseBody) as { reason?: string };
+    return parsed.reason?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 async function sendViaApns(
   pushToken: string,
   displayName: string | null | undefined,
   pushOptions: DailyRadioPushOptions
 ): Promise<PushSendResult> {
-  const config = readApnsConfig();
+  const config = readApnsConfig(pushOptions.pushEnvironment);
   if (!config) {
     console.log("push provider apns", { configured: false });
     return {
@@ -207,7 +255,10 @@ async function sendViaApns(
 
   console.log("push provider apns", {
     configured: true,
-    apns_env: config.host.includes("sandbox") ? "development" : "production",
+    apns_endpoint: config.host,
+    apns_env: config.apnsEnvLabel,
+    routing_source: config.routingSource,
+    push_environment: pushOptions.pushEnvironment ?? null,
     bundle_id: config.bundleId,
     token_prefix: tokenPrefix(pushToken),
     radio_slot: radioSlot,
@@ -249,7 +300,17 @@ async function sendViaApns(
     });
 
     const responseBody = await res.text();
+    const apnsReason = parseApnsReason(responseBody);
     console.log("APNs response status", res.status);
+    console.log("APNs delivery context", {
+      apns_endpoint: config.host,
+      apns_env: config.apnsEnvLabel,
+      routing_source: config.routingSource,
+      push_environment: pushOptions.pushEnvironment ?? null,
+      http_status: res.status,
+      reason: apnsReason,
+      token_prefix: tokenPrefix(pushToken),
+    });
     if (!res.ok) {
       console.log("APNs error response body", responseBody || "(empty)");
       return {
@@ -261,7 +322,12 @@ async function sendViaApns(
     return { push_status: "sent" };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    console.log("APNs error response body", msg);
+    console.log("APNs transport error", {
+      apns_endpoint: config.host,
+      push_environment: pushOptions.pushEnvironment ?? null,
+      message: msg,
+      token_prefix: tokenPrefix(pushToken),
+    });
     return { push_status: "failed", push_error: msg };
   }
 }
@@ -276,6 +342,7 @@ export async function sendDailyRadioCompletedPush(
   console.log("push token exists", Boolean(token), {
     token_prefix: token ? tokenPrefix(token) : null,
     radio_slot: pushOptions.radioSlot ?? "morning",
+    push_environment: pushOptions.pushEnvironment ?? null,
   });
 
   if (!token) {

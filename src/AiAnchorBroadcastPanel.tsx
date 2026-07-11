@@ -37,6 +37,7 @@ type AiAnchorBroadcastPanelProps = {
   forceManualPlayPrompt?: boolean;
   displayScriptSource?: DisplayScriptSource;
   radioSlot?: RadioSlot | null;
+  scriptId?: string | null;
 };
 
 const panelStyles: Record<string, CSSProperties> = {
@@ -228,6 +229,7 @@ export function AiAnchorBroadcastPanel({
   forceManualPlayPrompt = false,
   displayScriptSource = "manual",
   radioSlot = null,
+  scriptId: _scriptId = null,
 }: AiAnchorBroadcastPanelProps) {
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const nativePlatform = isCapacitorNativePlatform();

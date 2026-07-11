@@ -3,8 +3,11 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import AppStoreScreenshots from "./AppStoreScreenshots";
 import { AiAnchorAudioProvider } from "./AiAnchorAudioProvider";
+import { logPushNavBuildMarker } from "./pushNavTrace";
 import { initSupabaseAuth, isSupabaseConfigured } from "./supabaseClient";
 import { setupNativeKeyboard } from "./keyboardSetup";
+
+logPushNavBuildMarker();
 
 if (isSupabaseConfigured()) {
   void initSupabaseAuth();

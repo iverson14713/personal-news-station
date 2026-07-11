@@ -19,6 +19,7 @@ export type UserNewsPreferencesRow = {
   timezone: string;
   push_token: string | null;
   push_platform: string | null;
+  push_environment: "sandbox" | "production" | null;
   display_name: string | null;
   ai_anchor_id: string | null;
   ai_anchor_voice: string | null;
@@ -56,8 +57,36 @@ const AUTH_INIT_TIMEOUT_MS = 8000;
 let client: SupabaseClient | null = null;
 /** 成功解析後快取，同一裝置維持同一 user_id */
 let resolvedUserId: string | null = null;
+/** 最近一次通知的 auth user_id（用於帳號切換時重同步 push token） */
+let lastNotifiedAuthUserId: string | null = null;
+type AuthUserIdListener = (userId: string | null) => void;
+const authUserIdListeners = new Set<AuthUserIdListener>();
 /** 全 App 唯一 bootstrap promise（含 session 還原 + 單次匿名登入） */
 let bootstrapPromise: Promise<string | null> | null = null;
+
+export function onAuthUserIdChange(listener: AuthUserIdListener): () => void {
+  authUserIdListeners.add(listener);
+  return () => {
+    authUserIdListeners.delete(listener);
+  };
+}
+
+function notifyAuthUserIdChange(userId: string | null): void {
+  if (userId === lastNotifiedAuthUserId) return;
+  lastNotifiedAuthUserId = userId;
+  for (const listener of authUserIdListeners) {
+    try {
+      listener(userId);
+    } catch (error) {
+      console.warn("[Supabase] auth user listener failed", error);
+    }
+  }
+}
+
+export function resetResolvedAuthUser(): void {
+  resolvedUserId = null;
+  bootstrapPromise = null;
+}
 
 export function isSupabaseConfigured(): boolean {
   const url = import.meta.env.VITE_SUPABASE_URL?.trim();
@@ -154,6 +183,18 @@ async function waitForStoredSession(
     const timer = window.setTimeout(() => finish(null), AUTH_INIT_TIMEOUT_MS);
 
     const { data } = supabase.auth.onAuthStateChange((event, session) => {
+      const nextUserId = session?.user?.id ?? null;
+      if (
+        event === "SIGNED_OUT" ||
+        event === "SIGNED_IN" ||
+        event === "INITIAL_SESSION" ||
+        event === "TOKEN_REFRESHED"
+      ) {
+        if (nextUserId !== resolvedUserId) {
+          resolvedUserId = nextUserId;
+        }
+        notifyAuthUserIdChange(nextUserId);
+      }
       if (
         (event === "INITIAL_SESSION" ||
           event === "SIGNED_IN" ||
@@ -174,6 +215,7 @@ async function resolveAuthUserId(): Promise<string | null> {
   const existing = await waitForStoredSession(supabase);
   if (existing?.user?.id) {
     console.log("[Supabase] resolved user_id", existing.user.id);
+    notifyAuthUserIdChange(existing.user.id);
     return existing.user.id;
   }
 
@@ -188,6 +230,7 @@ async function resolveAuthUserId(): Promise<string | null> {
   }
 
   console.log("[Supabase] resolved user_id", data.user.id);
+  notifyAuthUserIdChange(data.user.id);
   return data.user.id;
 }
 
