@@ -4,7 +4,7 @@ import {
   type PushSendResult,
   type RadioSlot,
 } from "./push.ts";
-import { isScriptAudioReady } from "./generateAudio.ts";
+import { isScriptAudioPushReady } from "./generateAudio.ts";
 import { resolveAnchorSettings } from "./aiAnchor.ts";
 import { newsKeysFromSourceNews } from "./news.ts";
 
@@ -37,6 +37,7 @@ type ScriptRow = {
   audio_voice: string | null;
   audio_style: string | null;
   audio_expires_at: string | null;
+  audio_duration_seconds?: number | null;
   source_news: unknown;
 };
 
@@ -186,7 +187,7 @@ export async function retryDailyRadioPushForScript(
   const { data: script, error: scriptError } = await supabase
     .from("news_daily_radio_scripts")
     .select(
-      "id, user_id, script_date, duration_minutes, radio_slot, status, generation_source, push_sent_at, push_claimed_at, audio_url, audio_voice, audio_style, audio_expires_at, source_news"
+      "id, user_id, script_date, duration_minutes, radio_slot, status, generation_source, push_sent_at, push_claimed_at, audio_url, audio_voice, audio_style, audio_expires_at, audio_duration_seconds, source_news"
     )
     .eq("id", scriptId)
     .maybeSingle();
@@ -274,11 +275,12 @@ export async function retryDailyRadioPushForScript(
   }
 
   const anchorPrefs = resolveAnchorSettings(user);
-  const audioReady = isScriptAudioReady(
+  const pushReady = await isScriptAudioPushReady(
     row,
     anchorPrefs.voice,
     anchorPrefs.style
   );
+  const audioReady = pushReady.ready;
 
   const pushResult = await sendDailyRadioCompletedPush(
     pushToken,

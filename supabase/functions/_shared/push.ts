@@ -174,19 +174,26 @@ function pushCopy(
   options: DailyRadioPushOptions
 ): { title: string; body: string } {
   const name = resolveDisplayName(displayName);
-  const minutes = options.durationMinutes ?? 3;
+  const minutes = options.durationMinutes;
   const audioReady =
     options.audioReady === true && options.hasAnchorAudio === true;
   const anchorName = options.anchorName?.trim();
 
   if (audioReady) {
+    const durationPhrase =
+      typeof minutes === "number" && minutes > 0
+        ? `${minutes} 分鐘`
+        : "一段";
     if (slot === "evening") {
       const title = anchorName
         ? `🌙 ${name}，${anchorName} 已經準備好今晚的 AI 晚報`
         : `🌙 ${name}，你的 AI 主播已準備好。`;
       return {
         title,
-        body: `今天的重要新聞都整理好了，${minutes} 分鐘快速掌握重點。`,
+        body:
+          typeof minutes === "number" && minutes > 0
+            ? `今天的重要新聞都整理好了，${minutes} 分鐘快速掌握重點。`
+            : "今天的重要新聞都整理好了，點一下立即開始收聽。",
       };
     }
 
@@ -196,8 +203,12 @@ function pushCopy(
     const newsCount = options.newsCount;
     const body =
       typeof newsCount === "number" && newsCount > 0
-        ? `今天整理了 ${newsCount} 則你關心的新聞，濃縮成 ${minutes} 分鐘，點一下立即開始收聽。`
-        : `今天整理了你關心的新聞，濃縮成 ${minutes} 分鐘，點一下立即開始收聽。`;
+        ? typeof minutes === "number" && minutes > 0
+          ? `今天整理了 ${newsCount} 則你關心的新聞，濃縮成 ${minutes} 分鐘，點一下立即開始收聽。`
+          : `今天整理了 ${newsCount} 則你關心的新聞，點一下立即開始收聽。`
+        : typeof minutes === "number" && minutes > 0
+          ? `今天整理了你關心的新聞，濃縮成 ${durationPhrase}，點一下立即開始收聽。`
+          : "今天整理了你關心的新聞，點一下立即開始收聽。";
     return { title, body };
   }
 

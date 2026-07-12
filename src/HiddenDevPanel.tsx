@@ -5,6 +5,13 @@ import { Capacitor } from "@capacitor/core";
 
 import { fetchPushDiagnosticsFromSupabase } from "./dailyRadioApi";
 import {
+  getAnchorById,
+  readAnchorId,
+  readAnchorStyleId,
+} from "./aiAnchorSettings";
+import { readDailyRadioState } from "./dailyRadio";
+import { normalizeAutoRadioDuration } from "./aiDuration";
+import {
   clearInternalAccess,
   isInternalAccessActive,
   readInternalAccess,
@@ -15,7 +22,7 @@ import {
   getPushEnvironment,
   type PushEnvironmentDiagnostics,
 } from "./plugins/pushEnvironment";
-import { getProStatus, isProActive } from "./pro";
+import { getProStatus, isProActive, proSourceLabel } from "./pro";
 import {
   PUSH_NAV_BUILD_MARKER,
   PUSH_NAV_IMPL_VERSION,
@@ -34,6 +41,7 @@ type HiddenDevPanelProps = {
   todayServerScriptId?: string | null;
   onTriggerServerDailyRadio?: () => Promise<void>;
   onSimulateAiAnchorPushClick?: () => Promise<void>;
+  onSyncPreferences?: () => Promise<boolean>;
 };
 
 type DevPanelSectionProps = {
@@ -71,6 +79,7 @@ export function HiddenDevPanel({
   todayServerScriptId,
   onTriggerServerDailyRadio,
   onSimulateAiAnchorPushClick,
+  onSyncPreferences,
 }: HiddenDevPanelProps) {
   const [code, setCode] = useState("");
   const [message, setMessage] = useState<string | null>(null);
@@ -85,6 +94,9 @@ export function HiddenDevPanel({
   const [pushSyncMessage, setPushSyncMessage] = useState<string | null>(null);
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [appBuild, setAppBuild] = useState<string | null>(null);
+  const [prefsSyncBusy, setPrefsSyncBusy] = useState(false);
+  const [prefsSyncMessage, setPrefsSyncMessage] = useState<string | null>(null);
+  const [dbPrefs, setDbPrefs] = useState<Awaited<ReturnType<typeof fetchPushDiagnosticsFromSupabase>>>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -136,6 +148,7 @@ export function HiddenDevPanel({
     }
 
     const row = await fetchPushDiagnosticsFromSupabase();
+    setDbPrefs(row);
     if (row) {
       const token = row.push_token?.trim() ?? "";
       setDbPushTokenPrefix(token ? token.slice(0, 12) : null);
@@ -222,6 +235,41 @@ export function HiddenDevPanel({
         setPushBusy(false);
       });
   };
+
+  const handleSyncPreferences = () => {
+    if (!onSyncPreferences) return;
+    setPrefsSyncBusy(true);
+    setPrefsSyncMessage(null);
+    void onSyncPreferences()
+      .then(async (ok) => {
+        await refreshPushDiagnostics();
+        setPrefsSyncMessage(ok ? "同步成功" : "同步失敗（請查看 console）");
+      })
+      .catch((e) => {
+        setPrefsSyncMessage(
+          `同步錯誤：${e instanceof Error ? e.message : "unknown"}`
+        );
+      })
+      .finally(() => {
+        setPrefsSyncBusy(false);
+      });
+  };
+
+  const localRadioState = readDailyRadioState();
+  const localAnchorId = readAnchorId();
+  const localAnchorStyle = readAnchorStyleId();
+  const localAnchor = getAnchorById(localAnchorId);
+  const localMorningDur = normalizeAutoRadioDuration(
+    localRadioState.morningDuration,
+    isProActive(proStatus)
+  );
+  const localEveningDur = normalizeAutoRadioDuration(
+    localRadioState.eveningDuration,
+    isProActive(proStatus)
+  );
+  const localEveningEnabled = isProActive(proStatus);
+  const dbPro = dbPrefs?.voice_feature_enabled === true;
+  const proSourceText = proSourceLabel(proStatus.proSource) ?? proStatus.proSource ?? "—";
 
   return (
     <div style={styles.backdrop} onClick={onClose} role="presentation">
@@ -325,6 +373,101 @@ export function HiddenDevPanel({
               <div style={styles.statusHint}>
                 目前方案：{isProActive(proStatus) ? "Pro" : "Free"}
               </div>
+            </div>
+          </DevPanelSection>
+
+          <DevPanelSection title="偏好同步" defaultOpen>
+            <div style={styles.statusBox}>
+              <div style={styles.statusRow}>
+                <span>本機 Pro</span>
+                <strong>{isProActive(proStatus) ? "是" : "否"}</strong>
+              </div>
+              <div style={styles.statusHint}>
+                StoreKit / IAP 來源：{proSourceText}
+              </div>
+              <div style={styles.statusRow}>
+                <span>DB voice_feature_enabled</span>
+                <strong>
+                  {dbPrefs?.voice_feature_enabled == null
+                    ? "—"
+                    : dbPrefs.voice_feature_enabled
+                      ? "true"
+                      : "false"}
+                </strong>
+              </div>
+              <div style={styles.statusHint}>
+                Pro 一致：{isProActive(proStatus) === dbPro ? "是" : "否（需同步）"}
+              </div>
+              <div style={styles.statusRow}>
+                <span>本機主播</span>
+                <strong>
+                  {localAnchorId} / {localAnchor.voice} / {localAnchorStyle}
+                </strong>
+              </div>
+              <div style={styles.statusRow}>
+                <span>DB 主播</span>
+                <strong>
+                  {dbPrefs?.ai_anchor_id ?? "—"} / {dbPrefs?.ai_anchor_voice ?? "—"} /{" "}
+                  {dbPrefs?.ai_anchor_style ?? "—"}
+                </strong>
+              </div>
+              <div style={styles.statusHint}>
+                主播一致：
+                {dbPrefs?.ai_anchor_id === localAnchorId &&
+                dbPrefs?.ai_anchor_voice === localAnchor.voice &&
+                dbPrefs?.ai_anchor_style === localAnchorStyle
+                  ? "是"
+                  : "否（需同步）"}
+              </div>
+              <div style={styles.statusRow}>
+                <span>本機早報時長</span>
+                <strong>{localMorningDur} 分鐘</strong>
+              </div>
+              <div style={styles.statusRow}>
+                <span>DB 早報時長</span>
+                <strong>
+                  {dbPrefs?.morning_duration_minutes != null
+                    ? `${dbPrefs.morning_duration_minutes} 分鐘`
+                    : "—"}
+                </strong>
+              </div>
+              <div style={styles.statusHint}>
+                早報時長一致：
+                {dbPrefs?.morning_duration_minutes === localMorningDur ? "是" : "否（需同步）"}
+              </div>
+              <div style={styles.statusRow}>
+                <span>本機晚報</span>
+                <strong>
+                  {localEveningEnabled ? `開啟 / ${localEveningDur} 分鐘` : "關閉（Free）"}
+                </strong>
+              </div>
+              <div style={styles.statusRow}>
+                <span>DB 晚報</span>
+                <strong>
+                  {dbPrefs?.evening_radio_enabled
+                    ? `開啟 / ${dbPrefs.evening_duration_minutes ?? "—"} 分鐘`
+                    : "關閉"}
+                </strong>
+              </div>
+              <div style={styles.statusHint}>
+                preferences updated_at：
+                {dbPrefs?.updated_at
+                  ? new Date(dbPrefs.updated_at).toLocaleString("zh-TW")
+                  : "—"}
+              </div>
+              {prefsSyncMessage ? (
+                <div style={styles.statusHint}>{prefsSyncMessage}</div>
+              ) : null}
+              {onSyncPreferences ? (
+                <button
+                  type="button"
+                  disabled={prefsSyncBusy || !supabaseUserId}
+                  onClick={handleSyncPreferences}
+                  style={styles.secondary}
+                >
+                  {prefsSyncBusy ? "同步中…" : "立即同步偏好至 DB"}
+                </button>
+              ) : null}
             </div>
           </DevPanelSection>
 

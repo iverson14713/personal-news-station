@@ -34,12 +34,33 @@ function readStoredCustomKeywords(): string[] {
   }
 }
 
-/** 登入後立即將本機主題／關鍵字 upsert 到 server（不依賴 onboarding 完成） */
+/** 登入後僅在「尚無偏好列」時寫入預設；不可覆寫既有 Pro / 主播 / 時長。 */
 export async function bootstrapServerPreferencesFromLocal(): Promise<boolean> {
   if (!isSupabaseConfigured()) return true;
 
   const userId = await ensureSupabaseUser();
   if (!userId) return false;
+
+  const supabase = getSupabase();
+  if (!supabase) return false;
+
+  const { data: existing, error: readError } = await supabase
+    .from("news_user_preferences")
+    .select("user_id")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (readError) {
+    console.warn("[DailyRadio] bootstrap read preferences failed", readError.message);
+    return false;
+  }
+
+  if (existing) {
+    console.log("[DailyRadio] bootstrap skipped: preferences row already exists", {
+      user_id_prefix: userId.slice(0, 8),
+    });
+    return true;
+  }
 
   const topics = readStoredSelectedTopics();
   const customKeywords = readStoredCustomKeywords();
@@ -572,6 +593,12 @@ export type PushDiagnosticsRow = {
   push_environment: PushEnvironment | null;
   updated_at: string | null;
   voice_feature_enabled: boolean | null;
+  ai_anchor_id: string | null;
+  ai_anchor_voice: string | null;
+  ai_anchor_style: string | null;
+  morning_duration_minutes: number | null;
+  evening_duration_minutes: number | null;
+  evening_radio_enabled: boolean | null;
 };
 
 export async function fetchPushDiagnosticsFromSupabase(): Promise<PushDiagnosticsRow | null> {
@@ -583,7 +610,9 @@ export async function fetchPushDiagnosticsFromSupabase(): Promise<PushDiagnostic
 
   const { data, error } = await supabase
     .from("news_user_preferences")
-    .select("push_token, push_platform, push_environment, updated_at, voice_feature_enabled")
+    .select(
+      "push_token, push_platform, push_environment, updated_at, voice_feature_enabled, ai_anchor_id, ai_anchor_voice, ai_anchor_style, morning_duration_minutes, evening_duration_minutes, evening_radio_enabled"
+    )
     .eq("user_id", userId)
     .maybeSingle();
 

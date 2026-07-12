@@ -36,7 +36,7 @@ export async function reloadUserPrefsForJob(
   if (error || !data) return null;
   return data as UserPrefs;
 }
-import { generateAudioForScript, isScriptAudioReady } from "./generateAudio.ts";
+import { generateAudioForScript, isScriptAudioPushReady, isScriptAudioReady } from "./generateAudio.ts";
 import { getTaipeiDateKey, shouldGenerateNow } from "./timezone.ts";
 
 export type UserPrefs = {
@@ -297,7 +297,7 @@ function logNewsFreshnessWarning(args: {
 }
 
 const FULL_SCRIPT_SELECT =
-  "id, status, updated_at, push_sent_at, generation_source, radio_slot, script_date, script_text, audio_url, audio_voice, audio_style, audio_expires_at";
+  "id, status, updated_at, push_sent_at, generation_source, radio_slot, script_date, script_text, audio_url, audio_voice, audio_style, audio_expires_at, audio_duration_seconds";
 
 export function getUserSlots(user: UserPrefs, options: ProcessOptions): SlotConfig[] {
   const morningResolved = resolveAllowedAutoDuration(
@@ -427,7 +427,7 @@ async function ensureAnchorAudioBeforePush(
   radioSlot: RadioSlot
 ): Promise<AnchorAudioPrepareResult> {
   const anchorPrefs = resolveAnchorSettings(user);
-  const isPro = isVoiceFeatureEnabled(user);
+  const voiceFeatureOn = isVoiceFeatureEnabled(user);
 
   const scriptText = scriptRow.script_text?.trim();
   if (!scriptText) {
@@ -440,16 +440,34 @@ async function ensureAnchorAudioBeforePush(
     return { hasAnchorAudio: false, audioReady: false };
   }
 
-  if (isScriptAudioReady(scriptRow, anchorPrefs.voice, anchorPrefs.style)) {
-    console.log("[DailyRadioCron] audio generated", {
+  const metadataReady = isScriptAudioReady(
+    scriptRow,
+    anchorPrefs.voice,
+    anchorPrefs.style
+  );
+  if (metadataReady) {
+    const pushReady = await isScriptAudioPushReady(
+      scriptRow,
+      anchorPrefs.voice,
+      anchorPrefs.style
+    );
+    if (pushReady.ready) {
+      console.log("[DailyRadioCron] audio generated", {
+        user_id: user.user_id,
+        script_id: scriptRow.id,
+        script_date: scriptDate,
+        cached: true,
+        user_plan: userPlanLabel(user),
+        anchor_name: anchorPrefs.anchorName,
+        remote_probe: pushReady.probe,
+      });
+      return { hasAnchorAudio: true, audioReady: true };
+    }
+    console.log("[DailyRadioCron] cached metadata but remote audio not playable", {
       user_id: user.user_id,
       script_id: scriptRow.id,
-      script_date: scriptDate,
-      cached: true,
-      user_plan: userPlanLabel(user),
-      anchor_name: anchorPrefs.anchorName,
+      remote_probe: pushReady.probe,
     });
-    return { hasAnchorAudio: true, audioReady: true };
   }
 
   console.log("[DailyRadioCron] generating audio before push", {
@@ -460,6 +478,7 @@ async function ensureAnchorAudioBeforePush(
     style: anchorPrefs.style,
     anchor_id: anchorPrefs.anchorId,
     user_plan: userPlanLabel(user),
+    voice_feature_enabled: voiceFeatureOn,
     trigger_path: "ensure_audio_and_push",
   });
 
@@ -497,16 +516,18 @@ async function ensureAnchorAudioBeforePush(
     radioSlot
   );
 
-  const audioReady =
-    verified != null &&
-    isScriptAudioReady(verified, anchorPrefs.voice, anchorPrefs.style);
+  const pushReady =
+    verified != null
+      ? await isScriptAudioPushReady(verified, anchorPrefs.voice, anchorPrefs.style)
+      : { ready: false, probe: null };
 
-  if (audioReady) {
+  if (pushReady.ready) {
     console.log("[DailyRadioCron] audio generated", {
       user_id: user.user_id,
       script_id: scriptRow.id,
       script_date: scriptDate,
       audio_url: verified?.audio_url ?? audioResult.audioUrl,
+      remote_probe: pushReady.probe,
     });
     return { hasAnchorAudio: true, audioReady: true };
   }
@@ -514,7 +535,8 @@ async function ensureAnchorAudioBeforePush(
   console.log("[DailyRadioCron] audio failed, fallback push", {
     user_id: user.user_id,
     script_id: scriptRow.id,
-    reason: "db_verify_failed",
+    reason: "remote_verify_failed",
+    remote_probe: pushReady.probe,
   });
   return { hasAnchorAudio: false, audioReady: false };
 }

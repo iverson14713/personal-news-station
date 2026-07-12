@@ -11,6 +11,11 @@ import {
   audioStoragePath,
   computeAudioExpiresAt,
 } from "./audioRetention.ts";
+import {
+  estimateMp3DurationSeconds,
+  isRemoteAudioProbePlayable,
+  probeRemoteAudioUrl,
+} from "./audioRemoteReady.ts";
 
 const OPENAI_SPEECH_URL = "https://api.openai.com/v1/audio/speech";
 const SHORT_TTS_TIMEOUT_MS = 60_000;
@@ -31,6 +36,7 @@ type ScriptRow = {
   audio_style: string | null;
   audio_generated_at: string | null;
   audio_expires_at: string | null;
+  audio_duration_seconds?: number | null;
 };
 
 export type GenerateAudioForScriptInput = {
@@ -75,7 +81,7 @@ function isAudioCacheHit(
   return true;
 }
 
-/** 今日稿件是否需要（重新）生成 AI 主播語音；以 voice/style/expiry 判斷，列本身須已用 script_date 篩選。 */
+/** DB metadata：voice/style/expiry 與 audio_url 欄位一致。 */
 export function isScriptAudioReady(
   row: Pick<
     ScriptRow,
@@ -85,6 +91,29 @@ export function isScriptAudioReady(
   requestedStyle: string
 ): boolean {
   return isAudioCacheHit(row as ScriptRow, requestedVoice, requestedStyle);
+}
+
+/** 推播前：metadata + 遠端檔案可讀 + 估計 duration > 0。 */
+export async function isScriptAudioPushReady(
+  row: Pick<
+    ScriptRow,
+    | "audio_url"
+    | "audio_voice"
+    | "audio_style"
+    | "audio_expires_at"
+    | "audio_duration_seconds"
+  >,
+  requestedVoice: string,
+  requestedStyle: string
+): Promise<{ ready: boolean; probe: Awaited<ReturnType<typeof probeRemoteAudioUrl>> | null }> {
+  if (!isScriptAudioReady(row, requestedVoice, requestedStyle)) {
+    return { ready: false, probe: null };
+  }
+  const probe = await probeRemoteAudioUrl(row.audio_url!);
+  const durationOk =
+    (typeof row.audio_duration_seconds === "number" && row.audio_duration_seconds > 0) ||
+    isRemoteAudioProbePlayable(probe);
+  return { ready: isRemoteAudioProbePlayable(probe) && durationOk, probe };
 }
 
 export function resolveTtsTimeoutMs(scriptChars: number): number {
@@ -358,6 +387,7 @@ export async function generateAudioForScript(
     .getPublicUrl(storagePath);
   const audioUrl = publicData.publicUrl;
   const generatedAt = new Date().toISOString();
+  const audioDurationSeconds = estimateMp3DurationSeconds(mp3.byteLength);
   const audioExpiresAt = computeAudioExpiresAt(
     input.isPro,
     isFavorited,
@@ -372,6 +402,7 @@ export async function generateAudioForScript(
       audio_style: style,
       audio_generated_at: generatedAt,
       audio_expires_at: audioExpiresAt,
+      audio_duration_seconds: audioDurationSeconds,
       updated_at: generatedAt,
     })
     .eq("id", input.scriptId)

@@ -1298,38 +1298,50 @@ export default function App() {
     },
     []
   );
-  const syncAnchorPrefsToCloud = useCallback(() => {
-    if (!isSupabaseConfigured()) return;
-    void syncUserNewsPreferences({
+  const syncAnchorPrefsToCloud = useCallback(async () => {
+    if (!isSupabaseConfigured()) return false;
+    const pro = getProStatus();
+    const isProNow = isProActive(pro);
+    const voiceOn = isProNow || isInternalAccessActive();
+    const morningDur = normalizeAutoRadioDuration(dailyRadioState.morningDuration, isProNow);
+    const eveningDur = normalizeAutoRadioDuration(dailyRadioState.eveningDuration, isProNow);
+    const ok = await syncUserNewsPreferences({
       topics: selectedTopics,
       customKeywords: savedCustomKeywords,
       displayName: readUserDisplayName(),
       dailyRadioEnabled: true,
       morningRadioEnabled: true,
-      eveningRadioEnabled: isPro,
+      eveningRadioEnabled: isProNow,
       morningRadioTime: dailyRadioState.scheduledTime || MORNING_RADIO_TIME,
       eveningRadioTime: dailyRadioState.eveningTime || EVENING_RADIO_TIME,
-      morningDurationMinutes: morningAutoDuration,
-      eveningDurationMinutes: eveningAutoDuration,
-      isPro,
+      morningDurationMinutes: morningDur,
+      eveningDurationMinutes: eveningDur,
+      isPro: isProNow,
       anchorId,
       anchorVoice: getAnchorById(anchorId).voice,
       anchorStyle: anchorStyleId,
       playbackRate: anchorPlaybackRate,
-      voiceFeatureEnabled,
+      voiceFeatureEnabled: voiceOn,
     });
+    if (!ok) {
+      console.warn("[DailyRadio] sync preferences to cloud failed", {
+        is_pro: isProNow,
+        voice_feature: voiceOn,
+        anchor_id: anchorId,
+        morning_duration: morningDur,
+      });
+    }
+    return ok;
   }, [
     anchorId,
     anchorPlaybackRate,
     anchorStyleId,
+    dailyRadioState.eveningDuration,
     dailyRadioState.eveningTime,
+    dailyRadioState.morningDuration,
     dailyRadioState.scheduledTime,
-    eveningAutoDuration,
-    isPro,
-    morningAutoDuration,
     savedCustomKeywords,
     selectedTopics,
-    voiceFeatureEnabled,
   ]);
   const handleAnchorIdChange = useCallback(
     (id: string) => {
@@ -1375,9 +1387,10 @@ export default function App() {
     const result = await restorePurchases();
     if (result.ok) {
       setProStatus(result.status);
+      await syncAnchorPrefsToCloud();
     }
     alert(result.message);
-  }, []);
+  }, [syncAnchorPrefsToCloud]);
 
   const openProUpgrade = useCallback(() => {
     setUpgradeModal("general");
@@ -1417,16 +1430,18 @@ export default function App() {
 
   const handleHiddenDevStatusChanged = useCallback(() => {
     setProStatus(getProStatus());
-  }, []);
+    void syncAnchorPrefsToCloud();
+  }, [syncAnchorPrefsToCloud]);
 
   const handleUpgradePro = useCallback(async (plan: ProPlanTier) => {
     const result = await purchaseProSubscription(plan);
     if (result.ok) {
       setProStatus(result.status);
       setUpgradeModal(null);
+      await syncAnchorPrefsToCloud();
     }
     alert(result.message);
-  }, []);
+  }, [syncAnchorPrefsToCloud]);
 
   const setAiQuotaExhaustedMessage = useCallback(() => {
     if (isProActive(proStatus)) {
@@ -3895,6 +3910,10 @@ ${newsText}
         authUserId: userId,
         caller: "bootstrap_effect:after_initSupabaseAuth",
       });
+      const purchaseSync = await syncPurchasesOnLaunch();
+      if (purchaseSync.status) {
+        setProStatus(purchaseSync.status);
+      }
       if (userId) {
         await bootstrapServerPreferencesFromLocal();
       }
@@ -3961,28 +3980,7 @@ ${newsText}
   useEffect(() => {
     if (topicOnboardingOpen) return;
     if (!isSupabaseConfigured()) return;
-    void (async () => {
-      const userId = await ensureSupabaseUser();
-      if (!userId) return;
-      await syncUserNewsPreferences({
-        topics: selectedTopics,
-        customKeywords: savedCustomKeywords,
-        displayName: readUserDisplayName(),
-        dailyRadioEnabled: true,
-        morningRadioEnabled: true,
-        eveningRadioEnabled: isPro,
-        morningRadioTime: dailyRadioState.scheduledTime || MORNING_RADIO_TIME,
-        eveningRadioTime: dailyRadioState.eveningTime || EVENING_RADIO_TIME,
-        morningDurationMinutes: morningAutoDuration,
-        eveningDurationMinutes: eveningAutoDuration,
-        isPro,
-        anchorId,
-        anchorVoice: selectedAnchor.voice,
-        anchorStyle: anchorStyleId,
-        playbackRate: anchorPlaybackRate,
-        voiceFeatureEnabled,
-      });
-    })();
+    void syncAnchorPrefsToCloud();
   }, [
     topicOnboardingOpen,
     selectedTopics,
@@ -3997,6 +3995,7 @@ ${newsText}
     anchorPlaybackRate,
     selectedAnchor.voice,
     voiceFeatureEnabled,
+    syncAnchorPrefsToCloud,
   ]);
 
   useEffect(() => {
@@ -5048,6 +5047,7 @@ ${newsText}
           }
           onTriggerServerDailyRadio={handleTriggerServerDailyRadio}
           onSimulateAiAnchorPushClick={handleSimulateAiAnchorPushClick}
+          onSyncPreferences={syncAnchorPrefsToCloud}
         />
 
         {splashOpen ? <SplashScreen /> : null}

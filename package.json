@@ -14,6 +14,7 @@
     "test:daily-radio-eligibility": "node scripts/test-daily-radio-eligibility.mjs",
     "test:daily-radio-queue": "node scripts/test-daily-radio-queue.mjs",
     "test:active-daily-radio-display": "node scripts/test-active-daily-radio-display.mjs",
+    "test:audio-push-ready": "node scripts/test-audio-push-ready.mjs",
     "setup:petcare-supabase": "bash scripts/setup-petcare-supabase.sh"
   },
   "dependencies": {
