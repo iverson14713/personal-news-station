@@ -1,12 +1,30 @@
 import { DAILY_SCRIPT_TIMEZONE, hourInTimezone, todayYmdInTimezone } from "./dateLocal";
 import type { DailyRadioGenerationSource } from "./dailyRadio";
+import { readDailyRadioState, readUserDisplayName } from "./dailyRadio";
 import type { RadioSlot } from "./radioSlot";
+import { EVENING_RADIO_TIME, MORNING_RADIO_TIME } from "./radioSlot";
 import { appendRadioClosing } from "./radioClosing";
 import {
   DEFAULT_AI_ANCHOR_SETTINGS,
   getAnchorById,
+  readAnchorId,
+  readAnchorPlaybackRate,
+  readAnchorStyleId,
 } from "./aiAnchorSettings";
 import { normalizeAutoRadioDuration } from "./aiDuration";
+import { isInternalAccessActive } from "./hiddenDevUnlock";
+import { getProStatus, isProActive } from "./pro";
+import {
+  GUARDED_PREFERENCE_FIELDS,
+  buildPushTokenUpdatePayload,
+  preferenceFieldsUnchanged,
+} from "../shared/pushPreferenceIsolation.mjs";
+import {
+  logPrefSync,
+  recordPreferenceSyncResult,
+  recordPushTokenSyncDiagnostics,
+  setLastSyncedTimezone,
+} from "./prefSyncTrace";
 import { readStoredSelectedTopics } from "./TopicOnboardingScreen";
 import type { PushEnvironment } from "./plugins/pushEnvironment";
 import {
@@ -35,7 +53,7 @@ function readStoredCustomKeywords(): string[] {
 }
 
 /** 登入後僅在「尚無偏好列」時寫入預設；不可覆寫既有 Pro / 主播 / 時長。 */
-export async function bootstrapServerPreferencesFromLocal(): Promise<boolean> {
+export async function ensureUserNewsPreferencesRow(): Promise<boolean> {
   if (!isSupabaseConfigured()) return true;
 
   const userId = await ensureSupabaseUser();
@@ -51,16 +69,11 @@ export async function bootstrapServerPreferencesFromLocal(): Promise<boolean> {
     .maybeSingle();
 
   if (readError) {
-    console.warn("[DailyRadio] bootstrap read preferences failed", readError.message);
+    console.warn("[DailyRadio] ensure preferences row read failed", readError.message);
     return false;
   }
 
-  if (existing) {
-    console.log("[DailyRadio] bootstrap skipped: preferences row already exists", {
-      user_id_prefix: userId.slice(0, 8),
-    });
-    return true;
-  }
+  if (existing) return true;
 
   const topics = readStoredSelectedTopics();
   const customKeywords = readStoredCustomKeywords();
@@ -73,7 +86,86 @@ export async function bootstrapServerPreferencesFromLocal(): Promise<boolean> {
     eveningRadioEnabled: false,
     morningDurationMinutes: 3,
     eveningDurationMinutes: 3,
+    trigger: "ensure_row",
   });
+}
+
+/** @deprecated 使用 ensureUserNewsPreferencesRow */
+export async function bootstrapServerPreferencesFromLocal(): Promise<boolean> {
+  return ensureUserNewsPreferencesRow();
+}
+
+export async function syncAnchorPreferencesFromLocalStorage(options?: {
+  trigger?: string;
+}): Promise<boolean> {
+  if (!isSupabaseConfigured()) return true;
+
+  const trigger = options?.trigger ?? "local_storage";
+  const userId = await ensureSupabaseUser();
+  const pro = getProStatus();
+  const isProNow = isProActive(pro);
+  const voiceOn = isProNow || isInternalAccessActive();
+  const radio = readDailyRadioState();
+  const anchorId = readAnchorId();
+  const anchorStyleId = readAnchorStyleId();
+  const morningDur = normalizeAutoRadioDuration(radio.morningDuration, isProNow);
+  const eveningDur = normalizeAutoRadioDuration(radio.eveningDuration, isProNow);
+
+  logPrefSync("preference_sync_start", {
+    trigger,
+    userId,
+    proStatus: pro,
+    anchor: `${anchorId}/${getAnchorById(anchorId).voice}/${anchorStyleId}`,
+    morningDuration: morningDur,
+    eveningEnabled: isProNow,
+    eveningDuration: eveningDur,
+  });
+
+  await ensureUserNewsPreferencesRow();
+
+  const ok = await syncUserNewsPreferences({
+    topics: readStoredSelectedTopics(),
+    customKeywords: readStoredCustomKeywords(),
+    displayName: readUserDisplayName(),
+    dailyRadioEnabled: true,
+    morningRadioEnabled: true,
+    eveningRadioEnabled: isProNow,
+    morningRadioTime: radio.scheduledTime || MORNING_RADIO_TIME,
+    eveningRadioTime: radio.eveningTime || EVENING_RADIO_TIME,
+    morningDurationMinutes: morningDur,
+    eveningDurationMinutes: eveningDur,
+    isPro: isProNow,
+    anchorId,
+    anchorVoice: getAnchorById(anchorId).voice,
+    anchorStyle: anchorStyleId,
+    playbackRate: readAnchorPlaybackRate(),
+    voiceFeatureEnabled: voiceOn,
+    trigger,
+  });
+
+  if (ok) {
+    setLastSyncedTimezone(getLocalTimezone());
+    recordPreferenceSyncResult(true);
+    logPrefSync("preference_sync_success", {
+      trigger,
+      userId,
+      proStatus: pro,
+      anchor: `${anchorId}/${getAnchorById(anchorId).voice}/${anchorStyleId}`,
+      morningDuration: morningDur,
+      eveningEnabled: isProNow,
+      eveningDuration: eveningDur,
+    });
+  } else {
+    recordPreferenceSyncResult(false, "sync failed");
+    logPrefSync("preference_sync_error", {
+      trigger,
+      userId,
+      proStatus: pro,
+      error: "syncUserNewsPreferences returned false",
+    });
+  }
+
+  return ok;
 }
 
 export type ServerDailyScript = {
@@ -425,6 +517,7 @@ export async function syncUserNewsPreferences(input: {
   anchorStyle?: string;
   playbackRate?: number;
   voiceFeatureEnabled?: boolean;
+  trigger?: string;
 }): Promise<boolean> {
   if (!isSupabaseConfigured()) return true;
 
@@ -506,8 +599,10 @@ export async function syncPushTokenToSupabase(
 export async function syncPushTokenToSupabaseDetailed(
   pushToken: string,
   pushPlatform: "ios" | "android",
-  pushEnvironment?: PushEnvironment | null
+  pushEnvironment?: PushEnvironment | null,
+  options?: { trigger?: string }
 ): Promise<PushTokenSyncResult> {
+  const trigger = options?.trigger ?? "push_token_sync";
   if (!isSupabaseConfigured()) {
     const error = "supabase not configured";
     console.warn("[Push] token save failed", error);
@@ -535,6 +630,15 @@ export async function syncPushTokenToSupabaseDetailed(
     return { ok: false, error };
   }
 
+  const pro = getProStatus();
+  logPrefSync("push_token_sync_start", {
+    trigger,
+    userId,
+    proStatus: pro,
+    pushToken: trimmed,
+    pushEnvironment: pushEnvironment ?? null,
+  });
+
   console.log("[Push] token save started", {
     user_prefix: userPrefix(userId),
     token_prefix: trimmed.slice(0, 12),
@@ -542,47 +646,100 @@ export async function syncPushTokenToSupabaseDetailed(
     push_environment: pushEnvironment ?? null,
   });
 
-  const patch: Record<string, unknown> = {
-    push_token: trimmed,
-    push_platform: pushPlatform,
-    updated_at: new Date().toISOString(),
-  };
-  if (pushEnvironment === "sandbox" || pushEnvironment === "production") {
-    patch.push_environment = pushEnvironment;
+  const ensured = await ensureUserNewsPreferencesRow();
+  if (!ensured) {
+    const error = "ensure preferences row failed";
+    console.warn("[Push] token save failed", error);
+    return { ok: false, error };
   }
 
-  const topics = readStoredSelectedTopics();
-  const customKeywords = readStoredCustomKeywords();
+  const preferenceSelect = GUARDED_PREFERENCE_FIELDS.join(", ");
+  const { data: beforeRow, error: beforeError } = await supabase
+    .from("news_user_preferences")
+    .select(preferenceSelect)
+    .eq("user_id", userId)
+    .maybeSingle();
 
-  const { error } = await supabase.from("news_user_preferences").upsert(
-    {
-      user_id: userId,
-      topics,
-      custom_keywords: customKeywords,
-      daily_radio_enabled: true,
-      daily_radio_time: "07:00",
-      morning_radio_enabled: true,
-      evening_radio_enabled: false,
-      morning_radio_time: "07:00",
-      evening_radio_time: "17:00",
-      morning_duration_minutes: 3,
-      evening_duration_minutes: 3,
-      timezone: getLocalTimezone(),
-      display_name: null,
-      ...patch,
-    },
-    { onConflict: "user_id" }
-  );
+  if (beforeError) {
+    console.warn("[Push] token save read-before failed", beforeError.message);
+  }
+
+  const patch = buildPushTokenUpdatePayload({
+    pushToken: trimmed,
+    pushPlatform,
+    pushEnvironment: pushEnvironment ?? null,
+    updatedAt: new Date().toISOString(),
+  });
+
+  const { error } = await supabase
+    .from("news_user_preferences")
+    .update(patch)
+    .eq("user_id", userId);
 
   if (error) {
     console.warn("[Push] token save failed", error.message);
+    logPrefSync("preference_sync_error", {
+      trigger,
+      userId,
+      proStatus: pro,
+      pushToken: trimmed,
+      pushEnvironment: pushEnvironment ?? null,
+      error: error.message,
+    });
     return { ok: false, error: error.message };
   }
+
+  const { data: afterRow, error: afterError } = await supabase
+    .from("news_user_preferences")
+    .select(preferenceSelect)
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (afterError) {
+    console.warn("[Push] token save read-after failed", afterError.message);
+  }
+
+  const prefsUnchanged =
+    beforeRow && afterRow
+      ? preferenceFieldsUnchanged(beforeRow, afterRow)
+      : true;
+
+  recordPushTokenSyncDiagnostics({
+    lastTokenPrefix: trimmed.slice(0, 12),
+    lastPreferenceFieldsChanged: prefsUnchanged ? false : true,
+  });
+
+  if (prefsUnchanged) {
+    logPrefSync("push_token_sync_verified_no_preference_change", {
+      trigger,
+      userId,
+      proStatus: pro,
+      pushToken: trimmed,
+      pushEnvironment: pushEnvironment ?? null,
+      preferenceFieldsChanged: false,
+    });
+  } else {
+    console.warn("[Push] token save modified guarded preference fields", {
+      user_prefix: userPrefix(userId),
+      before: beforeRow,
+      after: afterRow,
+    });
+  }
+
+  logPrefSync("push_token_sync_success", {
+    trigger,
+    userId,
+    proStatus: pro,
+    pushToken: trimmed,
+    pushEnvironment: pushEnvironment ?? null,
+    preferenceFieldsChanged: prefsUnchanged ? false : true,
+  });
 
   console.log("[Push] token save succeeded", {
     user_prefix: userPrefix(userId),
     token_prefix: trimmed.slice(0, 12),
     push_environment: pushEnvironment ?? null,
+    preference_fields_unchanged: prefsUnchanged,
   });
   return { ok: true };
 }

@@ -185,7 +185,8 @@ export async function resyncPushTokenForCurrentUser(
   const result = await syncPushTokenToSupabaseDetailed(
     token,
     getPushPlatform(),
-    envDiagnostics.environment
+    envDiagnostics.environment,
+    { trigger: reason }
   );
 
   if (result.ok) {
@@ -228,7 +229,8 @@ async function handleRegistrationToken(tokenValue: string): Promise<void> {
   const result = await syncPushTokenToSupabaseDetailed(
     trimmed,
     getPushPlatform(),
-    envDiagnostics.environment
+    envDiagnostics.environment,
+    { trigger: "push_registration_callback" }
   );
   if (result.ok) {
     const userId = await ensureSupabaseUser();

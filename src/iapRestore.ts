@@ -3,8 +3,14 @@
  * Web 與本機瀏覽器僅顯示提示，不寫入正式 Pro 狀態。
  */
 
-import { applyRestoredPurchase, getProStatus, isProActive, sanitizeNonIapProUnlocks, type ProStatus } from "./pro";
+import { applyRestoredPurchase, clearPurchaseProStatus, getProStatus, isProActive, sanitizeNonIapProUnlocks, type ProStatus } from "./pro";
 import { PRO_IAP_PRODUCT_IDS, type ProPlanTier } from "./proPricing";
+import { resolveSilentEntitlementOutcome } from "../shared/silentEntitlement.mjs";
+import {
+  logPrefSync,
+  recordSilentEntitlementDiagnostics,
+  type SilentEntitlementResult,
+} from "./prefSyncTrace";
 
 export const RESTORE_WEB_MESSAGE = "此功能會在 iOS App 內啟用";
 export const PURCHASE_WEB_MESSAGE = "正式付款將在 iOS App 內啟用";
@@ -336,88 +342,198 @@ async function restorePurchasesOnIosNative(): Promise<RestorePayload | null> {
   return null;
 }
 
+async function fetchCurrentEntitlementsSilent(): Promise<
+  | { kind: "active"; payload: RestorePayload }
+  | { kind: "none" }
+  | { kind: "error"; message: string }
+> {
+  try {
+    const mod = await import("@capgo/native-purchases");
+    const { NativePurchases, PURCHASE_TYPE } = mod;
+
+    if (typeof NativePurchases.isBillingSupported === "function") {
+      const billing = await NativePurchases.isBillingSupported();
+      if (!billing.isBillingSupported) {
+        return { kind: "none" };
+      }
+    }
+
+    const { purchases } = await NativePurchases.getPurchases({
+      productType: PURCHASE_TYPE.SUBS,
+      onlyCurrentEntitlements: true,
+    });
+
+    const payload = pickActiveProPurchase(purchases ?? []);
+    if (payload) return { kind: "active", payload };
+    return { kind: "none" };
+  } catch (error) {
+    return { kind: "error", message: extractErrorMessage(error) };
+  }
+}
+
 export type SyncPurchasesOnLaunchResult = {
   ran: boolean;
   synced: boolean;
   productId?: string;
   status?: ProStatus;
-  skippedReason?:
-    | "not_ios"
-    | "local_pro_active"
-    | "not_required"
-    | "restore_required";
+  entitlementResult?: SilentEntitlementResult;
+  skippedReason?: "not_ios";
+  error?: string;
 };
 
 let launchSyncStarted = false;
 let launchSyncPromise: Promise<SyncPurchasesOnLaunchResult> | null = null;
 
-async function runSyncPurchasesOnLaunch(): Promise<SyncPurchasesOnLaunchResult> {
+async function runSyncPurchasesOnLaunch(trigger = "app_launch"): Promise<SyncPurchasesOnLaunchResult> {
   const onIos = isCapacitorIos();
   logIapDebug("launch sync isCapacitorIos", onIos);
 
-  if (!onIos) {
-    logIapInfo("launch sync skipped (not required)");
-    return { ran: false, synced: false, skippedReason: "not_ios" };
-  }
-
-  const localStatus = getProStatus();
-  const localSnapshot = readLocalSubscriptionSnapshot();
-
-  logIapDebug("launch sync local status", localStatus);
-  logIapDebug("launch sync pns_pro_status_v1", readProStorageRaw());
-
-  if (isLocalProStillActive(localStatus)) {
-    logIapInfo("launch sync skipped (local pro active)", {
-      proExpiresAt: localStatus.proExpiresAt,
-      proSource: localStatus.proSource,
-    });
-    return {
-      ran: true,
-      synced: false,
-      status: localStatus,
-      skippedReason: "local_pro_active",
-    };
-  }
-
-  const noLocalData = localSnapshot == null;
-  const expired =
-    localSnapshot != null && isLocalSubscriptionExpired(localSnapshot);
-
-  if (noLocalData || expired) {
-    logIapInfo("launch restore required", {
-      noLocalData,
-      expired,
-      proExpiresAt: localSnapshot?.proExpiresAt ?? null,
-      proSource: localSnapshot?.proSource ?? null,
-    });
-    return {
-      ran: true,
-      synced: false,
-      status: localStatus,
-      skippedReason: "restore_required",
-    };
-  }
-
-  logIapInfo("launch sync skipped (not required)", {
-    proExpiresAt: localStatus.proExpiresAt,
-    proSource: localStatus.proSource,
+  const localBefore = getProStatus();
+  logPrefSync("silent_entitlement_start", {
+    trigger,
+    proStatus: localBefore,
   });
+
+  if (!onIos) {
+    recordSilentEntitlementDiagnostics({
+      result: "skipped_non_native",
+      productId: null,
+      expiresAt: null,
+      lastError: null,
+    });
+    logPrefSync("silent_entitlement_result", {
+      trigger,
+      proStatus: localBefore,
+      error: "skipped_non_native",
+    });
+    logIapInfo("launch sync skipped (not required)");
+    return {
+      ran: false,
+      synced: false,
+      skippedReason: "not_ios",
+      entitlementResult: "skipped_non_native",
+      status: localBefore,
+    };
+  }
+
+  const query = await fetchCurrentEntitlementsSilent();
+
+  if (query.kind === "error") {
+    recordSilentEntitlementDiagnostics({
+      result: "error",
+      productId: null,
+      expiresAt: null,
+      lastError: query.message,
+    });
+    logPrefSync("silent_entitlement_error", {
+      trigger,
+      proStatus: localBefore,
+      error: query.message,
+    });
+    logIapInfo("launch silent entitlement query failed; preserving local status", {
+      error: query.message,
+    });
+    return {
+      ran: true,
+      synced: false,
+      entitlementResult: "error",
+      status: localBefore,
+      error: query.message,
+    };
+  }
+
+  const outcome = resolveSilentEntitlementOutcome({
+    queryKind: query.kind,
+    localStatus: localBefore,
+    activePayload: query.kind === "active" ? query.payload : null,
+  });
+
+  if (query.kind === "active") {
+    recordSilentEntitlementDiagnostics({
+      result: "active",
+      productId: query.payload.productId ?? null,
+      expiresAt: query.payload.expiresAtIso ?? null,
+      lastError: null,
+    });
+    logPrefSync("silent_entitlement_result", {
+      trigger,
+      proStatus: localBefore,
+      entitlementProductId: query.payload.productId ?? null,
+      expiresAt: query.payload.expiresAtIso ?? null,
+    });
+  } else {
+    recordSilentEntitlementDiagnostics({
+      result: "none",
+      productId: null,
+      expiresAt: null,
+      lastError: null,
+    });
+    logPrefSync("silent_entitlement_result", {
+      trigger,
+      proStatus: localBefore,
+    });
+  }
+
+  if (outcome.applyPurchase && query.kind === "active") {
+    const committed = commitRestoredProStatus(
+      () =>
+        applyRestoredPurchase({
+          expiresAtIso: query.payload.expiresAtIso,
+          expiresAtMs: query.payload.expiresAtMs,
+        }),
+      "silent_entitlement"
+    );
+    const status = committed.ok ? committed.status : getProStatus();
+    logPrefSync("local_pro_applied", {
+      trigger,
+      proStatus: status,
+      entitlementProductId: query.payload.productId ?? null,
+      expiresAt: query.payload.expiresAtIso ?? null,
+    });
+    return {
+      ran: true,
+      synced: committed.ok,
+      productId: query.payload.productId,
+      status,
+      entitlementResult: "active",
+    };
+  }
+
+  if (outcome.downgradePurchase) {
+    const status = clearPurchaseProStatus();
+    logPrefSync("local_pro_applied", {
+      trigger,
+      proStatus: status,
+    });
+    return {
+      ran: true,
+      synced: true,
+      status,
+      entitlementResult: "none",
+    };
+  }
+
   return {
     ran: true,
-    synced: false,
-    status: localStatus,
-    skippedReason: "not_required",
+    synced: outcome.synced,
+    status: getProStatus(),
+    entitlementResult: query.kind,
   };
 }
 
-/** App 啟動時靜默讀取本機訂閱狀態（不呼叫 StoreKit restore / 不觸發 Apple 登入） */
+/** App 啟動時靜默讀取 StoreKit current entitlements（不 restore / 不 AppStore.sync） */
 export async function syncPurchasesOnLaunch(): Promise<SyncPurchasesOnLaunchResult> {
   if (launchSyncStarted && launchSyncPromise) {
     return launchSyncPromise;
   }
   launchSyncStarted = true;
-  launchSyncPromise = runSyncPurchasesOnLaunch();
+  launchSyncPromise = runSyncPurchasesOnLaunch("app_launch");
   return launchSyncPromise;
+}
+
+/** Hidden Dev：重新靜默檢查訂閱（不呼叫 restorePurchases） */
+export async function refreshEntitlementsSilently(): Promise<SyncPurchasesOnLaunchResult> {
+  return runSyncPurchasesOnLaunch("hidden_dev_manual");
 }
 
 export async function restorePurchases(): Promise<RestorePurchasesResult> {

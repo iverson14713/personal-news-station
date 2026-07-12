@@ -1,3 +1,4 @@
+import { App as CapApp } from "@capacitor/app";
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type { CSSProperties } from "react";
 import { Headphones, Home, Settings, Star } from "lucide-react";
@@ -82,12 +83,13 @@ import {
   shouldPreserveActiveOnGenericNotFound,
   type ActiveDailyRadioDisplay,
 } from "./activeDailyRadioDisplay";
-import { ensureSupabaseUser, getSupabaseAuthUserId, initSupabaseAuth, isSupabaseConfigured, onAuthUserIdChange } from "./supabaseClient";
+import { ensureSupabaseUser, getLocalTimezone, getSupabaseAuthUserId, initSupabaseAuth, isSupabaseConfigured, onAuthUserIdChange } from "./supabaseClient";
 import {
   fetchServerDailyScript,
   saveAppGeneratedDailyScript,
   syncUserNewsPreferences,
-  bootstrapServerPreferencesFromLocal,
+  ensureUserNewsPreferencesRow,
+  syncAnchorPreferencesFromLocalStorage,
   triggerServerDailyRadioGeneration,
   type DailyScriptQueryDebug,
   type FetchScriptOptions,
@@ -164,6 +166,7 @@ import {
   pickDefaultChineseVoice,
 } from "./voiceSelection";
 import { restorePurchases, purchaseProSubscription, syncPurchasesOnLaunch } from "./iapRestore";
+import { getLastSyncedTimezone, logPrefSync, setLastSyncedTimezone } from "./prefSyncTrace";
 import {
   getProUpgradeButtonLabel,
   PRO_PRICING,
@@ -1234,7 +1237,11 @@ export default function App() {
     return onAuthUserIdChange((userId) => {
       if (!userId) {
         clearActiveDailyRadioDisplay("logout");
+        return;
       }
+      void ensureUserNewsPreferencesRow().then(() =>
+        syncAnchorPreferencesFromLocalStorage({ trigger: "auth_login" })
+      );
     });
   }, [clearActiveDailyRadioDisplay]);
 
@@ -1305,6 +1312,18 @@ export default function App() {
     const voiceOn = isProNow || isInternalAccessActive();
     const morningDur = normalizeAutoRadioDuration(dailyRadioState.morningDuration, isProNow);
     const eveningDur = normalizeAutoRadioDuration(dailyRadioState.eveningDuration, isProNow);
+
+    logPrefSync("preference_sync_start", {
+      trigger: "app_state",
+      proStatus: pro,
+      anchor: `${anchorId}/${getAnchorById(anchorId).voice}/${anchorStyleId}`,
+      morningDuration: morningDur,
+      eveningEnabled: isProNow,
+      eveningDuration: eveningDur,
+    });
+
+    await ensureUserNewsPreferencesRow();
+
     const ok = await syncUserNewsPreferences({
       topics: selectedTopics,
       customKeywords: savedCustomKeywords,
@@ -1322,6 +1341,7 @@ export default function App() {
       anchorStyle: anchorStyleId,
       playbackRate: anchorPlaybackRate,
       voiceFeatureEnabled: voiceOn,
+      trigger: "app_state",
     });
     if (!ok) {
       console.warn("[DailyRadio] sync preferences to cloud failed", {
@@ -1329,6 +1349,21 @@ export default function App() {
         voice_feature: voiceOn,
         anchor_id: anchorId,
         morning_duration: morningDur,
+      });
+      logPrefSync("preference_sync_error", {
+        trigger: "app_state",
+        proStatus: pro,
+        error: "syncUserNewsPreferences returned false",
+      });
+    } else {
+      setLastSyncedTimezone(getLocalTimezone());
+      logPrefSync("preference_sync_success", {
+        trigger: "app_state",
+        proStatus: pro,
+        anchor: `${anchorId}/${getAnchorById(anchorId).voice}/${anchorStyleId}`,
+        morningDuration: morningDur,
+        eveningEnabled: isProNow,
+        eveningDuration: eveningDur,
       });
     }
     return ok;
@@ -1612,14 +1647,15 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      const result = await syncPurchasesOnLaunch();
-      if (cancelled || !result.status) return;
-      setProStatus(result.status);
-    })();
+    const listener = CapApp.addListener("appStateChange", ({ isActive }) => {
+      if (!isActive) return;
+      const tz = getLocalTimezone();
+      if (getLastSyncedTimezone() && getLastSyncedTimezone() !== tz) {
+        void syncAnchorPreferencesFromLocalStorage({ trigger: "timezone_change" });
+      }
+    });
     return () => {
-      cancelled = true;
+      void listener.then((handle) => handle.remove());
     };
   }, []);
 
@@ -3915,7 +3951,8 @@ ${newsText}
         setProStatus(purchaseSync.status);
       }
       if (userId) {
-        await bootstrapServerPreferencesFromLocal();
+        await ensureUserNewsPreferencesRow();
+        await syncAnchorPreferencesFromLocalStorage({ trigger: "bootstrap" });
       }
       await initRemotePush((info) => {
         handleOpenFromDailyNotificationRef.current(info);

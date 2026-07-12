@@ -313,6 +313,12 @@ export function applyRestoredPurchase(options?: {
   return getProStatus();
 }
 
+/** 清除 StoreKit 購買寫入的 Pro（不影響 internal access） */
+export function clearPurchaseProStatus(): ProStatus {
+  writePurchaseStatusRaw({ proExpiresAt: null, proSource: null });
+  return getProStatus();
+}
+
 export function formatProExpiresAt(iso: string | null): string {
   if (!iso) return "—";
   const d = new Date(iso);

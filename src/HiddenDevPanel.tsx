@@ -22,7 +22,13 @@ import {
   getPushEnvironment,
   type PushEnvironmentDiagnostics,
 } from "./plugins/pushEnvironment";
+import { refreshEntitlementsSilently } from "./iapRestore";
 import { getProStatus, isProActive, proSourceLabel } from "./pro";
+import {
+  getLastPreferenceSyncAt,
+  getPushTokenSyncDiagnostics,
+  getSilentEntitlementDiagnostics,
+} from "./prefSyncTrace";
 import {
   PUSH_NAV_BUILD_MARKER,
   PUSH_NAV_IMPL_VERSION,
@@ -96,6 +102,8 @@ export function HiddenDevPanel({
   const [appBuild, setAppBuild] = useState<string | null>(null);
   const [prefsSyncBusy, setPrefsSyncBusy] = useState(false);
   const [prefsSyncMessage, setPrefsSyncMessage] = useState<string | null>(null);
+  const [entitlementBusy, setEntitlementBusy] = useState(false);
+  const [entitlementMessage, setEntitlementMessage] = useState<string | null>(null);
   const [dbPrefs, setDbPrefs] = useState<Awaited<ReturnType<typeof fetchPushDiagnosticsFromSupabase>>>(null);
 
   useEffect(() => {
@@ -255,6 +263,31 @@ export function HiddenDevPanel({
       });
   };
 
+  const handleSilentEntitlementRefresh = () => {
+    setEntitlementBusy(true);
+    setEntitlementMessage(null);
+    void refreshEntitlementsSilently()
+      .then(async (result) => {
+        onStatusChanged();
+        await refreshPushDiagnostics();
+        setEntitlementMessage(
+          `靜默檢查：${result.entitlementResult ?? "—"}${result.productId ? ` (${result.productId})` : ""}`
+        );
+      })
+      .catch((e) => {
+        setEntitlementMessage(
+          `靜默檢查錯誤：${e instanceof Error ? e.message : "unknown"}`
+        );
+      })
+      .finally(() => {
+        setEntitlementBusy(false);
+      });
+  };
+
+  const silentEntitlement = getSilentEntitlementDiagnostics();
+  const pushTokenSync = getPushTokenSyncDiagnostics();
+  const lastPrefSyncAt = getLastPreferenceSyncAt();
+
   const localRadioState = readDailyRadioState();
   const localAnchorId = readAnchorId();
   const localAnchorStyle = readAnchorStyleId();
@@ -269,7 +302,16 @@ export function HiddenDevPanel({
   );
   const localEveningEnabled = isProActive(proStatus);
   const dbPro = dbPrefs?.voice_feature_enabled === true;
+  const dbEveningEnabled = dbPrefs?.evening_radio_enabled === true;
   const proSourceText = proSourceLabel(proStatus.proSource) ?? proStatus.proSource ?? "—";
+  const durationConsistent =
+    dbPrefs?.morning_duration_minutes === localMorningDur &&
+    dbPrefs?.evening_duration_minutes === localEveningDur;
+  const eveningConsistent =
+    dbEveningEnabled === localEveningEnabled &&
+    (localEveningEnabled
+      ? dbPrefs?.evening_duration_minutes === localEveningDur
+      : true);
 
   return (
     <div style={styles.backdrop} onClick={onClose} role="presentation">
@@ -398,6 +440,32 @@ export function HiddenDevPanel({
               <div style={styles.statusHint}>
                 Pro 一致：{isProActive(proStatus) === dbPro ? "是" : "否（需同步）"}
               </div>
+              <div style={styles.statusHint}>
+                靜默 entitlement 最後檢查：
+                {silentEntitlement.lastCheckedAt
+                  ? new Date(silentEntitlement.lastCheckedAt).toLocaleString("zh-TW")
+                  : "—"}
+              </div>
+              <div style={styles.statusHint}>
+                entitlement 結果：{silentEntitlement.result ?? "—"}
+              </div>
+              <div style={styles.statusHint}>
+                entitlement product id：{silentEntitlement.productId ?? "—"}
+              </div>
+              <div style={styles.statusHint}>
+                entitlement expiresAt：
+                {silentEntitlement.expiresAt
+                  ? new Date(silentEntitlement.expiresAt).toLocaleString("zh-TW")
+                  : "—"}
+              </div>
+              {silentEntitlement.lastError ? (
+                <div style={styles.statusHint}>
+                  entitlement 錯誤：{silentEntitlement.lastError}
+                </div>
+              ) : null}
+              <div style={styles.statusHint}>
+                本機 Pro source：{proSourceText}
+              </div>
               <div style={styles.statusRow}>
                 <span>本機主播</span>
                 <strong>
@@ -435,6 +503,9 @@ export function HiddenDevPanel({
                 早報時長一致：
                 {dbPrefs?.morning_duration_minutes === localMorningDur ? "是" : "否（需同步）"}
               </div>
+              <div style={styles.statusHint}>
+                duration / evening 整體一致：{durationConsistent && eveningConsistent ? "是" : "否（需同步）"}
+              </div>
               <div style={styles.statusRow}>
                 <span>本機晚報</span>
                 <strong>
@@ -455,6 +526,24 @@ export function HiddenDevPanel({
                   ? new Date(dbPrefs.updated_at).toLocaleString("zh-TW")
                   : "—"}
               </div>
+              <div style={styles.statusHint}>
+                偏好最後同步：
+                {lastPrefSyncAt ? new Date(lastPrefSyncAt).toLocaleString("zh-TW") : "—"}
+              </div>
+              <div style={styles.statusHint}>
+                push token 最後同步：
+                {pushTokenSync.lastSyncedAt
+                  ? new Date(pushTokenSync.lastSyncedAt).toLocaleString("zh-TW")
+                  : "—"}
+              </div>
+              <div style={styles.statusHint}>
+                push token sync 改動偏好欄位：
+                {pushTokenSync.lastPreferenceFieldsChanged === true
+                  ? "是（異常）"
+                  : pushTokenSync.lastPreferenceFieldsChanged === false
+                    ? "否"
+                    : "—"}
+              </div>
               {prefsSyncMessage ? (
                 <div style={styles.statusHint}>{prefsSyncMessage}</div>
               ) : null}
@@ -467,6 +556,17 @@ export function HiddenDevPanel({
                 >
                   {prefsSyncBusy ? "同步中…" : "立即同步偏好至 DB"}
                 </button>
+              ) : null}
+              <button
+                type="button"
+                disabled={entitlementBusy}
+                onClick={handleSilentEntitlementRefresh}
+                style={styles.secondary}
+              >
+                {entitlementBusy ? "檢查中…" : "重新靜默檢查訂閱"}
+              </button>
+              {entitlementMessage ? (
+                <div style={styles.statusHint}>{entitlementMessage}</div>
               ) : null}
             </div>
           </DevPanelSection>
