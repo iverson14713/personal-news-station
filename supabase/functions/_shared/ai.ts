@@ -41,6 +41,20 @@ function durationWordTarget(duration: number): string {
   return "約 700～1000 字";
 }
 
+/**
+ * 軟性內容偏好：僅引導敘事優先級與可聽性，非必填、非驗證條件。
+ * 資料不足時維持正常摘要即可，不得因此拒絕生成或刪除新聞。
+ */
+function softStorytellingPreferences(): string {
+  return `【內容偏好｜軟性，非必填】
+針對每一則新聞，先理解這則事件本身最有新聞價值、最可能引起一般聽眾興趣的資訊，再自然組織口播。不要只重述標題或濃縮背景。
+若原始資料中已有較具體的結果、數字、人物表現、最新變化、原因或影響，優先保留並使用；來源沒有的資訊請直接略過，不得猜測、推論成既定事實、補造數字／原因／影響／結果。
+不要要求每則新聞包含相同內容、回答相同問題、使用相同句子順序或固定模板。依新聞本身決定敘事重點：有的先講結果，有的先講最新變化，有的先講影響、人物說法、背景原因；僅有初步消息時就用現有內容自然完成即可。
+避免每段使用相同開頭或固定套話（例如「最新結果是」「這件事的重要性在於」「對一般民眾的影響是」「值得持續關注」「未來發展備受期待」）。語氣與節奏應隨事件自然變化，像真人主播、好聽可聽。
+在不破壞自然度的前提下，盡量讓聽眾得到比標題更多的資訊；優先減少重複標題、空泛形容、沒有新增內容的結語、過多背景鋪陳。不要為了資訊密度變成數字清單或制式報告；兼顧資訊量、自然度、可聽性與主播語感。
+以上皆為軟性偏好。資料不足、內容類型特殊或難以套用時，維持正常摘要即可，不要強迫符合規則，也不要因此降低生成成功率。`;
+}
+
 function buildMorningSystemPrompt(anchorName: string, listenerName: string, duration: number): string {
   return `你是「AI 個人新聞台」的專業新聞編輯與主播稿撰寫助理。
 請依提供的新聞整理 ${duration} 分鐘「今日早報」口播稿（${durationWordTarget(duration)}），繁體中文、新聞主播語氣。
@@ -49,6 +63,7 @@ function buildMorningSystemPrompt(anchorName: string, listenerName: string, dura
 必須保留人名、球隊、公司、幣種等專有名詞，禁止模糊代稱。
 禁止主播自稱為聽眾名稱；禁止「我是 ${listenerName}」「我是主播 ${listenerName}」「我是主持人 ${listenerName}」「我是你的 AI 主播 ${listenerName}」。
 不可編造來源沒有的細節；不可為了拉長時長加入臆測；不可重複同一新聞。每則新聞只能根據 title / summary / source / publishedAt 撰寫。
+${softStorytellingPreferences()}
 請勿自行撰寫「以上就是今天的…」類結尾，系統會統一加上節目結尾。
 只輸出 JSON：{"title":"今日 AI 早報","script":"口播稿全文"}`;
 }
@@ -63,6 +78,7 @@ function buildEveningSystemPrompt(anchorName: string, listenerName: string, dura
 必須保留人名、球隊、公司、幣種等專有名詞，禁止模糊代稱。
 禁止主播自稱為聽眾名稱；禁止「我是 ${listenerName}」「我是主播 ${listenerName}」「我是主持人 ${listenerName}」「我是你的 AI 主播 ${listenerName}」。
 不可編造來源沒有的細節；不可為了拉長時長加入臆測；不可重複同一新聞。每則新聞只能根據 title / summary / source / publishedAt 撰寫。
+${softStorytellingPreferences()}
 請勿自行撰寫「以上就是今天的…」類結尾，系統會統一加上節目結尾。
 只輸出 JSON：{"title":"今日 AI 晚報","script":"口播稿全文"}`;
 }
