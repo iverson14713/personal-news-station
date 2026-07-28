@@ -14,6 +14,12 @@ import {
   sendDailyRadioJob,
   type DailyRadioJobPayload,
 } from "./dailyRadioQueue.ts";
+import {
+  buildEnqueueFailureRevertPatch,
+  buildFailedJobResurrectionPatch,
+  canResurrectFailedJob,
+  parseResurrectionCount,
+} from "./dailyRadioRetry.ts";
 
 export type DispatchResult = {
   user_id: string;
@@ -142,6 +148,171 @@ async function hasActiveJob(
   return true;
 }
 
+type FailedJobRow = {
+  id: string;
+  status: string;
+  error_stage: string | null;
+  duration_minutes: number;
+  attempt_count: number | null;
+};
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function findFailedJob(
+  supabase: any,
+  userId: string,
+  scriptDate: string,
+  radioSlot: RadioSlot
+): Promise<FailedJobRow | null> {
+  const { data } = await supabase
+    .from("news_daily_radio_job_runs")
+    .select("id, status, error_stage, duration_minutes, attempt_count")
+    .eq("user_id", userId)
+    .eq("script_date", scriptDate)
+    .eq("radio_slot", radioSlot)
+    .eq("generation_source", SERVER_SOURCE)
+    .eq("job_type", "full")
+    .eq("status", "failed")
+    .maybeSingle();
+  return (data as FailedJobRow | null) ?? null;
+}
+
+/**
+ * Concurrency-safe failed → pending reset + re-enqueue (same job_id).
+ * Uses WHERE status='failed' so only one Dispatcher wins.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function tryResurrectFailedJob(
+  supabase: any,
+  failedJob: FailedJobRow,
+  args: {
+    user: UserPrefs;
+    radioSlot: RadioSlot;
+    scriptDate: string;
+    priority: number;
+    triggerSource: string;
+    force: boolean;
+  }
+): Promise<DispatchResult> {
+  const resurrectionCount = parseResurrectionCount(failedJob.error_stage);
+  const tz = args.user.timezone || "Asia/Taipei";
+  const withinCatchUp = isBeforeCatchUpDeadline(tz, args.radioSlot);
+  const gate = canResurrectFailedJob({
+    hasCompletedScript: false,
+    hasActiveJob: false,
+    withinCatchUpWindow: withinCatchUp,
+    resurrectionCount,
+    force: args.force,
+  });
+  if (!gate.ok) {
+    return {
+      user_id: args.user.user_id,
+      radio_slot: args.radioSlot,
+      status: "skipped",
+      reason: gate.reason,
+      job_id: failedJob.id,
+    };
+  }
+
+  const now = new Date().toISOString();
+  const patch = buildFailedJobResurrectionPatch({
+    nowIso: now,
+    previousResurrectionCount: resurrectionCount,
+    priority: args.priority,
+    triggerSource: args.triggerSource,
+  });
+
+  const { data: claimed, error: claimError } = await supabase
+    .from("news_daily_radio_job_runs")
+    .update(patch)
+    .eq("id", failedJob.id)
+    .eq("status", "failed")
+    .select("id")
+    .maybeSingle();
+
+  if (claimError) {
+    return {
+      user_id: args.user.user_id,
+      radio_slot: args.radioSlot,
+      status: "skipped",
+      reason: claimError.message,
+      job_id: failedJob.id,
+    };
+  }
+
+  if (!claimed) {
+    return {
+      user_id: args.user.user_id,
+      radio_slot: args.radioSlot,
+      status: "skipped",
+      reason: "concurrent_resurrection_lost",
+      job_id: failedJob.id,
+    };
+  }
+
+  const duration = (
+    failedJob.duration_minutes === 5 || failedJob.duration_minutes === 10
+      ? failedJob.duration_minutes
+      : 3
+  ) as 3 | 5 | 10;
+
+  const payload: DailyRadioJobPayload = {
+    job_id: failedJob.id,
+    user_id: args.user.user_id,
+    script_date: args.scriptDate,
+    radio_slot: args.radioSlot,
+    duration_minutes: duration,
+    job_type: "full",
+    trigger_source: args.triggerSource,
+    force: args.force,
+    priority: args.priority,
+    created_at: now,
+  };
+
+  const msgId = await sendDailyRadioJob(supabase, payload, 0);
+  if (msgId == null) {
+    // Keep the incremented resurrection count from the claim patch (not the pre-claim value).
+    const revert = buildEnqueueFailureRevertPatch(now, resurrectionCount + 1);
+    await supabase
+      .from("news_daily_radio_job_runs")
+      .update(revert)
+      .eq("id", failedJob.id)
+      .eq("status", "pending");
+    return {
+      user_id: args.user.user_id,
+      radio_slot: args.radioSlot,
+      status: "skipped",
+      reason: "enqueue_failed_after_resurrection",
+      job_id: failedJob.id,
+    };
+  }
+
+  await supabase
+    .from("news_daily_radio_job_runs")
+    .update({ pgmq_msg_id: msgId, updated_at: new Date().toISOString() })
+    .eq("id", failedJob.id);
+
+  console.log(
+    JSON.stringify({
+      event: "daily_radio_job_resurrected",
+      user_id: args.user.user_id,
+      radio_slot: args.radioSlot,
+      job_id: failedJob.id,
+      resurrection_count: resurrectionCount + 1,
+      pgmq_msg_id: msgId,
+      note: "pgmq_message_requeued_only_no_news_archive",
+    })
+  );
+
+  return {
+    user_id: args.user.user_id,
+    radio_slot: args.radioSlot,
+    status: "queued",
+    reason: "resurrected_failed_job",
+    job_id: failedJob.id,
+    priority: args.priority,
+  };
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function dispatchDailyRadioJobs(
   supabase: any,
@@ -182,7 +353,8 @@ export async function dispatchDailyRadioJobs(
       candidates.push({
         user,
         slot,
-        sortKey: computePriority(user, slot.slot, slot.duration, args.force, false) * 1000 +
+        sortKey:
+          computePriority(user, slot.slot, slot.duration, args.force, false) * 1000 +
           shuffleKey(user.user_id, scriptDate, slot.slot),
       });
     }
@@ -245,8 +417,26 @@ export async function dispatchDailyRadioJobs(
     const tz = user.timezone || "Asia/Taipei";
     const overdue = !args.force && isSlotOverdue(tz, slot.time);
     const priority = computePriority(user, slot.slot, slot.duration, args.force, overdue);
-    const jobId = crypto.randomUUID();
     const now = new Date().toISOString();
+
+    // Prefer resurrecting existing failed job over inserting (unique constraint).
+    if (!args.force) {
+      const failedJob = await findFailedJob(supabase, user.user_id, scriptDate, slot.slot);
+      if (failedJob) {
+        const resurrected = await tryResurrectFailedJob(supabase, failedJob, {
+          user,
+          radioSlot: slot.slot,
+          scriptDate,
+          priority,
+          triggerSource: args.triggerSource,
+          force: args.force,
+        });
+        results.push(resurrected);
+        continue;
+      }
+    }
+
+    const jobId = crypto.randomUUID();
 
     const { data: inserted, error: insertError } = await supabase
       .from("news_daily_radio_job_runs")
@@ -269,6 +459,20 @@ export async function dispatchDailyRadioJobs(
 
     if (insertError) {
       if (insertError.code === "23505") {
+        // Race: another worker inserted, or a failed row exists — try resurrect once.
+        const failedJob = await findFailedJob(supabase, user.user_id, scriptDate, slot.slot);
+        if (failedJob) {
+          const resurrected = await tryResurrectFailedJob(supabase, failedJob, {
+            user,
+            radioSlot: slot.slot,
+            scriptDate,
+            priority,
+            triggerSource: args.triggerSource,
+            force: args.force,
+          });
+          results.push(resurrected);
+          continue;
+        }
         results.push({
           user_id: user.user_id,
           radio_slot: slot.slot,

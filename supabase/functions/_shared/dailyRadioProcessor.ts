@@ -1023,11 +1023,11 @@ export async function processSingleDailyRadioJob(
       throw new Error(
         radioSlot === "evening"
           ? collection.rawCandidateCount === 0
-            ? "無法取得晚報新新聞（RSS 來源暫無資料）"
-            : "無法取得晚報新新聞（所有候選均為無關或垃圾內容）"
+            ? "NO_RAW_CANDIDATES: 無法取得晚報新新聞（RSS 來源暫無資料）"
+            : "NO_USABLE_CANDIDATES: 無法取得晚報新新聞（所有候選均為無關或垃圾內容）"
           : collection.rawCandidateCount === 0
-            ? "無法取得新聞（RSS 來源暫無資料）"
-            : "無法取得新聞（所有候選均為無關或垃圾內容）"
+            ? "NO_RAW_CANDIDATES: 無法取得新聞（RSS 來源暫無資料）"
+            : "NO_USABLE_CANDIDATES: 無法取得新聞（所有候選均為無關或垃圾內容）"
       );
     }
 

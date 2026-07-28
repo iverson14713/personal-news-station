@@ -13,6 +13,7 @@
     "test:push-navigation-parser": "node scripts/test-push-navigation-parser.mjs",
     "test:daily-radio-eligibility": "node scripts/test-daily-radio-eligibility.mjs",
     "test:daily-radio-queue": "node scripts/test-daily-radio-queue.mjs",
+    "test:daily-radio-job-resurrection": "node scripts/test-daily-radio-job-resurrection.mjs",
     "test:active-daily-radio-display": "node scripts/test-active-daily-radio-display.mjs",
     "test:audio-push-ready": "node scripts/test-audio-push-ready.mjs",
     "test:push-preference-isolation": "node scripts/test-push-preference-isolation.mjs",

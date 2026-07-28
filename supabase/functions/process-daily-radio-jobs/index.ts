@@ -12,6 +12,7 @@ import {
   type DailyRadioJobPayload,
   type QueueMessage,
 } from "../_shared/dailyRadioQueue.ts";
+import { stickyErrorStage } from "../_shared/dailyRadioRetry.ts";
 import {
   processSingleDailyRadioJob,
   type ProcessOptions,
@@ -63,7 +64,7 @@ async function processQueueMessage(
 
   const { data: jobRow } = await supabase
     .from("news_daily_radio_job_runs")
-    .select("id, status, attempt_count, locked_at")
+    .select("id, status, attempt_count, locked_at, error_stage")
     .eq("id", jobId)
     .maybeSingle();
 
@@ -179,7 +180,7 @@ async function processQueueMessage(
         .update({
           status: "failed",
           last_error: errMsg.slice(0, 500),
-          error_stage: "process_job",
+          error_stage: stickyErrorStage(jobRow?.error_stage, "process_job"),
           completed_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         })
@@ -194,7 +195,7 @@ async function processQueueMessage(
       .update({
         status: "retry_wait",
         last_error: errMsg.slice(0, 500),
-        error_stage: "process_job",
+        error_stage: stickyErrorStage(jobRow?.error_stage, "process_job"),
         next_retry_at: new Date(Date.now() + delaySec * 1000).toISOString(),
         locked_at: null,
         locked_by: null,
@@ -216,7 +217,7 @@ async function processQueueMessage(
         .update({
           status: "failed",
           last_error: errMsg.slice(0, 500),
-          error_stage: "worker_exception",
+          error_stage: stickyErrorStage(jobRow?.error_stage, "worker_exception"),
           completed_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         })
@@ -231,7 +232,7 @@ async function processQueueMessage(
       .update({
         status: "retry_wait",
         last_error: errMsg.slice(0, 500),
-        error_stage: "worker_exception",
+        error_stage: stickyErrorStage(jobRow?.error_stage, "worker_exception"),
         next_retry_at: new Date(Date.now() + delaySec * 1000).toISOString(),
         locked_at: null,
         updated_at: new Date().toISOString(),
